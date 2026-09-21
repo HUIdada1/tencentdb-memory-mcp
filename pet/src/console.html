@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh" data-theme="dark">
+<html lang="zh-CN" data-theme="dark">
 <head>
 <meta charset="UTF-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; script-src 'self'">
@@ -8,20 +8,13 @@
 </head>
 <body>
 
-<!-- ====== 液态背景光斑 ====== -->
-<div class="aurora" aria-hidden="true">
-  <div class="blob b1"></div>
-  <div class="blob b2"></div>
-  <div class="blob b3"></div>
-</div>
-
-<!-- ====== 顶栏(可拖) ====== -->
+<!-- ====== 顶栏（可拖） ====== -->
 <header id="bar" class="glass">
   <div class="brand">
     <img src="logo-128.png" alt="">
     <div class="brand-txt">
       <b>TD 记忆守护</b>
-      <span>TENCENTDB · MEMORY · MCP</span>
+      <span>TENCENTDB · MEMORY</span>
     </div>
   </div>
   <nav id="tabs">
@@ -30,31 +23,28 @@
     <button data-tab="skills">技能</button>
     <button data-tab="wiki">Wiki</button>
     <button data-tab="graph">图谱</button>
-    <button data-tab="update">更新</button>
+    <button data-tab="settings">设置</button>
   </nav>
   <div class="bar-ctl">
-    <button class="icon-btn" id="btn-settings" title="设置">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-    </button>
     <button class="icon-btn" id="btn-theme" title="切换主题">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
     </button>
     <span id="health-pill" class="pill">检测中</span>
     <button class="win-btn" id="win-min" title="最小化">—</button>
-    <button class="win-btn" id="win-close" title="关闭">×</button>
+    <button class="win-btn" id="win-close" title="关闭窗口（守护继续运行）">×</button>
   </div>
 </header>
 
 <!-- ====== 主区 ====== -->
 <main id="main">
 
-  <!-- 总览 -->
+  <!-- ====== 总览 ====== -->
   <section data-page="home" class="page active">
     <div class="row stat-row">
-      <div class="stat glass"><i></i><div><b id="s-status">—</b><span>连接状态</span></div></div>
-      <div class="stat glass"><i></i><div><b id="s-latency">—</b><span>延迟</span></div></div>
-      <div class="stat glass"><i></i><div><b id="s-assets">—</b><span>团队资产</span></div></div>
-      <div class="stat glass"><i></i><div><b id="s-mem">—</b><span>记忆条数</span></div></div>
+      <div class="stat glass"><i></i><div><b id="s-status">-</b><span>记忆库</span></div></div>
+      <div class="stat glass"><i></i><div><b id="s-latency">-</b><span>往返延迟</span></div></div>
+      <div class="stat glass"><i></i><div><b id="s-guard">-</b><span>后台守护</span></div></div>
+      <div class="stat glass"><i></i><div><b id="s-queue">-</b><span>待上传队列</span></div></div>
     </div>
     <div class="row two-col">
       <div class="card glass">
@@ -64,15 +54,27 @@
       <div class="card glass">
         <h3>快速检索</h3>
         <div class="quick-search">
-          <input id="qs-input" placeholder="比如:排涝站 数据库 设计">
+          <input id="qs-input" placeholder="比如：排涝站 数据库 设计">
           <button id="qs-go" class="btn-primary">检索</button>
         </div>
         <div id="qs-result" class="result"></div>
       </div>
     </div>
+    <div class="row">
+      <div class="card glass" style="flex:1">
+        <h3>运行信息 <button class="mini" data-act="reload-guard">刷新</button></h3>
+        <div class="kv">
+          <div class="k">最近上传</div><div class="v" id="k-lastpush">-</div>
+          <div class="k">hook 调用次数</div><div class="v" id="k-hookcalls">-</div>
+          <div class="k">守护启动于</div><div class="v" id="k-uptime">-</div>
+          <div class="k">本地服务</div><div class="v" id="k-port">-</div>
+          <div class="k">配置文件</div><div class="v" id="k-cfg">-</div>
+        </div>
+      </div>
+    </div>
   </section>
 
-  <!-- 记忆 -->
+  <!-- ====== 记忆 ====== -->
   <section data-page="memory" class="page">
     <div class="toolbar glass">
       <input id="mem-q" placeholder="检索对话记忆…">
@@ -83,7 +85,7 @@
     <div id="mem-out" class="out glass"></div>
   </section>
 
-  <!-- 技能 -->
+  <!-- ====== 技能 ====== -->
   <section data-page="skills" class="page">
     <div class="toolbar glass">
       <button data-act="skill-list" class="btn-primary">刷新目录</button>
@@ -91,7 +93,7 @@
     <div id="skill-out" class="out glass grid"></div>
   </section>
 
-  <!-- Wiki -->
+  <!-- ====== Wiki ====== -->
   <section data-page="wiki" class="page">
     <div class="toolbar glass">
       <input id="wiki-q" placeholder="检索 Wiki…">
@@ -100,7 +102,7 @@
     <div id="wiki-out" class="out glass"></div>
   </section>
 
-  <!-- 图谱 -->
+  <!-- ====== 图谱 ====== -->
   <section data-page="graph" class="page">
     <div class="toolbar glass">
       <input id="graph-q" placeholder="检索代码图谱…">
@@ -109,89 +111,117 @@
     <div id="graph-out" class="out glass"></div>
   </section>
 
-  <!-- 更新 -->
-  <section data-page="update" class="page">
-    <div class="card glass update-card">
-      <div class="update-head">
-        <img src="logo-128.png" class="update-logo" alt="">
-        <div>
-          <b id="up-current">—</b>
-          <span id="up-status">当前版本</span>
-        </div>
-      </div>
-      <div id="up-progress" class="up-progress"><i style="width:0%"></i></div>
-      <div id="up-message" class="up-message"></div>
-      <div class="up-actions">
-        <button id="up-check" class="btn-primary">检查更新</button>
-        <button id="up-download" class="btn-ghost" style="display:none">下载</button>
-        <button id="up-install" class="btn-primary" style="display:none">重启安装</button>
-        <button id="up-open-releases" class="btn-ghost">查看 Releases</button>
-      </div>
-      <div id="up-notes" class="up-notes"></div>
+  <!-- ====== 设置（分类 tab） ====== -->
+  <section data-page="settings" class="page">
+    <div class="subtabs" id="subtabs">
+      <button data-sub="conn" class="active">记忆库连接</button>
+      <button data-sub="agents">Agent 接入</button>
+      <button data-sub="update">更新</button>
+      <button data-sub="general">通用</button>
     </div>
-  </section>
-</main>
 
-<!-- ====== 设置弹窗 ====== -->
-<div id="settings-mask" class="mask">
-  <div class="settings glass">
-    <header>
-      <b>设置</b>
-      <button id="settings-close" class="icon-btn">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
-      </button>
-    </header>
-
-    <div class="settings-body">
-      <div class="sgroup">
-        <h4>记忆库连接</h4>
-        <label class="row"><span>面板地址</span><input id="set-url" placeholder="http://"></label>
-        <label class="row"><span>User Key</span><input id="set-key" type="password" placeholder="sk-mem-…"></label>
-        <label class="row"><span>Team ID</span><input id="set-team" placeholder="team-…"></label>
-        <label class="row"><span>Agent ID</span><input id="set-agent" placeholder="agt-…"></label>
-        <label class="row"><span>Task ID</span><input id="set-task" placeholder="task-…"></label>
+    <!-- 记忆库连接 -->
+    <div class="subpanel active" data-sub="conn">
+      <div class="card glass">
+        <h3>记忆库连接</h3>
+        <label class="srow"><span>面板地址<span class="q">?<span class="tip">Memory Hub 面板地址（含端口），本地部署形如 http://192.168.1.10:8125，也支持 https 域名。不要带结尾斜杠。</span></span></span>
+          <input id="set-url" placeholder="http://192.168.1.10:8125"></label>
+        <label class="srow"><span>User Key<span class="q">?<span class="tip">业务用户的 API Key，形如 sk-mem-…。在面板「成员管理」创建用户后获取。只保存在本机配置文件里，不会上传。</span></span></span>
+          <input id="set-key" type="password" placeholder="sk-mem-…"></label>
+        <label class="srow"><span>Team ID<span class="q">?<span class="tip">团队 ID，形如 team-…。上传的记忆与检索结果都归属这个团队；可在面板团队切换处查看。</span></span></span>
+          <input id="set-team" placeholder="team-…"></label>
+        <label class="srow"><span>Agent ID<span class="q">?<span class="tip">Agent ID，形如 agt-…。会话记忆关联到这个 Agent；后台采集上传必须填写，否则上传会失败。可在面板 Agents 页创建后填入。</span></span></span>
+          <input id="set-agent" placeholder="agt-…"></label>
+        <label class="srow"><span>Task ID（可选）<span class="q">?<span class="tip">任务 ID，形如 task-…。可以留空：留空时记忆不带任务维度，检索范围更宽。</span></span></span>
+          <input id="set-task" placeholder="task-…"></label>
+        <label class="srow"><span>Block ID（可选）<span class="q">?<span class="tip">检索块标识，默认 chat-memory。一般不用改；仅当面板要求特定取值时才填写。</span></span></span>
+          <input id="set-block" placeholder="chat-memory"></label>
+        <div class="srow-actions">
+          <button class="btn-primary" id="conn-save">保存配置</button>
+          <button class="btn-ghost" id="conn-test">链接测试</button>
+        </div>
+        <div class="banner" id="b-conn"></div>
+        <div class="hint">保存即写入 <code>~/.zcode/tdai-mcp.json</code>（原文件备份为 .bak）。后台守护、MCP 工具、hook 注入共用这一份配置，改完立即生效。</div>
       </div>
+    </div>
 
-      <div class="sgroup">
-        <h4>桌面宠物</h4>
-        <label class="row"><span>置顶</span><input type="checkbox" class="switch" id="set-top"></label>
-        <label class="row"><span>鼠标穿透</span><input type="checkbox" class="switch" id="set-through"></label>
-        <label class="row"><span>不透明度</span><input type="range" id="set-opacity" min="0.3" max="1" step="0.05"></label>
-        <label class="row"><span>轮询间隔</span><input type="number" id="set-interval" min="15" max="600" step="5"><i>秒</i></label>
+    <!-- Agent 接入 -->
+    <div class="subpanel" data-sub="agents">
+      <div class="card glass">
+        <h3>第一次使用：Agent 怎么连？</h3>
+        <div class="guide">
+          <b>装一次就永久生效</b>，之后每次对话都不用手动指定任何东西：
+          <ol>
+            <li><b>后台自动（推荐，无需额外配置）</b>：本应用已内置后台守护——运行期间自动采集各 Agent 的会话增量上传到记忆库，并在本机 <code>127.0.0.1:<span class="port-inline">8100</span></code> 提供记忆检索服务。关闭窗口后仍在托盘后台运行，配合「开机自启」即全程无感。</li>
+            <li><b>MCP 接入（让 Agent 主动检索）</b>：点「一键接入」，把 <code>tdai</code> 记忆工具写进本机已安装客户端（ZCode CLI / Claude Code / Cursor / Codex）的配置，并追加全局指令文件。之后每个新会话自动携带记忆工具，模型需要时自主调用。</li>
+            <li><b>Claude Code hook</b>：一键接入会同时注入 <code>UserPromptSubmit</code> hook——每次提问前自动检索相关记忆并注入上下文，不依赖模型主动调用。首次使用时 Claude Code 会提示「信任」，点一次即可。</li>
+          </ol>
+          <div class="hint">接入目标是本程序自身（不需要安装 Node，也不需要源码目录）。未安装的客户端会自动跳过。</div>
+        </div>
+        <div class="srow-actions">
+          <button class="btn-primary" id="agents-register">一键接入</button>
+          <button class="btn-ghost" id="agents-reload">刷新状态</button>
+          <button class="btn-ghost" id="open-web-console">打开网页控制台</button>
+        </div>
+        <div class="banner" id="b-agents"></div>
+        <div class="status-list" id="agents-list"><div class="empty">检测中…</div></div>
+        <div class="out" id="agents-log" style="display:none"></div>
       </div>
+    </div>
 
-      <div class="sgroup">
-        <h4>外观</h4>
-        <label class="row"><span>主题</span>
+    <!-- 更新 -->
+    <div class="subpanel" data-sub="update">
+      <div class="card glass update-card">
+        <div class="update-head">
+          <img src="logo-128.png" class="update-logo" alt="">
+          <div>
+            <b id="up-current">-</b>
+            <span id="up-status">当前版本</span>
+          </div>
+        </div>
+        <div id="up-progress" class="up-progress"><i style="width:0%"></i></div>
+        <div id="up-message" class="up-message"></div>
+        <div class="up-actions">
+          <button id="up-check" class="btn-primary">检查更新</button>
+          <button id="up-download" class="btn-ghost" style="display:none">下载</button>
+          <button id="up-install" class="btn-primary" style="display:none">重启安装</button>
+          <button id="up-open-releases" class="btn-ghost">查看 Releases</button>
+        </div>
+        <div id="up-notes" class="up-notes"></div>
+        <div class="hint">安装版支持一键下载安装；便携版请到 Releases 手动下载替换，配置与运行数据（<code>~/.zcode/</code>）不受影响。</div>
+      </div>
+    </div>
+
+    <!-- 通用 -->
+    <div class="subpanel" data-sub="general">
+      <div class="card glass">
+        <h3>通用</h3>
+        <label class="srow"><span>主题</span>
           <select id="set-theme">
             <option value="dark">深色</option>
             <option value="light">浅色</option>
             <option value="auto">跟随系统</option>
           </select>
         </label>
+        <label class="srow"><span>开机自启<span class="q">?<span class="tip">开机后在后台静默启动（不弹窗），只在托盘常驻并自动采集上传，可随时从托盘打开控制台。</span></span></span>
+          <input type="checkbox" class="switch" id="set-autostart"></label>
+        <label class="srow"><span>自动检查更新<span class="q">?<span class="tip">每小时静默检查一次新版本，发现更新时弹系统通知；下载与安装始终由你手动确认。</span></span></span>
+          <input type="checkbox" class="switch" id="set-autoupdate"></label>
+        <label class="srow"><span>关闭窗口时<span class="q">?<span class="tip">点右上角 × 只关闭窗口，后台守护继续运行（托盘图标可再次打开）。彻底退出请用托盘菜单「退出」。</span></span></span>
+          <span class="muted">守护继续后台运行</span></label>
       </div>
-
-      <div class="sgroup">
-        <h4>系统</h4>
-        <label class="row"><span>开机自启</span><input type="checkbox" class="switch" id="set-autostart"></label>
-        <label class="row"><span>自动检查更新</span><input type="checkbox" class="switch" id="set-autoupdate"></label>
-      </div>
-
-      <div class="sgroup">
-        <h4>AI 人格(可选)</h4>
-        <label class="row"><span>启用</span><input type="checkbox" class="switch" id="set-ai-on"></label>
-        <label class="row"><span>Endpoint</span><input id="set-ai-endpoint" placeholder="https://api.openai.com/v1"></label>
-        <label class="row"><span>API Key</span><input id="set-ai-key" type="password" placeholder="sk-…"></label>
-        <label class="row"><span>Model</span><input id="set-ai-model" placeholder="deepseek-chat"></label>
+      <div class="card glass">
+        <h3>关于</h3>
+        <div class="kv">
+          <div class="k">应用版本</div><div class="v" id="a-ver">-</div>
+          <div class="k">程序路径</div><div class="v" id="a-exe">-</div>
+          <div class="k">网页控制台</div><div class="v"><a href="#" id="a-console">-</a></div>
+          <div class="k">配置文件</div><div class="v" id="a-cfg">-</div>
+        </div>
       </div>
     </div>
-
-    <footer>
-      <button id="settings-save" class="btn-primary">保存</button>
-      <button id="settings-cancel" class="btn-ghost">取消</button>
-    </footer>
-  </div>
-</div>
+  </section>
+</main>
 
 <script src="console.js"></script>
 </body>

@@ -1,7 +1,8 @@
 # 发布流水线：手动触发（workflow_dispatch）。
-# 双产物：① Electron 宠物应用（electron-builder --publish always，NSIS 安装版 + 便携版 + latest.yml，
+# 双产物：① Electron 控制台应用（electron-builder --publish always，NSIS 安装版 + 便携版 + latest.yml，
 #   安装版走 electron-updater 热更新，便携版读 latest.yml 比对版本提示手动下载）；② Node SEA 单文件守护进程 exe。
 # 参照 AgentHub 发版模式；版本号严格递增，tag 一经发布不可复用。
+# 注意：appId（com.tdai.pet）不可更改，改它会让老用户的升级路径断裂（NSIS 升级按 appId 派生 GUID 识别）。
 name: Release
 
 on:
@@ -30,11 +31,13 @@ jobs:
           cache: npm
           cache-dependency-path: pet/package-lock.json
 
-      - name: 校验版本号（root/pet 一致 + 与输入一致 + 严格高于 GitHub 最新 tag）
+      - name: 校验版本号（root/pet/daemon/mcp 一致 + 与输入一致 + 严格高于 GitHub 最新 tag）
         shell: bash
         run: |
           PET_VERSION="$(node -p "require('./pet/package.json').version")"
           ROOT_VERSION="$(node -p "require('./package.json').version")"
+          DAEMON_VER="$(node -e "process.stdout.write((require('fs').readFileSync('daemon/tdai-daemon.js','utf8').match(/APP_VER = '([^']+)'/)||[])[1]||'')")"
+          MCP_VER="$(node -e "process.stdout.write((require('fs').readFileSync('mcp/tdai-mcp.js','utf8').match(/SERVER_VER = '([^']+)'/)||[])[1]||'')")"
           INPUT_VERSION="${{ inputs.version }}"
           # electron-builder 按 v{version} 创建 tag，已存在即失败；tag 一旦发布版本号永久不可复用
           EXISTING_TAGS="$(git ls-remote --tags https://github.com/HUIdada1/tencentdb-memory-mcp.git 'refs/tags/v*' | sed 's#.*refs/tags/##;s#\^{}##' || true)"
@@ -57,12 +60,18 @@ jobs:
             if (latest && !gt(pet, latest)) { console.error('版本 ' + pet + ' 必须严格高于 GitHub 当前最新 tag ' + latest + '（tag 一旦发布不可复用，请升级版本号）'); process.exit(1); }
             console.log('版本校验通过：' + pet + (latest ? ' > ' + latest : '（首个版本）'));
           " "$PET_VERSION" "$ROOT_VERSION" "$INPUT_VERSION" "$LATEST_TAG"
+          # 代码内版本常量必须同步：否则 exe/应用界面会显示混淆的版本号
+          if [ "$DAEMON_VER" != "$PET_VERSION" ]; then echo "::error::daemon APP_VER ($DAEMON_VER) 与版本号 $PET_VERSION 不一致"; exit 1; fi
+          if [ "$MCP_VER" != "$PET_VERSION" ]; then echo "::error::mcp SERVER_VER ($MCP_VER) 与版本号 $PET_VERSION 不一致"; exit 1; fi
+          echo "版本常量一致：daemon=$DAEMON_VER mcp=$MCP_VER"
 
       - name: 冒烟自检（源码运行）
         shell: bash
         run: |
           node daemon/tdai-daemon.js health
           node mcp/tdai-mcp.js list
+          node test/register.test.js
+          node test/functional.test.js
 
       - name: 构建 SEA 单文件守护进程 exe
         shell: bash
@@ -81,7 +90,7 @@ jobs:
       - name: 安装依赖（pet）
         run: npm ci --prefix pet
 
-      - name: 打包并发布 Electron 宠物应用（NSIS + 便携版 + latest.yml）
+      - name: 打包并发布 Electron 控制台应用（NSIS + 便携版 + latest.yml）
         run: npx electron-builder --win --publish always
         working-directory: pet
         env:
@@ -102,7 +111,7 @@ jobs:
           VERSION="$(node -p "require('./pet/package.json').version")"
           # 用带 tag 的直链（无 latest 路由索引延迟）；安装版与便携版的更新检查都依赖 latest.yml
           YML_URL="https://github.com/HUIdada1/tencentdb-memory-mcp/releases/download/v${VERSION}/latest.yml"
-          SETUP_URL="https://github.com/HUIdada1/tencentdb-memory-mcp/releases/download/v${VERSION}/TDMemoryPet-Setup-${VERSION}.exe"
+          SETUP_URL="https://github.com/HUIdada1/tencentdb-memory-mcp/releases/download/v${VERSION}/TDMemoryGuard-Setup-${VERSION}.exe"
           DAEMON_URL="https://github.com/HUIdada1/tencentdb-memory-mcp/releases/download/v${VERSION}/tdai-daemon-v${VERSION}-win-x64.exe"
           for i in 1 2 3 4 5 6; do
             if curl -fsSL "$YML_URL" 2>/dev/null | grep -q "^version: ${VERSION}$" \

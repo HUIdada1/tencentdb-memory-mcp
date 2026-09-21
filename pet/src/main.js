@@ -1,66 +1,45 @@
-// TD AI Memory Pet — Electron 主进程
-// 双窗口:Pet(透明置顶小窗) + Console(管理面板)
-// 能力:开机自启 / 主题 / 自更新 / 设置弹窗
+// main.js — TD 记忆守护·控制台应用主进程
+// 形态：常驻托盘 + 控制台窗口；应用自身即后台守护（采集上传 + 127.0.0.1:8100 recall 服务）。
+// 配置真源：~/.zcode/tdai-mcp.json（守护进程 / MCP / hook 共用同一份，四处不再各存一份）；
+//          应用偏好（主题/自启/自动更新）另存 ~/.zcode/tdai-app.json。
 'use strict';
-const { app, BrowserWindow, Tray, Menu, ipcMain, screen, globalShortcut, shell, nativeTheme } = require('electron');
+const { app, BrowserWindow, Tray, Menu, ipcMain, shell, nativeTheme, globalShortcut } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
-const tdai = require(path.join(__dirname, '..', 'core', 'tdai-core.js'));
+
+const guard = require('./guard.js');
+const register = require('./register.js');
 const updater = require('./updater.js');
 
 const IS_DEV = !app.isPackaged;
-const CFG_DIR = path.join(os.homedir(), '.tdai-pet');
-const CFG_PATH = path.join(CFG_DIR, 'config.json');
+const HOME = os.homedir();
+const PREF_PATH = path.join(HOME, '.zcode', 'tdai-app.json');
+const LEGACY_PREF_PATH = path.join(HOME, '.tdai-pet', 'config.json'); // 0.3.x 的应用偏好，迁移一次
+// 开机自启：只驻托盘不弹窗（argv 与 Chromium switch 两处都认，Windows 下二者取值口径不同）
+const HIDDEN_BOOT = process.argv.includes('--hidden') || app.commandLine.hasSwitch('hidden');
 
-let petWin = null;
+// dev 走仓库根，打包走 resources/（extraResources 铺平了 core / mcp / daemon）
+function resPath(...p) {
+  return app.isPackaged ? path.join(process.resourcesPath, ...p) : path.join(__dirname, '..', '..', ...p);
+}
+const DAEMON_JS = resPath('daemon', 'tdai-daemon.js');
+const MCP_JS = resPath('mcp', 'tdai-mcp.js');
+
+const dm = require(DAEMON_JS);                       // 守护实现（同一份，不做二次开发）
+const tdai = require(resPath('core', 'tdai-core.js'));
+
 let consoleWin = null;
 let tray = null;
 let core = null;
-let cfg = null;
-let pollTimer = null;
-let lastHealth = { ok: false, at: 0, latencyMs: 0, message: '未初始化' };
+let prefs = null;
+let healthTimer = null;
+let lastHealth = { running: false, health: null };
 
-/* ---------- 配置 ---------- */
+/* ---------- 应用偏好（主题 / 自启 / 自动更新） ---------- */
 
-function defaultCfg() {
-  return {
-    panel: {
-      url: '',
-      userKey: '',
-      teamId: '',
-      agentId: '',
-      taskId: '',
-    },
-    pet: {
-      x: null, y: null,
-      size: 200,
-      alwaysOnTop: true,
-      clickThrough: false,
-      opacity: 1.0,
-    },
-    sync: {
-      intervalSec: 60,
-    },
-    ai: {
-      enabled: false,
-      endpoint: '',
-      apiKey: '',
-      model: 'deepseek-chat',
-    },
-    ui: { theme: 'dark' },            // dark | light | auto
-    system: { autoStart: false },      // 开机自启
-    update: { autoCheck: true },
-  };
-}
+function defaultPrefs() { return { ui: { theme: 'dark' }, system: { autoStart: false }, update: { autoCheck: true } }; }
 
-function loadCfg() {
-  try { fs.mkdirSync(CFG_DIR, { recursive: true }); } catch (_) {}
-  let disk = {};
-  try { disk = JSON.parse(fs.readFileSync(CFG_PATH, 'utf8')); } catch (_) {}
-  cfg = mergeDeep(defaultCfg(), disk);
-  return cfg;
-}
 function mergeDeep(a, b) {
   const out = Object.assign({}, a);
   for (const k of Object.keys(b || {})) {
@@ -69,196 +48,198 @@ function mergeDeep(a, b) {
   }
   return out;
 }
-function saveCfg() { fs.writeFileSync(CFG_PATH, JSON.stringify(cfg, null, 2)); }
 
-/* ---------- 主题 ---------- */
+function loadPrefs() {
+  let disk = null;
+  try { disk = JSON.parse(fs.readFileSync(PREF_PATH, 'utf8')); } catch (_) { }
+  if (!disk) {
+    try {
+      const legacy = JSON.parse(fs.readFileSync(LEGACY_PREF_PATH, 'utf8'));
+      if (legacy) disk = { ui: legacy.ui, system: legacy.system, update: legacy.update };
+    } catch (_) { }
+  }
+  prefs = mergeDeep(defaultPrefs(), disk || {});
+  return prefs;
+}
+
+function savePrefs() {
+  try { fs.mkdirSync(path.dirname(PREF_PATH), { recursive: true }); fs.writeFileSync(PREF_PATH, JSON.stringify(prefs, null, 2)); } catch (_) { }
+}
+
+/* ---------- 主题 / 自启 ---------- */
+
 function resolveTheme() {
-  const t = cfg.ui.theme;
-  if (t === 'auto') return nativeTheme.shouldUseDarkColors ? 'dark' : 'light';
-  return t;
+  if (prefs.ui.theme === 'auto') return nativeTheme.shouldUseDarkColors ? 'dark' : 'light';
+  return prefs.ui.theme === 'light' ? 'light' : 'dark';
 }
 function applyTheme() {
-  const t = resolveTheme();
-  if (t === 'dark') { nativeTheme.themeSource = 'dark'; } else if (t === 'light') { nativeTheme.themeSource = 'light'; } else { nativeTheme.themeSource = 'system'; }
-  for (const w of [petWin, consoleWin]) {
-    if (w && !w.isDestroyed()) w.webContents.send('theme', t);
-  }
+  nativeTheme.themeSource = prefs.ui.theme === 'auto' ? 'system' : (prefs.ui.theme === 'light' ? 'light' : 'dark');
+  broadcast('theme', resolveTheme());
 }
-
-/* ---------- 开机自启 ---------- */
 function applyAutoStart() {
   if (IS_DEV) return; // 开发模式不动注册表
-  const enabled = !!cfg.system.autoStart;
   try {
-    app.setLoginItemSettings({
-      openAtLogin: enabled,
-      openAsHidden: true,
-      path: process.execPath,
-      args: [],
-    });
-  } catch (e) { console.error('autoStart 设置失败:', e.message); }
+    app.setLoginItemSettings({ openAtLogin: !!prefs.system.autoStart, openAsHidden: true, path: process.execPath, args: ['--hidden'] });
+  } catch (e) { console.error('开机自启设置失败:', e.message); }
 }
 
-/* ---------- core 实例(跟着 cfg.panel 走) ---------- */
-function rebuildCore() {
-  // 若 pet 配置里 userKey 为空,尝试从 ZCode MCP 配置迁移
-  if (!cfg.panel.userKey) {
-    try {
-      const mcpCfg = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.zcode', 'tdai-mcp.json'), 'utf8'));
-      if (mcpCfg.userKey) {
-        cfg.panel.userKey = mcpCfg.userKey;
-        saveCfg();
-      }
-    } catch (_) {}
-  }
-  core = tdai.create({
-    panelUrl: cfg.panel.url,
-    userKey: cfg.panel.userKey,
-    teamId: cfg.panel.teamId,
-    agentId: cfg.panel.agentId,
-    taskId: cfg.panel.taskId,
-  });
+/* ---------- 记忆库连接（真源 ~/.zcode/tdai-mcp.json） ---------- */
+
+function publicConn() { return dm.readPublicConfig(dm.loadConfig()); }
+
+function rebuildCore() { core = tdai.create(); }
+
+function saveConn(body) {
+  const cfg = dm.writeConfig(body || {});           // 白名单字段 + 跑前备份 .bak
+  rebuildCore();
+  guard.restart(dm).catch(() => { });
+  return dm.readPublicConfig(cfg);
 }
 
-/* ---------- 轮询 ---------- */
-async function pollOnce(reason) {
-  if (!core) return;
+// 链接测试：面板可达性 + User Key 认证（与网页控制台同口径）
+async function testConn() {
+  const cfg = dm.loadConfig();
   const t0 = Date.now();
-  const r = await core.health();
-  lastHealth = {
-    ok: !!(r.ok && r.data && r.data.auth && r.data.auth.ok),
-    at: Date.now(),
-    latencyMs: Date.now() - t0,
-    message: r.ok
-      ? (r.data && r.data.auth && r.data.auth.ok ? '已连接' : (r.data.auth.hint || r.data.auth.error || '异常'))
-      : (r.hint || r.error || '异常'),
-    raw: r,
-  };
-  broadcast('health', lastHealth, reason);
-}
-function broadcast(channel, payload, reason) {
-  for (const w of [petWin, consoleWin]) {
-    if (w && !w.isDestroyed()) w.webContents.send(channel, { payload, reason: reason || '' });
+  if (!cfg.panelUrl || !cfg.userKey) return { nas: false, auth: false, latencyMs: 0, hint: '请先填写面板地址与 User Key' };
+  try {
+    const api = dm.mkApi(cfg);
+    const r = await api('/skill/list', { method: 'POST', body: { team_id: cfg.teamId || undefined }, timeout: 8000 });
+    const ok = r.status >= 200 && r.status < 300;
+    let hint = '';
+    if (!ok) hint = (r.status === 401 || r.status === 403) ? 'User Key 可能失效' : `面板返回 HTTP ${r.status}`;
+    return { nas: ok, auth: ok, latencyMs: Date.now() - t0, hint };
+  } catch (e) {
+    return { nas: false, auth: false, latencyMs: Date.now() - t0, hint: '面板不可达（' + e.message + '）' };
   }
 }
-function startPolling() {
-  stopPolling();
-  pollOnce('boot');
-  pollTimer = setInterval(() => pollOnce('tick'), Math.max(15, cfg.sync.intervalSec) * 1000);
-}
-function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
 
-/* ---------- Pet 窗口 ---------- */
-function createPet() {
-  const size = cfg.pet.size;
-  const d = screen.getPrimaryDisplay().workAreaSize;
-  const x = cfg.pet.x != null ? cfg.pet.x : d.width - size - 24;
-  const y = cfg.pet.y != null ? cfg.pet.y : d.height - size - 24;
+/* ---------- 健康轮询（内置/外部守护都能查，答案一致） ---------- */
 
-  petWin = new BrowserWindow({
-    width: size, height: size, x, y,
-    frame: false, transparent: true, resizable: false,
-    skipTaskbar: true, hasShadow: false,
-    alwaysOnTop: cfg.pet.alwaysOnTop,
-    opacity: cfg.pet.opacity,
-    webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
-      contextIsolation: true, nodeIntegration: false,
-    },
-  });
-  petWin.setAlwaysOnTop(cfg.pet.alwaysOnTop, 'screen-saver');
-  petWin.setIgnoreMouseEvents(cfg.pet.clickThrough, { forward: true });
-  petWin.loadFile(path.join(__dirname, 'pet.html'));
-  petWin.on('moved', () => {
-    if (!petWin) return;
-    const [x, y] = petWin.getPosition();
-    cfg.pet.x = x; cfg.pet.y = y; saveCfg();
-  });
-  petWin.on('closed', () => { petWin = null; });
+function broadcast(channel, payload) {
+  for (const w of BrowserWindow.getAllWindows()) {
+    if (!w.isDestroyed()) w.webContents.send(channel, payload);
+  }
 }
 
-/* ---------- Console 窗口 ---------- */
+async function pollHealth() {
+  const h = await guard.health();
+  lastHealth = Object.assign(guard.localStatus(), { health: h && h.json ? h.json : null });
+  broadcast('health', lastHealth);
+  return lastHealth;
+}
+function startPolling() { stopPolling(); pollHealth(); healthTimer = setInterval(pollHealth, 30000); }
+function stopPolling() { if (healthTimer) { clearInterval(healthTimer); healthTimer = null; } }
+
+/* ---------- 控制台窗口 ---------- */
+
 function createConsole() {
-  if (consoleWin && !consoleWin.isDestroyed()) { consoleWin.focus(); return; }
+  if (consoleWin && !consoleWin.isDestroyed()) { consoleWin.show(); consoleWin.focus(); return; }
   consoleWin = new BrowserWindow({
-    width: 1140, height: 740, minWidth: 980, minHeight: 620,
-    frame: false,
-    backgroundColor: resolveTheme() === 'dark' ? '#08080d' : '#eceef4',
-    icon: path.join(__dirname, 'logo-128.png'),
+    width: 1080, height: 720, minWidth: 920, minHeight: 600,
+    frame: false, show: false,
+    backgroundColor: resolveTheme() === 'dark' ? '#0b0c10' : '#f3f4f8',
+    icon: resPath('build', 'icon.png'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true, nodeIntegration: false,
     },
   });
   consoleWin.loadFile(path.join(__dirname, 'console.html'));
+  consoleWin.once('ready-to-show', () => consoleWin.show());
   consoleWin.on('closed', () => { consoleWin = null; });
 }
 
-/* ---------- Tray ---------- */
+/* ---------- 托盘 ---------- */
+
 function createTray() {
-  const iconPath = IS_DEV
-    ? path.join(__dirname, '..', '..', 'build', 'tray.png')
-    : path.join(process.resourcesPath, 'build', 'tray.png');
+  const iconPath = app.isPackaged ? path.join(process.resourcesPath, 'build', 'tray.png') : resPath('build', 'tray.png');
   tray = new Tray(iconPath);
   tray.setToolTip('TD 记忆守护');
   refreshTrayMenu();
   tray.on('click', createConsole);
   tray.on('double-click', createConsole);
 }
+
 function refreshTrayMenu() {
   if (!tray) return;
   tray.setContextMenu(Menu.buildFromTemplate([
-    { label: '控制台', click: createConsole },
+    { label: '打开控制台', click: createConsole },
+    { label: `打开网页控制台（:${guard.port()}）`, click: () => shell.openExternal(`http://127.0.0.1:${guard.port()}/`) },
     { type: 'separator' },
     { label: '检查更新', click: () => updater.check(true) },
-    { label: '开机自启', type: 'checkbox', checked: !!cfg.system.autoStart, click: (i) => {
-      cfg.system.autoStart = i.checked; saveCfg(); applyAutoStart();
-    } },
+    {
+      label: '开机自启（后台静默）', type: 'checkbox', checked: !!prefs.system.autoStart, click: (i) => {
+        prefs.system.autoStart = i.checked; savePrefs(); applyAutoStart(); broadcast('prefs', prefs);
+      },
+    },
     { type: 'separator' },
     { label: '退出', click: () => app.quit() },
   ]));
 }
 
 /* ---------- IPC ---------- */
-ipcMain.handle('get-config', () => cfg);
-ipcMain.handle('set-config', (_e, patch) => {
-  cfg = mergeDeep(cfg, patch || {});
-  saveCfg();
-  rebuildCore();
-  startPolling();
+
+ipcMain.handle('app-info', () => ({
+  version: app.getVersion(),
+  exePath: process.execPath,
+  mcpJs: MCP_JS,
+  daemonJs: DAEMON_JS,
+  packaged: app.isPackaged,
+  port: guard.port(),
+  cfgPath: dm.CFG_PATH,
+}));
+
+ipcMain.handle('conn-load', () => publicConn());
+ipcMain.handle('conn-save', (_e, body) => saveConn(body));
+ipcMain.handle('conn-test', () => testConn());
+
+ipcMain.handle('prefs-load', () => prefs);
+ipcMain.handle('prefs-save', (_e, patch) => {
+  prefs = mergeDeep(prefs, patch || {});
+  savePrefs();
   applyAutoStart();
   applyTheme();
-  if (petWin && !petWin.isDestroyed()) {
-    petWin.setAlwaysOnTop(cfg.pet.alwaysOnTop, 'screen-saver');
-    petWin.setIgnoreMouseEvents(cfg.pet.clickThrough, { forward: true });
-    petWin.setOpacity(cfg.pet.opacity);
-  }
+  updater.setAutoCheck(prefs.update.autoCheck);
   refreshTrayMenu();
-  broadcast('config', cfg, 'set');
-  return cfg;
+  return prefs;
 });
+
+ipcMain.handle('guard-status', async () => {
+  const h = await guard.health();
+  return Object.assign(guard.localStatus(), { health: h && h.json ? h.json : null });
+});
+ipcMain.handle('guard-push', () => guard.push());
+ipcMain.handle('guard-restart', () => guard.restart(dm));
+
+ipcMain.handle('agents-status', () => register.status({ home: HOME, exePath: process.execPath }));
+ipcMain.handle('agents-register', () => {
+  const results = register.register({ home: HOME, exePath: process.execPath, mcpJs: MCP_JS, daemonJs: DAEMON_JS });
+  return { results, items: register.status({ home: HOME, exePath: process.execPath }) };
+});
+
 ipcMain.handle('get-health', () => lastHealth);
-ipcMain.handle('refresh', async () => { await pollOnce('manual'); return lastHealth; });
+ipcMain.handle('refresh', () => pollHealth());
 
 ipcMain.handle('tool-call', async (_e, { tool, args }) => {
   if (!core) return { ok: false, error: 'core 未初始化' };
   const map = {
-    'memory_search': () => core.memorySearch(args),
-    'memory_layers': () => core.memoryLayers(args),
-    'team_assets': () => core.teamAssets(args),
-    'skill_list': () => core.skillList(args),
-    'skill_get': () => core.skillGet(args),
-    'wiki_search': () => core.wikiSearch(args),
-    'wiki_read': () => core.wikiRead(args),
-    'codegraph_search': () => core.codegraphSearch(args),
-    'codegraph_explore': () => core.codegraphExplore(args),
+    memory_search: () => core.memorySearch(args),
+    memory_layers: () => core.memoryLayers(args),
+    team_assets: () => core.teamAssets(args),
+    my_agents: () => core.myAgents(args),
+    skill_list: () => core.skillList(args),
+    skill_get: () => core.skillGet(args),
+    wiki_search: () => core.wikiSearch(args),
+    wiki_read: () => core.wikiRead(args),
+    codegraph_search: () => core.codegraphSearch(args),
+    codegraph_explore: () => core.codegraphExplore(args),
   };
   const fn = map[tool];
   if (!fn) return { ok: false, error: `未知工具 ${tool}` };
   try { return await fn(); } catch (e) { return { ok: false, error: e.message }; }
 });
 
-// 更新相关
+// 更新（安装版 electron-updater / 便携版 latest.yml 比对）
 ipcMain.handle('update-get', () => updater.getStatus());
 ipcMain.handle('update-check', () => updater.check(true));
 ipcMain.handle('update-download', () => updater.download());
@@ -266,35 +247,33 @@ ipcMain.handle('update-install', () => updater.triggerInstall());
 ipcMain.handle('update-open-releases', () => updater.openReleases());
 ipcMain.handle('update-open-repo', () => updater.openRepo());
 
-// 窗口控制
+// 窗口与外部链接
 ipcMain.handle('win-min', (e) => BrowserWindow.fromWebContents(e.sender)?.minimize());
 ipcMain.handle('win-close', (e) => BrowserWindow.fromWebContents(e.sender)?.close());
-ipcMain.handle('open-console', createConsole);
+ipcMain.handle('open-external', (_e, url) => shell.openExternal(String(url)));
 ipcMain.handle('quit', () => app.quit());
-ipcMain.handle('open-external', (_e, url) => shell.openExternal(url));
 
 /* ---------- 生命周期 ---------- */
+
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) app.quit();
 else {
-  app.on('second-instance', () => { if (petWin) { petWin.show(); petWin.focus(); } });
+  app.on('second-instance', () => createConsole());
 
-  app.whenReady().then(() => {
-    loadCfg();
+  app.whenReady().then(async () => {
+    loadPrefs();
     rebuildCore();
-    // Pet 窗口默认不自启,只开控制台;用户可以从托盘或快捷键再打开
-    // createPet();  ← 暂时隐藏,最终版由用户决定是否启用
-    createConsole();
+    if (!HIDDEN_BOOT) createConsole();     // 开机自启时只驻托盘
     createTray();
     applyAutoStart();
     applyTheme();
-    startPolling();
     updater.init();
-    globalShortcut.register('CommandOrControl+Shift+M', () => {
-      if (consoleWin && !consoleWin.isDestroyed()) consoleWin.focus(); else createConsole();
-    });
+    updater.setAutoCheck(prefs.update.autoCheck);
+    startPolling();
+    guard.start(dm).then(() => pollHealth()).catch(() => { });
+    globalShortcut.register('CommandOrControl+Shift+M', () => createConsole());
   });
 
-  app.on('will-quit', () => { globalShortcut.unregisterAll(); stopPolling(); });
-  app.on('window-all-closed', () => { /* 活在托盘 */ });
+  app.on('will-quit', () => { globalShortcut.unregisterAll(); stopPolling(); guard.stop(); });
+  app.on('window-all-closed', () => { /* 关窗不退出：守护与托盘继续运行 */ });
 }

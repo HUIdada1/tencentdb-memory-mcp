@@ -20,6 +20,7 @@ let status = idleStatus();
 let lastManualCheckAt = 0;
 let installTriggered = false;
 let currentCheckIsManual = false;
+let autoCheck = true;          // 由设置页「自动检查更新」控制（关掉后只保留手动检查）
 let timer = null;
 let notifiedVersion = '';
 
@@ -228,8 +229,10 @@ function init() {
   if (app.isPackaged) timer = setTimeout(tick, FIRST_CHECK_DELAY_MS);
 }
 function tick() {
-  if (status.status !== 'downloading' && status.status !== 'downloaded') check(false);
+  if (autoCheck && status.status !== 'downloading' && status.status !== 'downloaded') check(false);
   timer = setTimeout(tick, CHECK_INTERVAL_MS);
 }
 
-module.exports = { init, check, download, triggerInstall, openReleases, openRepo, isPortable, getStatus: () => status };
+function setAutoCheck(v) { autoCheck = !!v; }
+
+module.exports = { init, check, download, triggerInstall, openReleases, openRepo, isPortable, setAutoCheck, getStatus: () => status };

@@ -23,7 +23,7 @@ const QUEUE_DIR = path.join(DATA_DIR, 'queue');
 const LOG_PATH = path.join(DATA_DIR, 'daemon.log');
 
 const RECALL_PORT = Number(process.env.TDAI_DAEMON_PORT) || 8100;
-const APP_VER = '0.3.0';         // 与 package.json 同步；SEA exe 的版本号
+const APP_VER = '0.4.0';         // 与 package.json 同步；SEA exe 的版本号
 const REPO_API = 'https://api.github.com/repos/HUIdada1/tencentdb-memory-mcp/releases/latest';
 const RECALL_TIMEOUT_MS = 800;   // hook 链路硬超时：超时返回空，绝不阻塞对话
 const SCAN_INTERVAL_MS = 2 * 60 * 1000;  // 采集循环 2 分钟
@@ -580,8 +580,16 @@ function startServer(cfg, api, cache, state) {
       try { res.writeHead(500); res.end(); } catch (_) { }
     }
   });
-  return new Promise((resolve) => {
-    server.listen(RECALL_PORT, '127.0.0.1', () => { log(`daemon listening on http://127.0.0.1:${RECALL_PORT}`); resolve(server); });
+  // 端口被占用（本机已有 daemon/exe 在跑）时 reject，交给调用方降级，不直接崩溃
+  return new Promise((resolve, reject) => {
+    const onListenError = (e) => reject(e);
+    server.once('error', onListenError);
+    server.listen(RECALL_PORT, '127.0.0.1', () => {
+      server.removeListener('error', onListenError);
+      server.on('error', (e) => log(`server error: ${e.message}`));
+      log(`daemon listening on http://127.0.0.1:${RECALL_PORT}`);
+      resolve(server);
+    });
   });
 }
 
@@ -651,4 +659,12 @@ async function main() {
 }
 
 if (require.main === module) main().catch((e) => { log(`fatal: ${e.message}`); process.exitCode = 1; });
-module.exports = { loadConfig, scanAndUpload, buildRecall, hasIntent, parseZCodeLine, parseClaudeLine, sliceMessages, readNewLines };
+
+// 供 Electron 应用（pet/src/guard.js）复用：同一份实现，不做二次开发
+module.exports = {
+  loadConfig, missingConfig, mkApi, mkCache, mkState, startServer,
+  scanAndUpload, flushQueue, enqueue, buildRecall, hasIntent,
+  agentStatus, updateCheck, consolePage, readPublicConfig, writeConfig,
+  parseZCodeLine, parseClaudeLine, sliceMessages, readNewLines,
+  APP_VER, RECALL_PORT, CFG_PATH, DATA_DIR, QUEUE_DIR, LOG_PATH, SCAN_INTERVAL_MS,
+};

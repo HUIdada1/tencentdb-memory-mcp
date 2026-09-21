@@ -118,12 +118,13 @@
   <!-- Agent 接入 -->
   <div class="panel" id="p-agents">
     <div class="guide">
-      <b>第一次使用，Agent 怎么连？</b> 分两种，装一次就永久生效，之后每次对话都不用管：
+      <b>第一次使用，Agent 怎么连？</b> 装一次就永久生效，之后每次对话都不用管。当前这个守护进程已经负责「后台自动」那一半：
       <ol>
-        <li><b>后台自动（推送 + 注入）</b>：守护进程启动后自动处理，采集各 Agent 的会话增量上传记忆库，无需任何配置。登录自启用 <code>node register-all.cjs --autostart</code>。</li>
-        <li><b>MCP 安装（Agent 主动检索）</b>：跑一次 <code>node register-all.cjs</code>，会自动把记忆工具写进本机所有支持 MCP 的客户端配置（ZCode / Claude Code / Cursor / Codex），并追加全局指令文件。之后每个新会话自动携带记忆工具，模型需要时自主调用。</li>
+        <li><b>后台自动（推送 + 注入，已在运行）</b>：本守护进程会自动采集各 Agent 的会话增量上传记忆库，无需任何配置；登录自启用 <code>node register-all.cjs --autostart</code>（SEA exe 使用者请把自启指向 exe）。</li>
+        <li><b>MCP 安装（让 Agent 主动检索）</b>：跑一次 <code>node register-all.cjs</code>，会把记忆工具写进本机所有支持 MCP 的客户端配置（ZCode / Claude Code / Cursor / Codex），并追加全局指令文件。之后每个新会话自动携带记忆工具，模型需要时自主调用。</li>
       </ol>
-      Claude Code 还会注入 <code>UserPromptSubmit</code> hook：每次提问前自动检索相关记忆并注入上下文（真正无感，不依赖模型主动调用）。首次使用时客户端会提示「信任」该 hook，点一次即可。
+      装的若是<b>桌面应用（TD记忆守护 安装版 exe）</b>，它已内置本守护进程，接入只需在应用里点一次：<b>设置 → Agent 接入 → 一键接入</b>（不需要 Node、不需要源码目录，未安装的客户端自动跳过）。
+      <div style="margin-top:8px">Claude Code 还会注入 <code>UserPromptSubmit</code> hook：每次提问前自动检索相关记忆并注入上下文（真正无感，不依赖模型主动调用）。首次使用时客户端会提示「信任」该 hook，点一次即可。</div>
     </div>
     <h1 style="font-size:14px; margin:20px 0 10px;">各客户端接入状态</h1>
     <div class="loading" id="agents-loading">检测中…</div>
@@ -161,6 +162,7 @@
     <div class="banner" id="b-update"></div>
     <div class="guide" style="margin-top:20px">
       <b>更新方式</b>：从 GitHub Releases 下载新版 <code>tdai-daemon exe</code> 替换旧文件即可，配置与运行时数据在 <code>~/.zcode/</code> 下不受影响。
+      <div style="margin-top:8px">桌面应用（安装版）用户在应用内「设置 → 更新」中一键检查与安装；便携版到 Releases 手动下载。</div>
       <div style="margin-top:8px"><span class="hint">登录自启：node register-all.cjs --autostart</span></div>
     </div>
   </div>
