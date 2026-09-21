@@ -1,0 +1,16 @@
+node_modules/
+dist/
+release/
+pet/node_modules/
+pet/dist/
+*.log
+.tdaipet/
+.DS_Store
+Thumbs.db
+.box-agent/
+*.artifact.json
+TD记忆守护-设计预览.html
+screenshot*.png
+ui*.png
+pet/final.png
+pet/pet*.log
