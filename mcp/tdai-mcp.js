@@ -10,7 +10,7 @@ const readline = require('readline');
 const core = require(path.join(__dirname, '..', 'core', 'tdai-core.js'));
 
 const SERVER_NAME = 'tdai-memory';
-const SERVER_VER = '0.4.0';   // 与 package.json / daemon APP_VER 同步（发版流水线会校验）
+const SERVER_VER = '0.4.1';   // 与 package.json / daemon APP_VER 同步（发版流水线会校验）
 
 /* ---------- 工具目录（inputSchema 用 JSON Schema） ---------- */
 
@@ -31,13 +31,15 @@ const TOOLS = [
   },
   {
     name: 'tdai.memory_search',
-    description: '检索团队对话记忆（L1 抽取后的记忆片段）。当用户问"我们之前关于 X 是怎么做的"时使用。',
+    description: '检索团队对话记忆。layer=L0 搜对话原文，L1~L3 搜抽取后的记忆片段。当用户问"我们之前关于 X 是怎么做的"时使用。',
     inputSchema: {
       type: 'object',
       properties: {
         query: { type: 'string', description: '检索词' },
         top_k: { type: 'number', default: 5, maximum: 20 },
-        team_id: { type: 'string' }, agent_id: { type: 'string' },
+        layer: { type: 'string', enum: ['L0', 'L1', 'L2', 'L3'], description: '记忆层，默认 L0（对话原文）' },
+        agent_id: { type: 'string', description: 'Agent ID，默认取配置' },
+        block_id: { type: 'string', description: '记忆块 ID（chat_memory-<team>-<agent>），默认按配置拼出' },
       },
       required: ['query'], additionalProperties: false,
     },
@@ -45,10 +47,16 @@ const TOOLS = [
   },
   {
     name: 'tdai.memory_layers',
-    description: '查看 L1/L2/L3 三层记忆资产概览（条数/最近更新时间）。',
+    description: '查看记忆分层概览（L0=对话原文，L1~L3=抽取记忆的条数）；传 layer 参数可看该层明细分页。',
     inputSchema: {
       type: 'object',
-      properties: { team_id: { type: 'string' }, agent_id: { type: 'string' } },
+      properties: {
+        layer: { type: 'string', enum: ['L0', 'L1', 'L2', 'L3'], description: '不传返回四层计数概览' },
+        limit: { type: 'number', default: 50 },
+        offset: { type: 'number', default: 0 },
+        agent_id: { type: 'string', description: 'Agent ID，默认取配置' },
+        block_id: { type: 'string', description: '记忆块 ID，默认按配置拼出' },
+      },
       additionalProperties: false,
     },
     run: (c, a) => c.memoryLayers(a),

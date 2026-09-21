@@ -27,9 +27,10 @@ function loadConfig(overrides) {
     agentId: process.env.TDAI_AGENT_ID,
     taskId: process.env.TDAI_TASK_ID,
     serviceId: process.env.TDAI_SERVICE_ID,
+    blockId: process.env.TDAI_BLOCK_ID,
   };
   const cfg = Object.assign(
-    { panelUrl: '', userKey: '', teamId: '', agentId: '', taskId: '', serviceId: 'default' },
+    { panelUrl: '', userKey: '', teamId: '', agentId: '', taskId: '', serviceId: 'default', blockId: '' },
     disk, Object.fromEntries(Object.entries(env).filter(([, v]) => v)), overrides || {}
   );
   cfg.panelUrl = String(cfg.panelUrl || '').replace(/\/+$/, '');
@@ -42,6 +43,24 @@ function missingConfig(cfg) {
   if (!cfg.panelUrl) miss.push('panelUrl');
   if (!cfg.userKey) miss.push('userKey');
   return miss.length ? `请在 ${CFG_PATH}（或环境变量）写入: ${miss.join(', ')}` : '';
+}
+
+/* ---------- 记忆块与分层 ---------- */
+
+// 面板按 (block_id, layer) 两维取数，块 ID 形如 'chat_memory-<team_id>-<agent_id>'。
+// 裸 agent_id（与配置一致时）自动拼成完整块 ID；显式 block_id 优先。
+function toBlockId(cfg, { block_id, agent_id } = {}) {
+  const raw = block_id || agent_id || cfg.blockId || cfg.agentId || '';
+  if (!raw) return '';
+  if (raw.startsWith('chat_memory-')) return raw;
+  if (cfg.teamId && raw === cfg.agentId) return `chat_memory-${cfg.teamId}-${raw}`;
+  return raw;
+}
+
+const LAYERS = ['L0', 'L1', 'L2', 'L3'];
+function normLayer(layer, dflt) {
+  const v = String(layer || dflt || '').toUpperCase();
+  return LAYERS.includes(v) ? v : '';
 }
 
 /* ---------- HTTP ---------- */
@@ -84,6 +103,10 @@ function clip(s, n = RESULT_LIMIT) {
 
 function create(overrides) {
   const cfg = loadConfig(overrides);
+  // 可选：每次 HTTP 往返的观察者（供桌宠控制台做实时流量计量）。
+  // 缺省 noop，对既有调用方完全透明。传入方式：create({ ..., _onHttp: fn })。
+  const onHttp = typeof (overrides && overrides._onHttp) === 'function' ? overrides._onHttp : null;
+  const onHttpStart = typeof (overrides && overrides._onHttpStart) === 'function' ? overrides._onHttpStart : null;
 
   function headers(extra) {
     return Object.assign({
@@ -97,11 +120,22 @@ function create(overrides) {
     const miss = missingConfig(cfg);
     if (miss) return err('未完成配置', miss);
     const url = cfg.panelUrl + '/api/v1' + pathname;
+    const t0 = Date.now();
+    // 上行字节 = 请求体长度（真实写出前即可精确得知）
+    const reqBytes = body == null ? 0
+      : Buffer.byteLength(typeof body === 'string' ? body : JSON.stringify(body), 'utf8');
+    if (onHttpStart) { try { onHttpStart({ url, method, reqBytes }); } catch (_) {} }
+
     let r;
     try {
       r = await requestRaw(url, { method, headers: headers(extraHeaders), body, timeout });
     } catch (e) {
+      if (onHttp) { try { onHttp({ url, method, reqBytes, resBytes: 0, status: 0, ms: Date.now() - t0, error: e.code || e.message }); } catch (_) {} }
       return err('记忆库不可达', `请检查面板 ${cfg.panelUrl} 端口/公网开闸 (${e.code || e.message})`);
+    }
+    // 下行字节 = 响应体真实长度；reqBytes 为上行真实长度
+    if (onHttp) {
+      try { onHttp({ url, method, reqBytes, resBytes: Buffer.byteLength(r.body || '', 'utf8'), status: r.status, ms: Date.now() - t0 }); } catch (_) {}
     }
     if (r.status === 401 || r.status === 403) return err(`认证失败 HTTP ${r.status}`, 'userKey 可能失效');
     if (r.status >= 500) return err(`面板 5xx (${r.status})`, clip(r.body, 800));
@@ -135,31 +169,56 @@ function create(overrides) {
       return api('/chat-memory/my-agents', { method: 'POST', body: { team_id: cfg.teamId || undefined } });
     },
 
-    // 会话记忆检索。block_id：面板检索的块标识，默认 'chat-memory'，可按面板实际取值覆盖。
-    async memorySearch({ query, top_k = 5, team_id, agent_id, block_id } = {}) {
+    // 会话记忆检索。layer=L0 检索对话原文，L1~L3 检索抽取后的记忆片段。
+    async memorySearch({ query, top_k = 5, layer, agent_id, block_id } = {}) {
       if (!query) return err('缺少 query');
+      const blockId = toBlockId(cfg, { block_id, agent_id });
+      if (!blockId) return err('缺少记忆块：请配置 agentId+teamId，或显式传 block_id/agent_id');
+      const lay = normLayer(layer, 'L0');
+      if (!lay) return err('layer 仅支持 L0/L1/L2/L3');
       return api('/chat-memory/search', {
         method: 'POST',
         body: {
           query: String(query),
-          top_k: Math.min(Number(top_k) || 5, 20),
-          block_id: block_id || cfg.blockId || 'chat-memory',
-          team_id: team_id || cfg.teamId || undefined,
-          agent_id: agent_id || cfg.agentId || undefined,
+          limit: Math.min(Number(top_k) || 5, 20),
+          block_id: blockId,
+          layer: lay,
         },
       });
     },
 
-    // L1/L2/L3 记忆分层概览
-    async memoryLayers({ team_id, agent_id, block_id } = {}) {
-      return api('/chat-memory/layer', {
+    // 记忆分层：不传 layer 返回四层计数概览；传 layer 返回该层明细分页。
+    async memoryLayers({ layer, limit = 50, offset = 0, team_id, agent_id, block_id } = {}) {
+      const blockId = toBlockId(cfg, { block_id, agent_id });
+      if (!blockId) return err('缺少记忆块：请配置 agentId+teamId，或显式传 block_id/agent_id');
+      const once = (lay, lim, off) => api('/chat-memory/layer', {
         method: 'POST',
         body: {
-          block_id: block_id || cfg.blockId || 'chat-memory',
+          block_id: blockId,
+          layer: lay,
           team_id: team_id || cfg.teamId || undefined,
-          agent_id: agent_id || cfg.agentId || undefined,
+          limit: Math.min(Math.max(Number(lim) || 50, 1), 200),
+          offset: Math.max(Number(off) || 0, 0),
         },
       });
+      if (layer) {
+        const lay = normLayer(layer);
+        if (!lay) return err('layer 仅支持 L0/L1/L2/L3');
+        return once(lay, limit, offset);
+      }
+      const layers = ['L0', 'L1', 'L2', 'L3'];
+      const rs = await Promise.all(layers.map((lay) => once(lay, 1, 0)));
+      const bad = rs.find((r) => !r.ok);
+      if (bad) return bad;
+      const counts = {};
+      let total = 0;
+      layers.forEach((lay, i) => {
+        // api() 包装后：r.data = 面板响应 {code, message, data:{total,...}}
+        const n = (rs[i].data && rs[i].data.data && rs[i].data.data.total) || 0;
+        counts[lay === 'L0' ? 'L0_messages' : lay] = n;
+        total += n;
+      });
+      return ok({ block_id: blockId, counts, total }, 'L0=对话原文，L1~L3=抽取记忆');
     },
 
     // 团队资产总览
