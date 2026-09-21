@@ -43,6 +43,7 @@ let lastHealth = { running: false, health: null };
 //          → 1s 心跳 webContents.send('metrics', snapshot) → 渲染进程六分区
 const metrics = metricsMod.createMetrics();
 let tickTimer = null;
+let pingTimer = null;
 let sessionScanTimer = null;
 let lastSessionScan = { ok: true, files: 0, total: 0, sessions: [] };
 let lastCursor = { ok: false, count: 0, bySource: {} };
@@ -109,6 +110,20 @@ function publicConn() { return dm.readPublicConfig(dm.loadConfig()); }
 const HTTP_HDR_UP = 240;    // 请求头典型开销（Host/Content-Type/两个自定义 X-Tdai-*）
 const HTTP_HDR_DOWN = 200;  // 响应头典型开销
 
+/* ---------- 面板 / 守护健康状态（供渲染层判断"已连接"） ----------
+ * 以前 console.js 读 snap.panelOk / snap.daemonOk，但主进程从未提供这两个字段，
+ * 导致判据恒为 undefined，连接状态卡与右上角 pill 永远无法正确变化。
+ * 现在由主进程权威维护：
+ *   panelOk    = 最近一次面板往返是否成功（连接失败或 4xx/5xx 记为 false）
+ *   panelError = 失败原因（面板不可达 / HTTP 状态码）
+ *   daemonOk   = 最近一次守护探活是否成功
+ */
+let panelOk = null;                 // null = 尚无结论
+let panelError = '';
+let panelOkAt = 0;
+let daemonOk = null;
+let daemonOkAt = 0;
+
 function rebuildCore() {
   core = tdai.create({
     _onHttpStart: (info) => {
@@ -131,6 +146,11 @@ function rebuildCore() {
         bytes: dir === 'up' ? upBytes : downBytes,
         ms: info.ms, status: st,
       });
+
+      // 面板健康：任何一次真实往返都能给出结论（连接失败/5xx 都算不可达）
+      panelOk = ok;
+      panelOkAt = Date.now();
+      panelError = ok ? '' : (st === 0 ? '面板不可达（连接失败或超时）' : `面板返回 HTTP ${st}`);
 
       if (ok) {
         metrics.pushLog('ok', `${ok && info.method === 'GET' ? '检索' : '提交'}成功 · ${ep} · ${info.ms}ms`,
@@ -192,12 +212,20 @@ function stopPolling() { if (healthTimer) { clearInterval(healthTimer); healthTi
 function currentSnapshot() {
   return metrics.snapshot({
     panelUrl: (core && core.cfg && core.cfg.panelUrl) || '',
+    panelOk,
+    panelError,
+    panelOkAt,
+    daemonOk,
+    daemonOkAt,
   });
 }
 
 function startTick() {
   stopTick();
   metrics.pushLog('info', `控制台已启动 · 守护端口 ${guard.port()}`);
+  // 首帧立刻探活一次，避免右上角 pill 长时间停在"检测中"
+  daemonPing().catch(() => { });
+  pingTimer = setInterval(() => { daemonPing().catch(() => { }); }, 10000);
   tickTimer = setInterval(() => {
     try {
       metrics.sample();
@@ -210,7 +238,10 @@ function startTick() {
     }
   }, 1000);
 }
-function stopTick() { if (tickTimer) { clearInterval(tickTimer); tickTimer = null; } }
+function stopTick() {
+  if (tickTimer) { clearInterval(tickTimer); tickTimer = null; }
+  if (pingTimer) { clearInterval(pingTimer); pingTimer = null; }
+}
 
 /* ---------- 会话扫描（4s，供总览"实时会话"） ---------- */
 
@@ -252,12 +283,15 @@ function daemonPing() {
         metrics.meter({ dir: 'up', bytes: HTTP_HDR_UP, ms, status: res.statusCode, url: `http://127.0.0.1:${port}/health`, method: 'GET' });
         metrics.setLatency(ms);
         metrics.setCurrent('down', '/health');
-        resolve({ ok: !!(res.statusCode === 200 && json), ms, payload: json, error: res.statusCode === 200 ? '' : 'HTTP ' + res.statusCode });
+        const good = !!(res.statusCode === 200 && json);
+        daemonOk = good; daemonOkAt = Date.now();
+        resolve({ ok: good, ms, payload: json, error: res.statusCode === 200 ? '' : 'HTTP ' + res.statusCode });
       });
     });
-    req.on('timeout', () => { req.destroy(); metrics.pushLog('warn', `守护进程 :${port} 探活超时`); resolve({ ok: false, ms: Date.now() - t0, payload: null, error: 'timeout' }); });
+    req.on('timeout', () => { req.destroy(); metrics.pushLog('warn', `守护进程 :${port} 探活超时`); daemonOk = false; daemonOkAt = Date.now(); resolve({ ok: false, ms: Date.now() - t0, payload: null, error: 'timeout' }); });
     req.on('error', (e) => {
       metrics.meter({ dir: 'up', bytes: HTTP_HDR_UP, ms: Date.now() - t0, status: 0, url: `http://127.0.0.1:${port}/health`, method: 'GET', error: e.code });
+      daemonOk = false; daemonOkAt = Date.now();
       resolve({ ok: false, ms: Date.now() - t0, payload: null, error: e.code || e.message });
     });
     req.end();
@@ -325,6 +359,11 @@ ipcMain.handle('app-info', () => ({
   packaged: app.isPackaged,
   port: guard.port(),
   cfgPath: dm.CFG_PATH,
+  // 面板地址与连接健康：供右上角连接状态 pill 与总览状态卡判断"是否已连接"
+  panelUrl: (core && core.cfg && core.cfg.panelUrl) || '',
+  panelOk,
+  panelError,
+  daemonOk,
 }));
 
 ipcMain.handle('conn-load', () => publicConn());

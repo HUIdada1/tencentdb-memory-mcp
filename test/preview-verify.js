@@ -52,8 +52,10 @@ setTimeout(() => {
     ['上行柱图有柱', n('#up-bars i') > 0],
     ['下行柱图有柱', n('#down-bars i') > 0],
     ['延迟波形有采样点', (d.querySelector('#spark-line').getAttribute('points') || '').split(' ').filter(Boolean).length >= 2],
-    ['可见 tab 为 4 个', Array.from(d.querySelectorAll('#tabs button')).map((b) => b.dataset.tab).join(',') === 'home,memory,agent,settings'],
+    ['可见 tab 为 5 个（含实时会话）', Array.from(d.querySelectorAll('#tabs button')).map((b) => b.dataset.tab).join(',') === 'home,memory,live,agent,settings'],
     ['隐藏 tab 不可见', !d.querySelector('#tabs button[data-tab="skills"]')],
+    ['总览已无快速检索', !d.querySelector('#qs-input')],
+    ['设置页有作者信息', (d.querySelector('.page[data-page="settings"] .author-name') || {}).textContent === '沐辉'],
     ['无页面级 JS 错误', errors.length === 0],
   ];
 

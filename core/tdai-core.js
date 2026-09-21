@@ -23,6 +23,7 @@ function loadConfig(overrides) {
   const env = {
     panelUrl: process.env.TDAI_PANEL_URL,
     userKey: process.env.TDAI_USER_KEY,
+    userId: process.env.TDAI_USER_ID,
     teamId: process.env.TDAI_TEAM_ID,
     agentId: process.env.TDAI_AGENT_ID,
     taskId: process.env.TDAI_TASK_ID,
@@ -30,7 +31,7 @@ function loadConfig(overrides) {
     blockId: process.env.TDAI_BLOCK_ID,
   };
   const cfg = Object.assign(
-    { panelUrl: '', userKey: '', teamId: '', agentId: '', taskId: '', serviceId: 'default', blockId: '' },
+    { panelUrl: '', userKey: '', userId: '', teamId: '', agentId: '', taskId: '', serviceId: 'default', blockId: '' },
     disk, Object.fromEntries(Object.entries(env).filter(([, v]) => v)), overrides || {}
   );
   cfg.panelUrl = String(cfg.panelUrl || '').replace(/\/+$/, '');
@@ -296,14 +297,16 @@ function create(overrides) {
       });
     },
 
-    // 会话入队触发 L1 抽取 / 技能抽取
-    async conversationAdd({ team_id, agent_id, session_id } = {}) {
+    // 会话入队触发 L1 抽取 / 技能抽取。服务端契约要求 user_id + messages（仅传会话引用会被 400 拒绝）。
+    async conversationAdd({ user_id, team_id, agent_id, session_id, messages } = {}) {
       return api('/skill/conversation/add', {
         method: 'POST',
         body: {
+          user_id: user_id || cfg.userId,
           team_id: team_id || cfg.teamId,
           agent_id: agent_id || cfg.agentId,
           session_id,
+          messages,
         },
       });
     },

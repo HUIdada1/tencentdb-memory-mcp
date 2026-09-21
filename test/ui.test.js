@@ -33,12 +33,18 @@ const htmlLive = html.replace(/<!--[\s\S]*?-->/g, '');
 const tabNames = uniq(matchAll(htmlLive, /data-tab="([\w-]+)"/g).map((m) => m[1]));
 const pageNames = uniq(matchAll(htmlLive, /data-page="([\w-]+)"/g).map((m) => m[1]));
 check('顶栏 tab 与页面一一对应：' + tabNames.join(' / '), tabNames.length > 0 && tabNames.every((t) => pageNames.includes(t)) && pageNames.every((p) => tabNames.includes(p)));
+// 明确顺序契约：实时会话必须夹在「记忆」与「Agent 接入」之间
+check('tab 顺序为 home / memory / live / agent / settings',
+  tabNames.join(',') === 'home,memory,live,agent,settings');
 // 明确：技能 / wiki / 图谱 必须已不可见；记忆必须可见
 const HIDDEN_TABS = ['skills', 'wiki', 'graph'];
 const stillVisible = HIDDEN_TABS.filter((t) => tabNames.includes(t) || pageNames.includes(t));
 check('技能 / Wiki / 图谱 三个 tab 已隐藏（注释）' + (stillVisible.length ? `（仍可见：${stillVisible.join(', ')}）` : ''), stillVisible.length === 0);
 check('记忆 tab 保留可用', tabNames.includes('memory') && pageNames.includes('memory'));
+check('实时会话为独立 tab', tabNames.includes('live') && pageNames.includes('live'));
 check('Agent 接入为独立 tab', tabNames.includes('agent') && pageNames.includes('agent'));
+check('总览页已移除快速检索', !htmlLive.includes('id="qs-input"'));
+check('设置页展示作者「沐辉」', /作者[\s\S]{0,30}沐辉/.test(htmlLive));
 check('设置已并入顶栏 tab（不再有独立「更新」tab）', tabNames.includes('settings') && !tabNames.includes('update'));
 
 /* ---------- 设置内二级 tab 与子面板 ---------- */

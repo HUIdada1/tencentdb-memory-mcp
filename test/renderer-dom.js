@@ -155,10 +155,63 @@ t('HTML：可见 tab 与可见 page 严格一对一，且顺序一致', () => {
   const b = boot();
   const tabs = Array.from(b.doc.querySelectorAll('#tabs button')).map((x) => x.dataset.tab);
   const pages = Array.from(b.doc.querySelectorAll('.page')).map((x) => x.dataset.page);
-  assert.deepStrictEqual(tabs, ['home', 'memory', 'agent', 'settings'], 'tab 序列不符：' + tabs.join(','));
+  assert.deepStrictEqual(tabs, ['home', 'memory', 'live', 'agent', 'settings'], 'tab 序列不符：' + tabs.join(','));
   assert.deepStrictEqual(pages.slice().sort(), tabs.slice().sort(), 'tab/page 不一一对应');
   assert.strictEqual(new Set(tabs).size, tabs.length, 'tab 有重复');
   assert.strictEqual(new Set(pages).size, pages.length, 'page 有重复');
+});
+
+t('HTML：「实时会话」tab 位于「记忆」与「Agent 接入」之间', () => {
+  const b = boot();
+  const tabs = Array.from(b.doc.querySelectorAll('#tabs button')).map((x) => x.dataset.tab);
+  const iMem = tabs.indexOf('memory'), iLive = tabs.indexOf('live'), iAgent = tabs.indexOf('agent');
+  assert.ok(iMem >= 0 && iLive >= 0 && iAgent >= 0, '缺少 memory/live/agent 之一：' + tabs.join(','));
+  assert.ok(iMem < iLive && iLive < iAgent, `顺序应为 memory < live < agent，实际 ${iMem}/${iLive}/${iAgent}`);
+});
+
+t('HTML：实时会话列表已从总览迁到「实时会话」页（不同时存在）', () => {
+  const b = boot();
+  assert.strictEqual(b.has('.page[data-page="live"] #sess-list'), true, 'live 页应有 #sess-list');
+  assert.strictEqual(b.has('.page[data-page="home"] #sess-list'), false, 'home 页不应再有 #sess-list');
+  assert.strictEqual(b.has('.page[data-page="live"] #sess-count'), true, 'live 页应有 sess-count');
+  assert.strictEqual(b.has('.page[data-page="home"] #sess-count'), false, 'home 页不应再有 sess-count');
+});
+
+t('HTML：总览页已移除快速检索（避免与记忆页重复）', () => {
+  const b = boot();
+  ['#qs-input', '#qs-go', '#qs-result'].forEach((sel) => {
+    assert.strictEqual(b.has(sel), false, '总览不应再有 ' + sel);
+  });
+});
+
+t('HTML：作者信息「沐辉」已展示在设置页', () => {
+  const b = boot();
+  const el = b.doc.querySelector('.page[data-page="settings"] .author-name');
+  assert.ok(el, '设置页应有 .author-name');
+  assert.strictEqual(el.textContent.trim(), '沐辉', '作者应为「沐辉」');
+  assert.ok(/作者[\s\S]{0,20}沐辉/.test(b.doc.querySelector('.page[data-page="settings"]').textContent),
+    '设置页应出现「作者：沐辉」字样');
+});
+
+t('HTML：右上角连接状态胶囊结构完整（含指示灯与文案节点）', () => {
+  const b = boot();
+  assert.strictEqual(b.has('#health-pill'), true);
+  assert.strictEqual(b.has('#health-pill i'), true, 'pill 应含指示灯 <i>');
+  assert.strictEqual(b.has('#health-text'), true, 'pill 应含文案节点 #health-text');
+});
+
+t('HTML：「失败请求」卡片紧邻「累计请求」右侧，且结构完全一致', () => {
+  const b = boot();
+  const stats = Array.from(b.doc.querySelectorAll('.stat-row .stat'));
+  const valIds = stats.map((x) => (x.querySelector('b') || {}).id);
+  const iReq = valIds.indexOf('s-reqs'), iErr = valIds.indexOf('s-err');
+  assert.ok(iReq >= 0 && iErr >= 0, '缺少 s-reqs / s-err');
+  assert.strictEqual(iErr, iReq + 1, `失败请求应紧邻累计请求右侧，实际 reqs@${iReq} err@${iErr}`);
+  const a = stats[iReq], c = stats[iErr];
+  assert.strictEqual(a.className, c.className, '两卡外层 class 应一致');
+  assert.strictEqual(a.querySelectorAll('i').length, c.querySelectorAll('i').length, '指示灯数量应一致');
+  assert.strictEqual(a.querySelectorAll('b').length, c.querySelectorAll('b').length, '数值节点数量应一致');
+  assert.strictEqual(a.querySelectorAll('span').length, c.querySelectorAll('span').length, '标签节点数量应一致');
 });
 
 t('HTML：注释掉的 tab 代码是「整段配对」的（无半截注释）', () => {

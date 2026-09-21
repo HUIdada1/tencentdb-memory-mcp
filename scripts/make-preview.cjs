@@ -39,6 +39,8 @@ const BRIDGE = `
   var now = Date.now();
   var snap = {
     ok: true, at: now, uptime: 7200000,
+    panelUrl: 'https://docs.qq.com/panel',
+    panelOk: true, panelError: '', panelOkAt: now, daemonOk: true, daemonOkAt: now,
     metrics: {
       upSpeed: 184 * 1024, downSpeed: 642 * 1024,
       uploadBytes: 38294512, downloadBytes: 128473920,
@@ -124,6 +126,9 @@ const BRIDGE = `
     m.latency = Math.round(70 + Math.abs(Math.sin(tick / 3)) * 60);
     snap.series.up.push(m.upSpeed); snap.series.down.push(m.downSpeed); snap.series.lat.push(m.latency);
     if (snap.series.up.length > 60) { snap.series.up.shift(); snap.series.down.shift(); snap.series.lat.shift(); }
+    // 心跳推进 at，让运行时长本地推算持续增长
+    snap.at = Date.now();
+    snap.uptime += 1000;
     (handlers['metrics'] || []).forEach(function (cb) { cb({ payload: snap }); });
   }, 1000);
 })();

@@ -20,6 +20,7 @@
   <nav id="tabs">
     <button data-tab="home" class="active">总览</button>
     <button data-tab="memory">记忆</button>
+    <button data-tab="live">实时会话</button>
     <!-- 暂不实现：技能 / Wiki / 图谱（取消注释即可恢复，需同时恢复下方对应 section 与 console.js 分支）
     <button data-tab="skills">技能</button>
     <button data-tab="wiki">Wiki</button>
@@ -32,7 +33,7 @@
     <button class="icon-btn" id="btn-theme" title="切换主题">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
     </button>
-    <span id="health-pill" class="pill">检测中</span>
+    <span id="health-pill" class="pill off" title="记忆库面板连接状态"><i></i><b id="health-text">检测中</b></span>
     <button class="win-btn" id="win-min" title="最小化">—</button>
     <button class="win-btn" id="win-close" title="关闭窗口（守护继续运行）">×</button>
   </div>
@@ -69,31 +70,17 @@
       </div>
     </div>
 
-    <!-- ② 关键指标卡 -->
+    <!-- ② 关键指标卡（「累计请求」与「失败请求」相邻，样式完全一致） -->
     <div class="row stat-row">
       <div class="stat glass" id="c-status"><i></i><div><b id="s-status">—</b><span>连接状态</span></div></div>
       <div class="stat glass" id="c-up"><i></i><div><b id="s-up">—</b><span>上传速度</span></div></div>
       <div class="stat glass" id="c-down"><i></i><div><b id="s-down">—</b><span>下载速度</span></div></div>
       <div class="stat glass"><i></i><div><b id="s-sess">—</b><span>进行中会话</span></div></div>
-      <div class="stat glass"><i></i><div><b id="s-reqs">—</b><span>累计请求</span></div></div>
+      <div class="stat glass" id="c-reqs"><i></i><div><b id="s-reqs">—</b><span>累计请求</span></div></div>
       <div class="stat glass" id="c-err"><i></i><div><b id="s-err">—</b><span>失败请求</span></div></div>
     </div>
 
-    <!-- ③ 实时会话 -->
-    <div class="row">
-      <div class="card glass" style="flex:1">
-        <h3>实时会话
-          <span class="hd-note" id="sess-count">—</span>
-          <button class="mini" data-act="sess-refresh">立即刷新</button>
-        </h3>
-        <div class="sess-wrap">
-          <div class="sess-head">
-            <span>会话 / 来源</span><span>状态</span><span>轮次</span><span>最近交互</span><span>内容摘要</span>
-          </div>
-          <div id="sess-list" class="sess-list"><div class="empty">扫描中…</div></div>
-        </div>
-      </div>
-    </div>
+    <!-- ③ 实时会话已迁移至独立「实时会话」tab（避免总览过长） -->
 
     <!-- ④ 上下行流量 -->
     <div class="row two-col">
@@ -192,29 +179,45 @@
         <div id="layers" class="list"><div class="empty">加载中…</div></div>
       </div>
     </div>
-
-    <!-- 快速检索（保留：总览就地检索） -->
-    <div class="row">
-      <div class="card glass" style="flex:1">
-        <h3>快速检索</h3>
-        <div class="quick-search">
-          <input id="qs-input" placeholder="比如：排涝站 数据库 设计">
-          <button id="qs-go" class="btn-primary">检索</button>
-        </div>
-        <div id="qs-result" class="result"></div>
-      </div>
-    </div>
   </section>
 
   <!-- ====== 记忆 ====== -->
   <section data-page="memory" class="page">
     <div class="toolbar glass">
-      <input id="mem-q" placeholder="检索对话记忆…">
+      <input id="mem-q" placeholder="检索对话记忆…（回车即检索）">
       <select id="mem-topk"><option>5</option><option>10</option><option>20</option></select>
       <button data-act="memory-search" class="btn-primary">检索</button>
       <button data-act="memory-layers" class="btn-ghost">L1/L2/L3 分层</button>
     </div>
-    <div id="mem-out" class="out glass"></div>
+    <div id="mem-out" class="out glass">
+      <div class="empty">输入关键词后回车开始检索，或点「L1/L2/L3 分层」查看记忆分层结构。</div>
+    </div>
+  </section>
+
+  <!-- ====== 实时会话（独立页，由总览迁入） ====== -->
+  <section data-page="live" class="page">
+    <div class="card glass">
+      <h3>实时会话
+        <span class="hd-note" id="sess-count">—</span>
+        <button class="mini" data-act="sess-refresh">立即刷新</button>
+      </h3>
+      <div class="sess-wrap">
+        <div class="sess-head">
+          <span>会话 / 来源</span><span>状态</span><span>轮次</span><span>最近交互</span><span>内容摘要</span>
+        </div>
+        <div id="sess-list" class="sess-list"><div class="empty">扫描中…</div></div>
+      </div>
+    </div>
+    <div class="card glass">
+      <h3>会话来源说明</h3>
+      <div class="kv-list">
+        <div class="kv"><span>ZCode CLI</span><b id="live-zcode">—</b></div>
+        <div class="kv"><span>Claude Code</span><b id="live-claude">—</b></div>
+        <div class="kv"><span>扫描会话总数</span><b id="live-total">—</b></div>
+        <div class="kv"><span>下次自动扫描</span><b id="live-nextscan">—</b></div>
+      </div>
+      <div class="hint">会话数据来自各 Agent 的本地会话文件（<code>~/.zcode/cli/agents/</code> 与 <code>~/.claude/</code>），每 4 秒自动扫描一次。状态：交互中（15 秒内）/ 空闲（3 分钟内）/ 休眠（更久）。</div>
+    </div>
   </section>
 
   <!-- 暂不实现：技能页
@@ -400,12 +403,14 @@
       </div>
       <div class="card glass">
         <h3>关于</h3>
-        <div class="kv">
-          <div class="k">应用版本</div><div class="v" id="a-ver">-</div>
-          <div class="k">程序路径</div><div class="v" id="a-exe">-</div>
-          <div class="k">网页控制台</div><div class="v"><a href="#" id="a-console">-</a></div>
-          <div class="k">配置文件</div><div class="v" id="a-cfg">-</div>
+        <div class="kv-list">
+          <div class="kv"><span>作者</span><b class="author-name">沐辉</b></div>
+          <div class="kv"><span>应用版本</span><b id="a-ver">-</b></div>
+          <div class="kv"><span>程序路径</span><b id="a-exe">-</b></div>
+          <div class="kv"><span>网页控制台</span><b><a href="#" id="a-console">-</a></b></div>
+          <div class="kv"><span>配置文件</span><b id="a-cfg">-</b></div>
         </div>
+        <div class="hint">TD 记忆守护 · 作者：沐辉</div>
       </div>
     </div>
   </section>

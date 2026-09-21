@@ -23,7 +23,7 @@ const QUEUE_DIR = path.join(DATA_DIR, 'queue');
 const LOG_PATH = path.join(DATA_DIR, 'daemon.log');
 
 const RECALL_PORT = Number(process.env.TDAI_DAEMON_PORT) || 8100;
-const APP_VER = '0.5.0';         // 与 package.json 同步；SEA exe 的版本号
+const APP_VER = '0.5.1';         // 与 package.json 同步；SEA exe 的版本号
 const REPO_API = 'https://api.github.com/repos/HUIdada1/tencentdb-memory-mcp/releases/latest';
 const RECALL_TIMEOUT_MS = 800;   // hook 链路硬超时：超时返回空，绝不阻塞对话
 const SCAN_INTERVAL_MS = 2 * 60 * 1000;  // 采集循环 2 分钟
@@ -268,7 +268,14 @@ async function uploadBatch(cfg, api, payload, state) {
   try {
     const r = await api('/chat-memory/import', { method: 'POST', body: payload });
     if (r.status >= 200 && r.status < 300) {
-      await api('/skill/conversation/add', { method: 'POST', body: { team_id: payload.team_id, agent_id: payload.agent_id, session_id: payload.session_id } });
+      // 入队 L1 抽取：服务端要求 user_id + messages 全量回传；失败必须留痕，不可静默
+      const q = await api('/skill/conversation/add', {
+        method: 'POST',
+        body: { user_id: cfg.userId, team_id: payload.team_id, agent_id: payload.agent_id, session_id: payload.session_id, messages: payload.messages },
+      });
+      if (!(q.status >= 200 && q.status < 300)) {
+        log(`extract enqueue rejected HTTP ${q.status}: ${String((q.json && q.json.message) || q.body || '').slice(0, 200)}`);
+      }
       return true;
     }
     if (r.status >= 500 || r.status === 0) return false; // 可重试

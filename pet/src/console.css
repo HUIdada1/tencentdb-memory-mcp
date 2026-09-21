@@ -128,14 +128,24 @@ input,select{font-family:inherit;font-size:inherit;color:var(--txt)}
 .win-btn:hover{background:var(--bg-3);color:var(--txt)}
 .win-btn#win-close:hover{background:var(--err);color:#fff}
 
-/* 健康状态胶囊 */
+/* 健康状态胶囊（右上角连接状态） */
 .pill{
+  display:inline-flex;align-items:center;gap:6px;
   font-size:11px;padding:4px 12px;border-radius:20px;letter-spacing:.5px;
   background:var(--bg-3);color:var(--txt-2);border:1px solid var(--line);
   transition:all .3s;white-space:nowrap;
 }
+.pill i{
+  width:6px;height:6px;border-radius:50%;flex-shrink:0;
+  background:var(--txt-3);transition:all .3s;
+}
+.pill b{font-weight:600;font-size:11px}
 .pill.on{color:var(--ok);border-color:var(--ok);background:var(--ok-soft)}
+.pill.on i{background:var(--ok);box-shadow:0 0 0 3px var(--ok-soft);animation:pillPulse 2s ease-in-out infinite}
 .pill.err{color:var(--err);border-color:var(--err);background:var(--err-soft)}
+.pill.err i{background:var(--err);box-shadow:0 0 0 3px var(--err-soft)}
+.pill.wait i{background:#fbbf24;box-shadow:0 0 0 3px rgba(251,191,36,.25);animation:pillPulse 1.4s ease-in-out infinite}
+@keyframes pillPulse{0%,100%{opacity:1}50%{opacity:.45}}
 
 /* ————— 主区 ————— */
 #main{position:relative;z-index:1;height:calc(100% - 58px);overflow:auto;padding:20px 22px 40px}
@@ -590,3 +600,36 @@ input.switch:checked::after{left:18px;background:#fff;box-shadow:0 1px 4px rgba(
   .sess-head,.sess-row{grid-template-columns:1.4fr 76px 56px 84px}
   .sess-head span:last-child,.sess-row .sess-sum{display:none}
 }
+
+/* ————— 记忆页结果列表（替代裸 JSON，便于阅读） ————— */
+.mem-head{font-size:11px;color:var(--txt-3);letter-spacing:1px;padding:2px 0 10px}
+.mem-item{
+  padding:11px 13px;border-radius:var(--radius-s);margin-bottom:8px;
+  background:var(--bg-3);border:1px solid var(--line);
+  transition:border-color var(--dur) var(--trans);
+}
+.mem-item:hover{border-color:var(--accent)}
+.mem-txt{font-size:12.5px;line-height:1.65;color:var(--txt);white-space:pre-wrap;word-break:break-word}
+.mem-meta{
+  display:flex;gap:10px;align-items:center;margin-top:7px;
+  font-size:10.5px;color:var(--txt-3);letter-spacing:.4px;
+}
+.mem-score{
+  padding:1px 7px;border-radius:10px;background:var(--accent-soft);color:var(--accent);
+  font-variant-numeric:tabular-nums;font-weight:600;
+}
+.mem-raw{
+  margin:0;font-size:12px;line-height:1.6;white-space:pre-wrap;word-break:break-word;
+  font-family:ui-monospace,Consolas,monospace;color:var(--txt-2);
+}
+
+/* ————— 作者信息 ————— */
+.author-name{color:var(--accent);font-weight:650;letter-spacing:.5px}
+
+/* ————— 关键时刻：保证「累计请求」「失败请求」等卡片尺寸完全一致 —————
+ * 全部 .stat 共用同一套盒模型；这里显式锁定，防止后续新增卡片时被撑开不一致。 */
+.stat-row>.stat{flex:1 1 0;min-width:158px;box-sizing:border-box}
+.stat-row>.stat b{white-space:nowrap}
+.mem-lv{display:flex;align-items:baseline;gap:10px}
+.mem-lv b{font-size:13px;color:var(--accent);letter-spacing:.6px}
+.mem-lv span{font-size:11.5px;color:var(--txt-2)}
