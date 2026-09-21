@@ -23,7 +23,7 @@ const QUEUE_DIR = path.join(DATA_DIR, 'queue');
 const LOG_PATH = path.join(DATA_DIR, 'daemon.log');
 
 const RECALL_PORT = Number(process.env.TDAI_DAEMON_PORT) || 8100;
-const APP_VER = '0.5.3';         // 与 package.json 同步；SEA exe 的版本号
+const APP_VER = '0.5.4';         // 与 package.json 同步；SEA exe 的版本号
 const REPO_API = 'https://api.github.com/repos/HUIdada1/tencentdb-memory-mcp/releases/latest';
 const RECALL_TIMEOUT_MS = 800;   // hook 链路硬超时：超时返回空，绝不阻塞对话
 const SCAN_INTERVAL_MS = 2 * 60 * 1000;  // 采集循环 2 分钟
@@ -193,11 +193,25 @@ function claudeSources() {
 
 // ZCode 新版会话：~/.zcode/cli/rollout/model-io-<sess>.jsonl（每行一次模型调用；request.messages 只带历史尾巴，
 // 必须按内容哈希去重，否则同一轮对话会随每次调用重复上传）
+// 去重集合必须有上限：常驻守护进程里 Set 只增不减 → 长时间运行必然内存泄漏。
+// 用 FIFO + 上限做近似 LRU（超出容量淘汰最旧的哈希，牺牲极小概率的重复上传换内存可控）。
+const ROLLOUT_SEEN_MAX = 20000;
 const rolloutSeen = new Set();
 function rolloutHash(s) {
   let h = 0x811c9dc5;
   for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = (h * 0x01000193) >>> 0; }
   return 'h' + h.toString(36) + '-' + s.length;
+}
+function rolloutSeenAdd(h) {
+  if (rolloutSeen.has(h)) return false;
+  rolloutSeen.add(h);
+  if (rolloutSeen.size > ROLLOUT_SEEN_MAX) {
+    // Set 保持插入序：删掉最早插入的那批
+    const drop = rolloutSeen.size - ROLLOUT_SEEN_MAX;
+    let i = 0;
+    for (const k of rolloutSeen) { if (i++ >= drop) break; rolloutSeen.delete(k); }
+  }
+  return true;
 }
 function rolloutText(content) {
   if (typeof content === 'string') return content.trim();
@@ -216,15 +230,11 @@ function parseRolloutLine(line) {
     if (!msgs[i] || msgs[i].role !== 'user') continue;
     const text = rolloutText(msgs[i].content);
     if (!text || text.startsWith('<system-reminder>') || text.startsWith('<task-notification>')) break;
-    const h = rolloutHash(text);
-    if (!rolloutSeen.has(h)) { rolloutSeen.add(h); out.push({ role: 'user', content: text }); }
+    if (rolloutSeenAdd(rolloutHash(text))) out.push({ role: 'user', content: text });
     break;
   }
   const reply = j.response && typeof j.response.text === 'string' ? j.response.text.trim() : '';
-  if (reply) {
-    const h = rolloutHash(reply);
-    if (!rolloutSeen.has(h)) { rolloutSeen.add(h); out.push({ role: 'assistant', content: reply }); }
-  }
+  if (reply && rolloutSeenAdd(rolloutHash(reply))) out.push({ role: 'assistant', content: reply });
   return out;
 }
 
@@ -546,13 +556,51 @@ function consolePage() {
 
 /* ---------- HTTP 服务（:8100） ---------- */
 
+// 本地服务的所有 POST body 收敛到一个小上限：这是 127.0.0.1 的内部接口，
+// 没有理由接收大 body；无限累积字符串既浪费内存也给了本机进程打爆守护的机会。
+const LOCAL_BODY_MAX = 256 * 1024;
+
+// 统一的 body 读取：限长 + 超限即断 + 解析失败给明确错误（不再静默吞掉）
+function readBody(req, res, limit) {
+  return new Promise((resolve) => {
+    const max = limit || LOCAL_BODY_MAX;
+    let body = '';
+    let aborted = false;
+    req.on('data', (c) => {
+      if (aborted) return;
+      body += c;
+      if (body.length > max) {
+        aborted = true;
+        log(`local body too large (>${max}B) on ${req.url}`);
+        try { res.writeHead(413, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify({ ok: false, error: '请求体过大' })); } catch (_) { }
+        try { req.destroy(); } catch (_) { }
+        resolve({ ok: false, error: 'too large' });
+      }
+    });
+    req.on('error', () => { if (!aborted) { aborted = true; resolve({ ok: false, error: 'request error' }); } });
+    req.on('end', () => { if (!aborted) resolve({ ok: true, body }); });
+  });
+}
+
+function jsonRes(res, code, obj) {
+  try {
+    const s = JSON.stringify(obj);
+    res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(s) });
+    res.end(s);
+  } catch (_) {
+    try { res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' }); res.end('{"ok":false,"error":"serialize failed"}'); } catch (_) { }
+  }
+}
+
 function mkState() {
   return { startedAt: new Date().toISOString(), hookCalls: 0, lastPush: '', agentCreated: {}, queue: 0, nas: null };
 }
 
 function startServer(cfg, api, cache, state) {
   const server = http.createServer(async (req, res) => {
-    const u = new URL(req.url, 'http://localhost');
+    // URL 解析失败的请求（畸形 path）必须在 try 之外先兜住，否则连 400 都发不出去
+    let u;
+    try { u = new URL(req.url, 'http://localhost'); } catch (_) { try { res.writeHead(400); res.end(); } catch (_) { } return; }
     try {
       if (u.pathname === '/' || u.pathname === '/console') {
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
@@ -565,19 +613,17 @@ function startServer(cfg, api, cache, state) {
         return;
       }
       if (u.pathname === '/api/config/save' && req.method === 'POST') {
-        let body = '';
-        req.on('data', (c) => (body += c));
-        req.on('end', async () => {
-          try {
-            const nc = writeConfig(JSON.parse(body || '{}'));
-            Object.assign(cfg, { panelUrl: nc.panelUrl, userKey: nc.userKey, teamId: nc.teamId, agentId: nc.agentId, taskId: nc.taskId, blockId: nc.blockId || cfg.blockId });
-            res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-            res.end(JSON.stringify({ ok: true, config: readPublicConfig(loadConfig()) }));
-          } catch (e) {
-            res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
-            res.end(JSON.stringify({ ok: false, error: e.message }));
-          }
-        });
+        // 用 readBody 统一兜底：早先 req.on('end') 里的 async 回调一旦在 catch 之外抛出
+        // （例如 writeConfig 之外的操作），异常会逃逸出外层 try/catch，导致响应永不返回。
+        const rb = await readBody(req, res);
+        if (!rb.ok) return;
+        try {
+          const nc = writeConfig(JSON.parse(rb.body || '{}'));
+          Object.assign(cfg, { panelUrl: nc.panelUrl, userKey: nc.userKey, teamId: nc.teamId, agentId: nc.agentId, taskId: nc.taskId, blockId: nc.blockId || cfg.blockId });
+          jsonRes(res, 200, { ok: true, config: readPublicConfig(loadConfig()) });
+        } catch (e) {
+          jsonRes(res, 400, { ok: false, error: (e && e.message) || String(e) });
+        }
         return;
       }
       if (u.pathname === '/api/test-connection' && req.method === 'POST') {
@@ -611,10 +657,12 @@ function startServer(cfg, api, cache, state) {
         try { queueLen = fs.readdirSync(QUEUE_DIR).length; } catch (_) { }
         let nas = null;
         if (cfg.panelUrl && cfg.userKey) {
-          try { const r = await api('/skill/list', { method: 'POST', body: { team_id: cfg.teamId }, timeout: 5000 }); nas = r.status >= 200 && r.status < 300; } catch (_) { nas = false; }
+          try {
+            const r = await api('/skill/list', { method: 'POST', body: { team_id: cfg.teamId || undefined }, timeout: 5000 });
+            nas = !!(r && r.status >= 200 && r.status < 300);
+          } catch (_) { nas = false; }
         }
-        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify({ local: true, nas, configOk: !missingConfig(cfg), version: APP_VER, hookCalls: state.hookCalls, lastPush: state.lastPush, queueLen, uptimeSince: state.startedAt }));
+        jsonRes(res, 200, { local: true, nas, configOk: !missingConfig(cfg), version: APP_VER, hookCalls: state.hookCalls, lastPush: state.lastPush, queueLen, uptimeSince: state.startedAt });
         return;
       }
       if (u.pathname === '/recall') {
@@ -633,15 +681,20 @@ function startServer(cfg, api, cache, state) {
         return;
       }
       if (u.pathname === '/api/backfill' && req.method === 'POST') {
-        let body = '';
-        req.on('data', (c) => (body += c));
-        req.on('end', () => {
-          let opts = {};
-          try { opts = JSON.parse(body || '{}'); } catch (_) { }
-          const r = startBackfill(cfg, api, state, { source: opts.source || '', filter: opts.filter || '' });
-          res.writeHead(r.ok ? 200 : 409, { 'Content-Type': 'application/json; charset=utf-8' });
-          res.end(JSON.stringify(r));
-        });
+        const rb = await readBody(req, res);
+        if (!rb.ok) return;
+        let opts = {};
+        try { opts = JSON.parse(rb.body || '{}'); } catch (_) { }
+        if (!opts || typeof opts !== 'object') opts = {};
+        // startBackfill 自身会同步返回，但 runBackfill 是异步跑的：
+        // 这里显式再包一层 catch，任何同步抛出都不至于让响应悬空。
+        let r;
+        try {
+          r = startBackfill(cfg, api, state, { source: opts.source || '', filter: opts.filter || '' });
+        } catch (e) {
+          r = { ok: false, error: (e && e.message) || String(e) };
+        }
+        jsonRes(res, r.ok ? 200 : 409, r);
         return;
       }
       if (u.pathname === '/api/backfill') {
@@ -661,7 +714,13 @@ function startServer(cfg, api, cache, state) {
     server.once('error', onListenError);
     server.listen(RECALL_PORT, '127.0.0.1', () => {
       server.removeListener('error', onListenError);
-      server.on('error', (e) => log(`server error: ${e.message}`));
+      // 运行时错误不能只写日志：客户端异常断连（ECONNRESET/EPIPE）在这里高频出现，
+      // 抛出去就是未捕获异常 → 整个守护进程退出。全部收敛为日志。
+      server.on('error', (e) => { try { log(`server error: ${e && e.code} ${e && e.message}`); } catch (_) { } });
+      server.on('clientError', (e, socket) => {
+        try { log(`client error: ${e && e.code}`); } catch (_) { }
+        try { socket.destroy(); } catch (_) { }
+      });
       log(`daemon listening on http://127.0.0.1:${RECALL_PORT}`);
       resolve(server);
     });

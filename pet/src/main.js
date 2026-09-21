@@ -140,11 +140,12 @@ function rebuildCore() {
       const downBytes = (info.resBytes || 0) + HTTP_HDR_DOWN;
 
       metrics.meter({ dir: 'up', bytes: upBytes, ms: info.ms, status: st, url: info.url, method: info.method, error: info.error });
-      metrics.meter({ dir: 'down', bytes: downBytes, ms: info.ms, status: st, url: info.url, method: info.method, error: info.error });
+      // 只有"真正拿到响应"的往返才算面板延迟样本（2xx/4xx/5xx 都算——服务端答复了就说明可达）
+      metrics.meter({ dir: 'down', bytes: downBytes, ms: info.ms, status: st, url: info.url, method: info.method, error: info.error, latencySample: ok });
       metrics.endTask(dir, {
         state: ok ? 'done' : 'error',
         bytes: dir === 'up' ? upBytes : downBytes,
-        ms: info.ms, status: st,
+        ms: info.ms, status: st, url: info.url, method: info.method,
       });
 
       // 面板健康：任何一次真实往返都能给出结论（连接失败/5xx 都算不可达）
@@ -164,10 +165,22 @@ function rebuildCore() {
 }
 
 function saveConn(body) {
+  // 早先 guard.restart 的错误被 .catch(() => {}) 吞掉，界面无任何反馈：
+  // 用户改了地址以为生效，实际守护还跑在旧配置上。现在把结果带回渲染层。
+  let restart = { ok: true, external: false, error: '' };
   const cfg = dm.writeConfig(body || {});           // 白名单字段 + 跑前备份 .bak
   rebuildCore();
-  guard.restart(dm).catch(() => { });
-  return dm.readPublicConfig(cfg);
+  guard.restart(dm).then((st) => {
+    restart = { ok: !(st && st.lastError), external: !!(st && st.external), error: (st && st.lastError) || '' };
+    if (restart.error) metrics.pushLog('error', '守护重启失败：' + restart.error);
+    else if (restart.external) metrics.pushLog('info', '端口被外部守护进程占用，已切换为外部守护模式');
+  }).catch((e) => {
+    restart = { ok: false, external: false, error: (e && e.message) || String(e) };
+    metrics.pushLog('error', '守护重启异常：' + restart.error);
+  });
+  // 配置刚变，立刻刷新一次面板健康判据，避免 pill 举着旧结论
+  panelOk = null; panelError = '';
+  return Object.assign(dm.readPublicConfig(cfg), { restart });
 }
 
 // 链接测试：面板可达性 + User Key 认证（与网页控制台同口径）
@@ -191,15 +204,27 @@ async function testConn() {
 
 function broadcast(channel, payload) {
   for (const w of BrowserWindow.getAllWindows()) {
-    if (!w.isDestroyed()) w.webContents.send(channel, payload);
+    // webContents.send 在窗口销毁竞态下会抛错（"Object has been destroyed"），
+    // 早先无 try/catch：一次时序错位就能打断整个广播循环，后面的窗口收不到。
+    try {
+      if (!w.isDestroyed() && w.webContents && !w.webContents.isDestroyed()) w.webContents.send(channel, payload);
+    } catch (_) { }
   }
 }
 
 async function pollHealth() {
-  const h = await guard.health();
-  lastHealth = Object.assign(guard.localStatus(), { health: h && h.json ? h.json : null });
-  broadcast('health', lastHealth);
-  return lastHealth;
+  // guard.health() 内部已把超时/错误收敛为 null，但 IPC 与定时器共用此函数，
+  // 仍需外层兜底：任何异常都不能让 30s 轮询自己把自己打死。
+  try {
+    const h = await guard.health();
+    lastHealth = Object.assign(guard.localStatus(), { health: h && h.json ? h.json : null });
+    broadcast('health', lastHealth);
+    return lastHealth;
+  } catch (e) {
+    lastHealth = Object.assign(guard.localStatus(), { health: null, error: (e && e.message) || String(e) });
+    try { broadcast('health', lastHealth); } catch (_) { }
+    return lastHealth;
+  }
 }
 function startPolling() { stopPolling(); pollHealth(); healthTimer = setInterval(pollHealth, 30000); }
 function stopPolling() { if (healthTimer) { clearInterval(healthTimer); healthTimer = null; } }
@@ -230,11 +255,12 @@ function startTick() {
     try {
       metrics.sample();
       const snap = currentSnapshot();
-      if (consoleWin && !consoleWin.isDestroyed()) {
+      if (consoleWin && !consoleWin.isDestroyed() && consoleWin.webContents && !consoleWin.webContents.isDestroyed()) {
         consoleWin.webContents.send('metrics', snap);
       }
     } catch (e) {
-      metrics.pushLog('error', '心跳采样异常：' + e.message);
+      // 心跳是 1s 一次的循环，这里绝不能把异常抛出去（会变成未捕获异常）
+      try { metrics.pushLog('error', '心跳采样异常：' + ((e && e.message) || e)); } catch (_) { }
     }
   }, 1000);
 }
@@ -245,7 +271,13 @@ function stopTick() {
 
 /* ---------- 会话扫描（4s，供总览"实时会话"） ---------- */
 
+let sessionScanRunning = false;
 function refreshSessions(reason) {
+  // 重叠保护：4s 定时器 + 手动刷新 + 页面切换都会调用它，
+  // 单轮全量扫描（多文件 stat + 96KB 回读）在会话多时可能超过 4s，
+  // 无保护时会出现多轮扫描并发叠加，CPU 与磁盘 IO 雪崩。
+  if (sessionScanRunning) return { ok: true, skipped: true, files: lastSessionScan.files, total: lastSessionScan.total };
+  sessionScanRunning = true;
   try {
     const r = sessionsMod.scanSessions({ limit: 40 });
     lastSessionScan = r;
@@ -256,6 +288,8 @@ function refreshSessions(reason) {
   } catch (e) {
     metrics.pushLog('warn', '会话扫描失败：' + e.message);
     return { ok: false, error: e.message };
+  } finally {
+    sessionScanRunning = false;
   }
 }
 function startSessionScan() {
@@ -271,31 +305,87 @@ function daemonPing() {
   return new Promise((resolve) => {
     const t0 = Date.now();
     const port = guard.port();
-    const req = require('http').request({ host: '127.0.0.1', port, path: '/health', method: 'GET', timeout: 4000 }, (res) => {
-      const chunks = [];
-      res.on('data', (c) => chunks.push(c));
-      res.on('end', () => {
-        const ms = Date.now() - t0;
-        const resBytes = chunks.reduce((n, c) => n + c.length, 0);
-        let json = null;
-        try { json = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch (_) { }
-        metrics.meter({ dir: 'down', bytes: resBytes + HTTP_HDR_DOWN, ms, status: res.statusCode, url: `http://127.0.0.1:${port}/health`, method: 'GET' });
-        metrics.meter({ dir: 'up', bytes: HTTP_HDR_UP, ms, status: res.statusCode, url: `http://127.0.0.1:${port}/health`, method: 'GET' });
-        metrics.setLatency(ms);
-        metrics.setCurrent('down', '/health');
-        const good = !!(res.statusCode === 200 && json);
-        daemonOk = good; daemonOkAt = Date.now();
-        resolve({ ok: good, ms, payload: json, error: res.statusCode === 200 ? '' : 'HTTP ' + res.statusCode });
+    const url = `http://127.0.0.1:${port}/health`;
+    // done 守卫：timeout 与 error 可能先后触发，保证只结算一次
+    let done = false;
+    const settle = (v) => { if (done) return; done = true; resolve(v); };
+    // 统一的"探活失败"计量：**上下行对称各记一笔**。
+    // 早先成功路径记两笔（up+down），失败路径只记一笔 up、超时路径一笔都不记，
+    // 导致 reqTotal / 上速率在守护掉线时失真，且 up 失败数被人为放大。
+    const meterFail = (errorText, ms) => {
+      metrics.meter({ dir: 'up', bytes: HTTP_HDR_UP, ms, status: 0, url, method: 'GET', error: errorText });
+      metrics.meter({ dir: 'down', bytes: 0, ms, status: 0, url, method: 'GET', error: errorText });
+    };
+    let req;
+    try {
+      req = require('http').request({ host: '127.0.0.1', port, path: '/health', method: 'GET', timeout: 4000 }, (res) => {
+        const chunks = [];
+        res.on('data', (c) => chunks.push(c));
+        res.on('end', () => {
+          const ms = Date.now() - t0;
+          const resBytes = chunks.reduce((n, c) => n + c.length, 0);
+          let json = null;
+          try { json = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch (_) { }
+          metrics.meter({ dir: 'down', bytes: resBytes + HTTP_HDR_DOWN, ms, status: res.statusCode, url, method: 'GET', latencySample: true });
+          metrics.meter({ dir: 'up', bytes: HTTP_HDR_UP, ms, status: res.statusCode, url, method: 'GET' });
+          metrics.setLatency(ms);
+          metrics.setCurrent('down', '/health');
+          const good = !!(res.statusCode === 200 && json);
+          daemonOk = good; daemonOkAt = Date.now();
+          if (good) { daemonOkLog(port, ms); metricOkLog(port, ms); }
+          else metricFailLog('HTTP ' + res.statusCode, port, ms);
+          settle({ ok: good, ms, payload: json, error: res.statusCode === 200 ? '' : 'HTTP ' + res.statusCode });
+        });
       });
-    });
-    req.on('timeout', () => { req.destroy(); metrics.pushLog('warn', `守护进程 :${port} 探活超时`); daemonOk = false; daemonOkAt = Date.now(); resolve({ ok: false, ms: Date.now() - t0, payload: null, error: 'timeout' }); });
-    req.on('error', (e) => {
-      metrics.meter({ dir: 'up', bytes: HTTP_HDR_UP, ms: Date.now() - t0, status: 0, url: `http://127.0.0.1:${port}/health`, method: 'GET', error: e.code });
+    } catch (e) {
+      // 端口非法等构造期异常：不能让它把整个 1s 心跳带崩
       daemonOk = false; daemonOkAt = Date.now();
-      resolve({ ok: false, ms: Date.now() - t0, payload: null, error: e.code || e.message });
+      metrics.pushLog('warn', `守护探活无法发起：${e.message}`);
+      settle({ ok: false, ms: Date.now() - t0, payload: null, error: e.code || e.message });
+      return;
+    }
+    req.on('timeout', () => {
+      // 超时是"往返未完成"：不再用 setLatency 污染延迟指标（早先这里会写入超时值）
+      req.destroy();
+      const ms = Date.now() - t0;
+      metricFailLog('timeout', port, ms);
+      meterFail('timeout', ms);
+      daemonOk = false; daemonOkAt = Date.now();
+      settle({ ok: false, ms, payload: null, error: 'timeout' });
+    });
+    req.on('error', (e) => {
+      if (done) return;                        // 超时后 destroy 也会触发 error，别再记一笔
+      const ms = Date.now() - t0;
+      meterFail(e.code || e.message || 'network', ms);
+      daemonOk = false; daemonOkAt = Date.now();
+      settle({ ok: false, ms, payload: null, error: e.code || e.message });
     });
     req.end();
   });
+}
+
+// 守护探活失败告警：做状态翻转去抖。
+// 守护重启空窗期会连续探活失败，早先每 5s 就打一条 WARN，日志很快被噪音淹没；
+// 现在只在"由好变坏"时告警一次，恢复时给一条 ok，中间不再重复。
+let daemonWasOk = null;
+function metricFailLog(errorText, port, ms) {
+  if (daemonWasOk === false) return;
+  daemonWasOk = false;
+  metrics.pushLog('warn', `守护进程 :${port} 探活失败 · ${errorText}`,
+    `守护探活（GET /health）未成功\n端口     : ${port}\n原因     : ${errorText}\n耗时     : ${ms} ms\n说明     : 采集上传可能停摆；若外部已跑独立守护进程可忽略`);
+}
+function daemonOkLog(port, ms) {
+  if (daemonWasOk === true) return;
+  const recovered = daemonWasOk === false;
+  daemonWasOk = true;
+  if (recovered) metrics.pushLog('ok', `守护进程 :${port} 探活已恢复 · ${ms}ms`);
+}
+// 首次探活成功时留一条基线日志，便于事后回看"什么时候开始探得到"
+let pingOkLogged = false;
+function metricOkLog(port, ms) {
+  if (pingOkLogged) return;
+  pingOkLogged = true;
+  metrics.pushLog('ok', `守护进程 :${port} 探活正常 · ${ms}ms`);
 }
 
 /* ---------- 控制台窗口 ---------- */
@@ -305,7 +395,8 @@ function createConsole() {
   consoleWin = new BrowserWindow({
     width: 1080, height: 720, minWidth: 920, minHeight: 600,
     frame: false, show: false,
-    backgroundColor: resolveTheme() === 'dark' ? '#0b0c10' : '#f3f4f8',
+    // 与 console.css 的 --bg 令牌同值，避免启动瞬间闪白/闪黑
+    backgroundColor: resolveTheme() === 'dark' ? '#16171c' : '#f4f4f7',
     icon: resPath('build', 'icon.png'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -319,6 +410,13 @@ function createConsole() {
     try { consoleWin.webContents.send('metrics', currentSnapshot()); } catch (_) { }
   });
   consoleWin.on('closed', () => { consoleWin = null; });
+  // 渲染进程崩溃：留痕并在 1s 后尝试重载，避免用户看到永久白屏
+  consoleWin.webContents.on('render-process-gone', (_e, details) => {
+    try { metrics.pushLog('error', '控制台渲染进程异常退出：' + ((details && details.reason) || 'unknown')); } catch (_) { }
+    setTimeout(() => {
+      if (consoleWin && !consoleWin.isDestroyed()) { try { consoleWin.reload(); } catch (_) { } }
+    }, 1000);
+  });
 }
 
 /* ---------- 托盘 ---------- */
@@ -442,12 +540,33 @@ ipcMain.handle('cursor-stats', () => lastCursor);
 ipcMain.handle('daemon-ping', () => daemonPing());
 
 // 渲染进程侧被动流量上报（preload 拦截 fetch/XHR 得到语义，主进程补真实字节）
+// 这是**跨信任边界**的输入：渲染进程可能被页面脚本影响，字段一律白名单 + 范围裁剪，
+// 非法方向直接丢弃（不能像早先那样把任意 dir 悄悄算成 down）。
+const FLOW_BYTES_MAX = 64 * 1024 * 1024;   // 单笔上报字节上限 64MB，防伪造撑爆统计
+const FLOW_MS_MAX = 10 * 60 * 1000;        // 单笔耗时上限 10min
+const FLOW_URL_MAX = 512;
+function sanitizeFlow(ev) {
+  if (!ev || typeof ev !== 'object') return null;
+  if (ev.dir !== 'up' && ev.dir !== 'down') return null;
+  const rawBytes = Number(ev.bytes);
+  const rawMs = Number(ev.ms);
+  const rawStatus = Number(ev.status);
+  return {
+    dir: ev.dir,
+    bytes: Number.isFinite(rawBytes) ? Math.min(Math.max(Math.round(rawBytes), 0), FLOW_BYTES_MAX) : 0,
+    ms: Number.isFinite(rawMs) ? Math.min(Math.max(Math.round(rawMs), 0), FLOW_MS_MAX) : undefined,
+    status: Number.isFinite(rawStatus) ? Math.round(rawStatus) : undefined,
+    url: ev.url == null ? '' : String(ev.url).slice(0, FLOW_URL_MAX),
+    method: ev.method == null ? '' : String(ev.method).slice(0, 16).toUpperCase(),
+    error: ev.error == null ? undefined : String(ev.error).slice(0, 200),
+  };
+}
 ipcMain.on('flow-passive', (_e, ev) => {
-  if (!ev || !ev.dir) return;
-  metrics.meter({
-    dir: ev.dir, bytes: Number(ev.bytes) || 0, ms: ev.ms,
-    status: ev.status, url: ev.url, method: ev.method, error: ev.error,
-  });
+  const clean = sanitizeFlow(ev);
+  if (!clean) return;
+  // 渲染进程上报的字节是"估算值"（拿不到真实 socket 字节），只记流量，
+  // 不参与 us/ms 派生指标（latencySample:false），避免污染面板延迟。
+  metrics.meter(Object.assign({ latencySample: false }, clean));
 });
 
 // 复制到剪贴板
@@ -476,19 +595,20 @@ ipcMain.handle('tool-call', async (_e, { tool, args }) => {
   const fn = map[tool];
   if (!fn) return { ok: false, error: `未知工具 ${tool}` };
   const t0 = Date.now();
-  metrics.beginTask('down', { label: tool, url: tool, method: 'POST' });
+  // 工具调用走 core，core 的 _onHttp 观察者**已经**登记过同一条真实往返任务；
+  // 这里再登记一次会凭空多出一个"永远 pending"的僵尸任务（挤掉 FLOW_ACC_MAX 名额）。
+  // 早先靠"url 精确匹配不上 → 落到 LIFO 分支"歪打正着结束了它，属于隐患。
+  // 现在只更新"当前正在访问的端点"文案，任务生命周期完全交给观察者。
   metrics.setCurrent('down', tool);
   try {
     const r = await fn();
     const ms = Date.now() - t0;
-    metrics.endTask('down', { state: r.ok ? 'done' : 'error', bytes: 0, ms, status: r.ok ? 200 : 0 });
     if (r.ok) metrics.pushLog('flow', `工具调用 ${tool}`, `工具     : ${tool}\n耗时     : ${ms} ms\n参数     : ${JSON.stringify(args || {}).slice(0, 300)}`);
     else metrics.pushLog('warn', `工具调用失败 ${tool}`, `工具     : ${tool}\n错误     : ${r.error || ''}\n提示     : ${r.hint || ''}`);
     return r;
   } catch (e) {
-    metrics.endTask('down', { state: 'error', bytes: 0, ms: Date.now() - t0, status: 0 });
-    metrics.pushLog('error', `工具调用异常 ${tool}`, e.message);
-    return { ok: false, error: e.message };
+    metrics.pushLog('error', `工具调用异常 ${tool}`, (e && e.message) || String(e));
+    return { ok: false, error: (e && e.message) || String(e) };
   }
 });
 
@@ -505,6 +625,21 @@ ipcMain.handle('win-min', (e) => BrowserWindow.fromWebContents(e.sender)?.minimi
 ipcMain.handle('win-close', (e) => BrowserWindow.fromWebContents(e.sender)?.close());
 ipcMain.handle('open-external', (_e, url) => shell.openExternal(String(url)));
 ipcMain.handle('quit', () => app.quit());
+
+/* ---------- 全局异常兜底 ----------
+ * 常驻托盘应用一旦有未捕获异常就可能整进程退出（而用户以为它还在后台跑）。
+ * 这里把两类全局异常收敛为日志，保证进程存活；主进程日志走 daemon.log 便于事后排查。
+ */
+process.on('uncaughtException', (e) => {
+  const msg = (e && e.stack) || (e && e.message) || String(e);
+  try { metrics.pushLog('error', '主进程未捕获异常', String(msg).slice(0, 1500)); } catch (_) { }
+  try { console.error('[tdai] uncaughtException:', msg); } catch (_) { }
+});
+process.on('unhandledRejection', (reason) => {
+  const msg = (reason && reason.stack) || (reason && reason.message) || String(reason);
+  try { metrics.pushLog('warn', '主进程未处理 Promise 拒绝', String(msg).slice(0, 1500)); } catch (_) { }
+  try { console.error('[tdai] unhandledRejection:', msg); } catch (_) { }
+});
 
 /* ---------- 生命周期 ---------- */
 

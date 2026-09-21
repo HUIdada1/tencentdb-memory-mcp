@@ -8,6 +8,10 @@
 </head>
 <body>
 
+<!-- ====== 环境背景层（光晕 + 噪点，纯装饰） ====== -->
+<div class="ambient" aria-hidden="true"><span class="blob-c"></span></div>
+<div class="grain" aria-hidden="true"></div>
+
 <!-- ====== 顶栏（可拖） ====== -->
 <header id="bar" class="glass">
   <div class="brand">
@@ -64,8 +68,14 @@
       <div class="spark-wrap">
         <label>延迟波形（最近 60s）</label>
         <svg id="spark" viewBox="0 0 220 44" preserveAspectRatio="none">
-          <polyline id="spark-fill" fill="none" stroke="none" points=""></polyline>
-          <polyline id="spark-line" fill="none" stroke="#378ADD" stroke-width="1.5" points=""></polyline>
+          <defs>
+            <linearGradient id="sparkGrad" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="var(--brand)" stop-opacity="0.30"/>
+              <stop offset="100%" stop-color="var(--brand)" stop-opacity="0"/>
+            </linearGradient>
+          </defs>
+          <polyline id="spark-fill" fill="url(#sparkGrad)" stroke="none" points=""></polyline>
+          <polyline id="spark-line" fill="none" stroke="var(--brand)" stroke-width="1.5" points=""></polyline>
         </svg>
       </div>
     </div>
@@ -89,8 +99,8 @@
         <div class="flow-top">
           <div class="gauge">
             <svg viewBox="0 0 120 120">
-              <circle cx="60" cy="60" r="52" fill="none" stroke="var(--gauge-track,#C0DD97)" stroke-width="10"/>
-              <circle id="up-arc" cx="60" cy="60" r="52" fill="none" stroke="#639922" stroke-width="10"
+              <circle class="gauge-track" cx="60" cy="60" r="52" fill="none" stroke-width="10"/>
+              <circle id="up-arc" class="gauge-arc" cx="60" cy="60" r="52" fill="none" stroke="var(--brand)" stroke-width="10"
                       stroke-linecap="round" stroke-dasharray="326.7" stroke-dashoffset="326.7"
                       transform="rotate(-90 60 60)"/>
             </svg>
@@ -117,8 +127,8 @@
         <div class="flow-top">
           <div class="gauge">
             <svg viewBox="0 0 120 120">
-              <circle cx="60" cy="60" r="52" fill="none" stroke="var(--gauge-track,#9FE1CB)" stroke-width="10"/>
-              <circle id="down-arc" cx="60" cy="60" r="52" fill="none" stroke="#1D9E75" stroke-width="10"
+              <circle class="gauge-track" cx="60" cy="60" r="52" fill="none" stroke-width="10"/>
+              <circle id="down-arc" class="gauge-arc" cx="60" cy="60" r="52" fill="none" stroke="var(--teal)" stroke-width="10"
                       stroke-linecap="round" stroke-dasharray="326.7" stroke-dashoffset="326.7"
                       transform="rotate(-90 60 60)"/>
             </svg>

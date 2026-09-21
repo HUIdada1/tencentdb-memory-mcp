@@ -72,14 +72,32 @@ function classify(method, url) {
   const m = String(method || 'GET').toUpperCase();
   const u = String(url || '');
   if (m === 'GET' || m === 'HEAD') return 'down';
-  // POST 里检索类也走下行语义
-  if (/search|recall|query|list|get/i.test(u)) return 'down';
+  // POST 里的**纯读**端点按下行语义计（检索/列表/读取不产生写入流量）
+  // 注意正则要锚定路径段，早先 /get/i 会误伤 /forget、/budget 之类的写入端点。
+  try {
+    const p = u.replace(/^https?:\/\/[^/]+/, '').split('?')[0];
+    if (/\/(search|recall|query|list|get|read|layers|assets|status|health)(\/|$)/i.test(p)) return 'down';
+  } catch (_) { }
   return 'up';
 }
 
 function report(ev) {
-  try { ipcRenderer.send('flow-passive', ev); } catch (_) { }
+  // 只上报白名单字段：跨进程边界的对象越简单越安全（主进程侧仍会再校验一次）
+  try {
+    ipcRenderer.send('flow-passive', {
+      dir: ev.dir === 'up' ? 'up' : 'down',
+      url: String(ev.url || '').slice(0, 512),
+      method: String(ev.method || '').slice(0, 16),
+      status: Number.isFinite(Number(ev.status)) ? Number(ev.status) : undefined,
+      ms: Number.isFinite(Number(ev.ms)) ? Number(ev.ms) : undefined,
+      bytes: Number.isFinite(Number(ev.bytes)) ? Math.max(0, Number(ev.bytes)) : 0,
+      error: ev.error == null ? undefined : String(ev.error).slice(0, 200),
+    });
+  } catch (_) { }
 }
+
+/* ---------- 渲染进程侧被动流量计量（IIFE 包裹：不向页面泄漏任何绑定） ---------- */
+(function () {
 
 // fetch
 try {
@@ -94,15 +112,18 @@ try {
         const b = init && init.body;
         if (typeof b === 'string') bodyLen = new Blob([b]).size;
         else if (b && typeof b.byteLength === 'number') bodyLen = b.byteLength;
+        else if (b && typeof b.size === 'number') bodyLen = b.size;
       } catch (_) { }
-      return origFetch.apply(this, arguments).then((res) => {
+      let p;
+      try { p = origFetch.apply(this, arguments); } catch (e) { throw e; }  // 同步抛出（如非法 URL）原样透传
+      return Promise.resolve(p).then((res) => {
         let resLen = 0;
         try { resLen = Number(res.headers.get('content-length')) || 0; } catch (_) { }
-        report({ dir: classify(method, url), url, method, status: res.status, ms: Date.now() - t0, bytes: bodyLen + resLen });
+        report({ dir: classify(method, url), url, method, status: res && res.status, ms: Date.now() - t0, bytes: bodyLen + resLen });
         return res;
       }, (e) => {
         report({ dir: classify(method, url), url, method, status: 0, ms: Date.now() - t0, bytes: bodyLen, error: (e && e.message) || 'network' });
-        throw e;
+        throw e;   // 业务错误必须原样抛回，绝不能被计量逻辑吃掉
       });
     };
   }
@@ -121,16 +142,22 @@ try {
     d.t0 = Date.now();
     let bodyLen = 0;
     try { if (typeof body === 'string') bodyLen = new Blob([body]).size; } catch (_) { }
-    this.addEventListener('loadend', () => {
-      let resLen = 0;
-      try { resLen = Number(this.getResponseHeader('content-length')) || 0; } catch (_) { }
-      if (!resLen && this.responseText) resLen = this.responseText.length;
-      report({
-        dir: classify(d.method, d.url), url: d.url, method: d.method,
-        status: this.status, ms: Date.now() - d.t0, bytes: bodyLen + resLen,
-        error: this.status === 0 ? 'network' : undefined,
+    try {
+      this.addEventListener('loadend', () => {
+        try {
+          let resLen = 0;
+          try { resLen = Number(this.getResponseHeader('content-length')) || 0; } catch (_) { }
+          if (!resLen && this.responseText) resLen = this.responseText.length;
+          report({
+            dir: classify(d.method, d.url), url: d.url, method: d.method,
+            status: this.status, ms: Date.now() - d.t0, bytes: bodyLen + resLen,
+            error: this.status === 0 ? 'network' : undefined,
+          });
+        } catch (_) { }   // 读取 responseText（responseType 非 text 时会抛）失败不影响业务
       });
-    });
+    } catch (_) { }
     return XS.apply(this, arguments);
   };
 } catch (_) { }
+
+})();

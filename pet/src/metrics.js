@@ -12,12 +12,20 @@ const SERIES_MAX = 60;           // 曲线/柱状图保留的采样点数
 const SPEED_WINDOW_MS = 2000;    // 速率滑窗
 const FLOW_ACC_MAX = 60;         // 进行中流量事件上限
 const TASK_HOLD_MS = 2500;       // 任务结束后保留展示多久
+const TASK_PENDING_TTL_MS = 60 * 1000;   // 兜底：pending 任务最长存活多久（防泄漏）
 const FAIL_LOG_THROTTLE_MS = 5000;
+const LATENCY_TTL_MS = 30 * 1000;        // 延迟指标多久无新样本即视为过期归零
 
 const SESSION_THINKING_MS = 15 * 1000;    // 15s 内有交互 → 交互中
 const SESSION_IDLE_MS = 3 * 60 * 1000;    // 3min 内 → 空闲
 
 function nowMs() { return Date.now(); }
+
+// 防御性取值：任何外部喂进来的东西都可能不是预期类型（渲染进程上报、上游口径变化）
+function num(v, dflt = 0) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : dflt;
+}
 
 // 连接失败（status 0）也必须算失败——面板挂掉时这恰恰是最该看见的信息
 function isFail(status) {
@@ -70,13 +78,16 @@ function createMetrics() {
   const flowEvents = [];
   let logSeq = 0;
   let lastFailLogAt = 0;
+  let latencyAt = nowMs();       // 最近一次有效延迟样本时刻（用于过期归零）
   let currentUp = '', currentDown = '';
 
   function pushLog(level, msg, detail) {
     const d = new Date();
     const ts = String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0')
       + ':' + String(d.getSeconds()).padStart(2, '0');
-    const item = { seq: ++logSeq, level: level || 'info', msg: String(msg || ''), ts, detail: detail || String(msg || ''), at: nowMs() };
+    // detail 兜底：调用方可能传对象/异常，避免渲染层 esc() 拿到非字符串
+    const det = detail == null ? String(msg || '') : (typeof detail === 'string' ? detail : (() => { try { return JSON.stringify(detail); } catch (_) { return String(detail); } })());
+    const item = { seq: ++logSeq, level: level || 'info', msg: String(msg || ''), ts, detail: det, at: nowMs() };
     logs.push(item);
     // 环形淘汰：先追加再裁剪，保证最新一条一定在
     if (logs.length > RING_MAX) logs.splice(0, logs.length - RING_MAX);
@@ -87,11 +98,16 @@ function createMetrics() {
     while (arr.length && t - arr[0].t > SPEED_WINDOW_MS) arr.shift();
   }
 
-  // 记一笔流量。opts: {dir, bytes, ms, status, label, url, state, sessionId, source}
+  // 记一笔流量。opts: {dir, bytes, ms, status, label, url, method, state, sessionId, source}
+  // 返回 {dir, bytes, failed, accepted}；accepted=false 表示入参非法被丢弃。
   function meter(opts) {
     const o = opts || {};
-    const dir = o.dir === 'up' ? 'up' : 'down';
-    const bytes = Math.max(0, Number(o.bytes) || 0);
+    // 方向必须显式声明：早先缺省按 'down' 记账，导致漏传 dir 的调用被静默算成下载。
+    // 现在 dir 非法即拒收（宁可少记一笔，也不要记错一笔）。
+    if (o.dir !== 'up' && o.dir !== 'down') return { dir: '', bytes: 0, failed: false, accepted: false };
+    const dir = o.dir;
+    const bytes = Math.max(0, num(o.bytes));
+    const ms = o.ms == null ? null : Math.max(0, num(o.ms));
     const t = nowMs();
 
     if (dir === 'up') {
@@ -102,7 +118,7 @@ function createMetrics() {
       state.downTotal += bytes;
       state.downReqs++;
       if (bytes > state.downPeak) state.downPeak = bytes;
-      if (o.ms != null) { state.downloadMsSum += o.ms; state.downloadMsCount++; }
+      if (ms != null) { state.downloadMsSum += ms; state.downloadMsCount++; }
     }
     state.reqTotal++;
 
@@ -117,17 +133,25 @@ function createMetrics() {
     win[dir].push({ t, bytes });
     trimWin(win[dir], t);
 
-    if (o.ms != null) state.latency = o.ms;
+    // 延迟样本必须**显式声明**（latencySample: true）才写入：
+    // 早先任意方向的 ms 都会覆盖 latency，且 status 0（根本没到服务端）也照写，
+    // 一旦覆盖便永不失效（面板离线后 pill 仍举着旧延迟显示"已连接"）。
+    // 现在语义收紧为"只有真正拿到响应的往返才算延迟样本"。
+    if (ms != null && o.latencySample === true) {
+      state.latency = ms;
+      latencyAt = t;
+    }
 
     // 失败日志（连接失败/4xx/5xx），做节流避免刷屏
     if (failed && t - lastFailLogAt > FAIL_LOG_THROTTLE_MS) {
       lastFailLogAt = t;
       const ep = shortEndpoint(o.url);
-      const how = o.status === 0 ? '连接失败' : 'HTTP ' + o.status;
+      const st = num(o.status);
+      const how = st === 0 ? '连接失败' : 'HTTP ' + st;
       pushLog('warn', `${dir === 'up' ? '上行' : '下行'} ${how} · ${ep}`,
         `${how}\nendpoint : ${ep}\n方向     : ${dir === 'up' ? '上传' : '下载'}\n错误     : ${o.error || '—'}`);
     }
-    return { dir, bytes, failed };
+    return { dir, bytes, failed, accepted: true };
   }
 
   // 任务占位：只登记"正在发生"，不计入累计（避免一次往返被算 3 笔）
@@ -145,29 +169,50 @@ function createMetrics() {
     return ev;
   }
 
-  // 结束最近一个同方向的 pending 任务
+  // 结束最近一个同方向的 pending 任务。
+  // 并发保护：同一方向可能有多笔在飞（如两个并发 memorySearch），
+  // 按"最近一个 pending"结束是 LIFO，会与真实完成顺序错配。
+  // 这里优先按 url+method 精确匹配，找不到再退回 LIFO，并显式返回 matched 供调用方观测。
   function endTask(dir, opts) {
     const o = opts || {};
-    for (let i = flowEvents.length - 1; i >= 0; i--) {
-      const ev = flowEvents[i];
-      if (ev.dir === dir && ev.state === 'pending') {
-        ev.state = o.state || 'done';
-        ev.bytes = Number(o.bytes) || 0;
-        ev.ms = o.ms == null ? null : o.ms;
-        ev.status = o.status == null ? null : o.status;
-        if (o.label) ev.label = o.label;
-        return ev;
+    const want = dir === 'up' ? 'up' : 'down';
+    let picked = -1;
+    if (o.url) {
+      for (let i = flowEvents.length - 1; i >= 0; i--) {
+        const ev = flowEvents[i];
+        if (ev.dir === want && ev.state === 'pending' && ev.url === o.url && (!o.method || !ev.method || ev.method === o.method)) { picked = i; break; }
       }
     }
-    return null;
+    if (picked < 0) {
+      for (let i = flowEvents.length - 1; i >= 0; i--) {
+        const ev = flowEvents[i];
+        if (ev.dir === want && ev.state === 'pending') { picked = i; break; }
+      }
+    }
+    if (picked < 0) return null;
+    const ev = flowEvents[picked];
+    ev.state = o.state || 'done';
+    ev.bytes = Math.max(0, num(o.bytes));
+    ev.ms = o.ms == null ? null : Math.max(0, num(o.ms));
+    ev.status = o.status == null ? null : num(o.status);
+    ev.doneAt = nowMs();
+    if (o.label) ev.label = o.label;
+    return ev;
   }
 
-  // 清理过期任务（只保留最近 TASK_HOLD_MS 内结束的）
+  // 清理过期任务：
+  //   - 已结束的任务保留 TASK_HOLD_MS 供展示；
+  //   - **pending 任务也必须有过期机制**（否则请求异常中断后永久占位，
+  //     挤掉 FLOW_ACC_MAX 名额，让真实任务无法登记）。
   function rebuildTasks() {
     const t = nowMs();
     for (let i = flowEvents.length - 1; i >= 0; i--) {
       const ev = flowEvents[i];
-      if (ev.state !== 'pending' && t - ev.at > TASK_HOLD_MS) flowEvents.splice(i, 1);
+      if (ev.state === 'pending') {
+        if (t - ev.at > TASK_PENDING_TTL_MS) { ev.state = 'stale'; ev.ms = t - ev.at; ev.doneAt = t; }
+      } else if (t - ev.at > TASK_HOLD_MS) {
+        flowEvents.splice(i, 1);
+      }
     }
   }
 
@@ -213,13 +258,16 @@ function createMetrics() {
     else { currentDown = label || ''; state.currentDown = currentDown; }
   }
 
-  function setLatency(ms) { state.latency = Number(ms) || 0; }
+  function setLatency(ms) { state.latency = Math.max(0, num(ms)); latencyAt = nowMs(); }
 
   // 每秒采样：算速率、推序列
   function sample() {
     const t = nowMs();
     trimWin(win.up, t);
     trimWin(win.down, t);
+
+    // 延迟过期归零：没有新鲜样本时不能一直举着旧值（面板离线后 pill 会误报"已连接"）
+    if (state.latency > 0 && t - latencyAt > LATENCY_TTL_MS) state.latency = 0;
 
     function rate(arr) {
       if (!arr.length) return 0;                       // 窗口空了必须归零
@@ -251,6 +299,8 @@ function createMetrics() {
     const upTask = latestTask('up');
     const downTask = latestTask('down');
     const sess = listSessions();
+    // 渲染层用来判断延迟是否还可信（> LATENCY_TTL_MS 即过期，应显示"—"）
+    const latencyAge = state.latency > 0 ? Math.max(0, nowMs() - latencyAt) : -1;
     return Object.assign({
       ok: true,
       at: nowMs(),
@@ -258,15 +308,19 @@ function createMetrics() {
       metrics: {
         upSpeed, downSpeed,
         uploadBytes: state.upTotal, downloadBytes: state.downTotal,
+        // 兼容别名：早期调用方/测试用的是 upTotal/downTotal
+        upTotal: state.upTotal, downTotal: state.downTotal,
         uploadRequests: state.upReqs, downloadRequests: state.downReqs,
         uploadCommits: state.upCommits, uploadFails: state.upFails, downloadFails: state.downFails,
         uploadPeak: state.upPeak, downloadPeak: state.downPeak,
         reqTotal: state.reqTotal, reqFailed: state.reqFailed,
         downloadAvgMs: state.downloadMsCount ? Math.round(state.downloadMsSum / state.downloadMsCount) : 0,
         latency: state.latency,
+        latencyAge,
+        latencyStale: latencyAge < 0 ? true : latencyAge > LATENCY_TTL_MS,
         currentUp, currentDown,
-        upTask: upTask ? { label: upTask.label, state: upTask.state, dir: upTask.dir, bytes: upTask.bytes, ms: upTask.ms, status: upTask.status } : null,
-        downTask: downTask ? { label: downTask.label, state: downTask.state, dir: downTask.dir, bytes: downTask.bytes, ms: downTask.ms, status: downTask.status } : null,
+        upTask: upTask ? { label: upTask.label, state: upTask.state, dir: upTask.dir, bytes: upTask.bytes, ms: upTask.ms, status: upTask.status, url: upTask.url } : null,
+        downTask: downTask ? { label: downTask.label, state: downTask.state, dir: downTask.dir, bytes: downTask.bytes, ms: downTask.ms, status: downTask.status, url: downTask.url } : null,
       },
       series: { t: series.t.slice(), up: series.up.slice(), down: series.down.slice(), lat: series.lat.slice() },
       sessions: sess,
@@ -279,8 +333,8 @@ function createMetrics() {
     state, pushLog, meter, beginTask, endTask, rebuildTasks, latestTask,
     touchSession, dropSessions, listSessions, sessionStateOf, setCurrent, setLatency,
     sample, snapshot, shortEndpoint, fmtBytes, fmtSpeed,
-    RING_MAX, SERIES_MAX,
+    RING_MAX, SERIES_MAX, LATENCY_TTL_MS,
   };
 }
 
-module.exports = { createMetrics, fmtBytes, fmtSpeed, shortEndpoint, isFail, RING_MAX, SERIES_MAX, SPEED_WINDOW_MS };
+module.exports = { createMetrics, fmtBytes, fmtSpeed, shortEndpoint, isFail, RING_MAX, SERIES_MAX, SPEED_WINDOW_MS, LATENCY_TTL_MS, TASK_PENDING_TTL_MS };

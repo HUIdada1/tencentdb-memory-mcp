@@ -13,6 +13,7 @@ const https = require('https');
 const CFG_PATH = path.join(os.homedir(), '.zcode', 'tdai-mcp.json');
 const RESULT_LIMIT = 6144; // 单条结果截断 ≤6KB
 const REQ_TIMEOUT = 15000;
+const MAX_RES_BYTES = 8 * 1024 * 1024;  // 单次响应体硬上限 8MB（防面板异常返回打爆内存）
 
 /* ---------- 配置 ---------- */
 
@@ -68,26 +69,42 @@ function normLayer(layer, dflt) {
 
 function requestRaw(urlStr, { method = 'GET', headers = {}, body = null, timeout = REQ_TIMEOUT } = {}) {
   return new Promise((resolve, reject) => {
-    const u = new URL(urlStr);
+    let u;
+    try { u = new URL(urlStr); } catch (e) { reject(new Error('URL 非法: ' + urlStr)); return; }
     const mod = u.protocol === 'https:' ? https : http;
-    const req = mod.request({
-      hostname: u.hostname,
-      port: u.port || (u.protocol === 'https:' ? 443 : 80),
-      path: u.pathname + u.search,
-      method,
-      headers: Object.assign({ 'Accept': 'application/json' }, headers),
-      timeout,
-    }, (res) => {
-      const chunks = [];
-      res.on('data', (c) => chunks.push(c));
-      res.on('end', () => {
-        resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks).toString('utf8') });
+    let req;
+    try {
+      req = mod.request({
+        hostname: u.hostname,
+        port: u.port || (u.protocol === 'https:' ? 443 : 80),
+        path: u.pathname + u.search,
+        method,
+        headers: Object.assign({ 'Accept': 'application/json' }, headers),
+        timeout,
+      }, (res) => {
+        const chunks = [];
+        // 响应上限：面板异常返回超大内容时不许把内存吃光（检索结果本就有 6KB 截断）
+        let total = 0;
+        res.on('data', (c) => {
+          total += c.length;
+          if (total > MAX_RES_BYTES) { try { req.destroy(new Error('response too large')); } catch (_) { } return; }
+          chunks.push(c);
+        });
+        res.on('end', () => {
+          resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks).toString('utf8') });
+        });
+        res.on('error', (e) => reject(e));
       });
-    });
+    } catch (e) {
+      reject(e);
+      return;
+    }
     req.on('timeout', () => { req.destroy(new Error('timeout')); });
     req.on('error', reject);
-    if (body != null) req.write(typeof body === 'string' ? body : JSON.stringify(body));
-    req.end();
+    try {
+      if (body != null) req.write(typeof body === 'string' ? body : JSON.stringify(body));
+      req.end();
+    } catch (e) { reject(e); }
   });
 }
 
@@ -123,8 +140,11 @@ function create(overrides) {
     const url = cfg.panelUrl + '/api/v1' + pathname;
     const t0 = Date.now();
     // 上行字节 = 请求体长度（真实写出前即可精确得知）
-    const reqBytes = body == null ? 0
-      : Buffer.byteLength(typeof body === 'string' ? body : JSON.stringify(body), 'utf8');
+    let reqBytes = 0;
+    try {
+      reqBytes = body == null ? 0
+        : Buffer.byteLength(typeof body === 'string' ? body : JSON.stringify(body), 'utf8');
+    } catch (_) { reqBytes = 0; }   // 循环引用等不可序列化入参：交给 requestRaw 去报错，计量不参与
     if (onHttpStart) { try { onHttpStart({ url, method, reqBytes }); } catch (_) {} }
 
     let r;
@@ -138,6 +158,9 @@ function create(overrides) {
     if (onHttp) {
       try { onHttp({ url, method, reqBytes, resBytes: Buffer.byteLength(r.body || '', 'utf8'), status: r.status, ms: Date.now() - t0 }); } catch (_) {}
     }
+    // r 理论上不会是 null，但请求层任何改动都可能让它变成 undefined；
+    // 这里显式兜底，避免下游出现 "Cannot read properties of null" 这种难查的崩溃。
+    if (!r || typeof r.status !== 'number') return err('面板响应异常', '响应结构不符合预期（未拿到 status）');
     if (r.status === 401 || r.status === 403) return err(`认证失败 HTTP ${r.status}`, 'userKey 可能失效');
     if (r.status >= 500) return err(`面板 5xx (${r.status})`, clip(r.body, 800));
     let json;

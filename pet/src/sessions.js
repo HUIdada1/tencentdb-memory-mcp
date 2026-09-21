@@ -121,9 +121,17 @@ function readTail(file, maxBytes) {
   }
 }
 
+// 扫描结果缓存：4s 一轮全量扫描 + 每文件 96KB 回读，会话多时是纯浪费。
+// 文件 mtime + size 都没变就直接复用上一轮结果（这是最容易命中且收益最大的优化）。
+const scanCache = new Map();   // file -> { mtimeMs, size, result }
+
 function scanOne(entry) {
   let st;
   try { st = fs.statSync(entry.file); } catch (_) { return null; }
+
+  const hit = scanCache.get(entry.file);
+  if (hit && hit.mtimeMs === st.mtimeMs && hit.size === st.size) return hit.result;
+
   const { text, size } = readTail(entry.file, TAIL_BYTES);
   const parse = PARSERS[entry.source] || parseZCodeLine;
 
@@ -151,7 +159,7 @@ function scanOne(entry) {
     ? (entry.session || '').replace(/^sess_/, '').slice(0, 8)
     : (entry.id || '').slice(0, 8);
 
-  return {
+  const result = {
     id: `${entry.source}:${entry.id}${entry.agent ? ':' + String(entry.agent).replace(/^agent_/, '').slice(0, 8) : ''}`,
     source: entry.source,
     label,
@@ -162,18 +170,24 @@ function scanOne(entry) {
     lastNote: String(lastNote || '').replace(/\s+/g, ' ').slice(0, NOTE_MAX),
     size,
   };
+  scanCache.set(entry.file, { mtimeMs: st.mtimeMs, size: st.size, result });
+  return result;
 }
 
 // 扫描全部会话，返回按最近交互倒序的列表
 function scanSessions(opts) {
   const o = opts || {};
-  const limit = o.limit || 40;
+  const limit = Math.max(1, Math.min(Number(o.limit) || 40, 500));
   const all = zcodeFiles().concat(claudeFiles());
   const out = [];
+  const alive = new Set();
   for (const e of all) {
+    alive.add(e.file);
     const r = scanOne(e);
     if (r) out.push(r);
   }
+  // 缓存不能无限涨：清掉本轮不再存在的文件（会话被删除/归档）
+  for (const k of Array.from(scanCache.keys())) if (!alive.has(k)) scanCache.delete(k);
   out.sort((a, b) => b.lastTs - a.lastTs);
   return { ok: true, files: all.length, total: out.length, sessions: out.slice(0, limit) };
 }

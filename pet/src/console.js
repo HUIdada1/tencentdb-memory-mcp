@@ -7,7 +7,7 @@
   const fmt = (v) => (v === null || v === undefined || v === '' ? '—' : String(v));
   const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-  const S = { snap: null, appInfo: null, sessTimer: null, latencyHist: [], lastLogSeq: 0, logPaused: false, scanAnchor: 0, scanInterval: 120 };
+  const S = { snap: null, appInfo: null, sessTimer: null, latencyHist: [], lastLogSeq: 0, logPaused: false, logClearSeq: 0, scanAnchor: 0, scanInterval: 120 };
 
   /* ---------- 数值格式化 ---------- */
   function fmtBytes(n) {
@@ -104,7 +104,14 @@
   $$('#subtabs button').forEach((b) => b.addEventListener('click', () => switchSub(b.dataset.sub)));
 
   /* ---------- 主题 ---------- */
-  function applyTheme(t) { document.documentElement.dataset.theme = t; }
+  const IC_SUN = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2M12 19.5v2M4.2 4.2l1.4 1.4M18.4 18.4l1.4 1.4M2.5 12h2M19.5 12h2M4.2 19.8l1.4-1.4M18.4 5.6l1.4-1.4"/></svg>';
+  const IC_MOON = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>';
+  function applyTheme(t) {
+    document.documentElement.dataset.theme = t;
+    // 深色下显示"太阳"（点了变浅色），浅色下显示"月亮"，图标即下一步动作
+    const b = $('#btn-theme');
+    if (b) b.innerHTML = t === 'dark' ? IC_SUN : IC_MOON;
+  }
   tdai.prefsLoad().then((p) => {
     applyTheme(p.ui.theme === 'auto' ? (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light') : p.ui.theme);
     const st = $('#set-theme'); if (st) st.value = p.ui.theme || 'dark';
@@ -363,12 +370,16 @@
     const box = $('#log-list');
     if (!box) return;
     logs = logs || [];
+    if (typeof logSeq === 'number') S.lastLogSeq = logSeq;
+    // 应用"清空"水位线：只展示水位线之后的新日志
+    const floor = S.logClearSeq || 0;
+    const view0 = floor ? logs.filter((l) => (l.seq || 0) > floor) : logs;
     const cnt = $('#log-count');
-    if (cnt) cnt.textContent = `共 ${logs.length} 条${S.logPaused ? ' · 已暂停' : ''}`;
+    if (cnt) cnt.textContent = `共 ${view0.length} 条${S.logPaused ? ' · 已暂停' : (floor ? ' · 已隐藏旧日志' : '')}`;
     if (S.logPaused) return;
-    if (!logs.length) { box.innerHTML = '<div class="empty">等待日志…</div>'; return; }
+    if (!view0.length) { box.innerHTML = '<div class="empty">等待日志…</div>'; return; }
     // 倒序：最新在最上
-    const view = logs.slice().reverse();
+    const view = view0.slice().reverse();
     box.innerHTML = view.map((l) => `<div class="log-row" data-seq="${l.seq}">
       <span class="log-t">${esc(l.ts || '')}</span>
       <span class="log-lv ${esc(l.level || 'info')}">${esc(LV_TEXT[l.level] || String(l.level || '').toUpperCase())}</span>
@@ -380,7 +391,10 @@
   const logClear = $('#log-clear');
   if (logClear) logClear.addEventListener('click', () => {
     const box = $('#log-list');
-    if (box) box.innerHTML = '<div class="empty">日志已清空（新日志仍会继续追加）</div>';
+    // 早先只清 DOM，下一次 1s 推送立刻恢复（"清空"是假象）。
+    // 现在记录清理水位线：仅隐藏 <= 水位线的旧日志，新日志照常追加。
+    S.logClearSeq = S.lastLogSeq;
+    if (box) box.innerHTML = '<div class="empty">已隐藏此前的日志（新日志继续追加）</div>';
   });
   const logPause = $('#log-pause');
   if (logPause) logPause.addEventListener('click', () => {
@@ -411,9 +425,12 @@
   }
 
   async function refreshDaemon(announce) {
+    // 全流程兜底：daemonPing / cursorStats 各自有 .catch，但中间的 DOM 渲染
+    // 一旦因字段缺失抛错，整个 15s 定时器就会持续抛未捕获异常。
+    try {
     const r = await tdai.daemonPing().catch(() => ({ ok: false, error: 'ipc 异常' }));
     const mode = $('#d-mode');
-    if (r.ok && r.payload) {
+    if (r && r.ok && r.payload) {
       const p = r.payload;
       if (mode) { mode.textContent = '运行中'; setCls(mode, 'ok'); }
       const since = $('#d-since'); if (since) since.textContent = p.uptimeSince ? localTime(p.uptimeSince) : '—';
@@ -448,21 +465,28 @@
     }
     const port = $('#d-port');
     if (port && S.appInfo) port.textContent = `127.0.0.1:${S.appInfo.port}`;
+    } catch (e) {
+      // 守护卡片渲染异常不应打断总览主流程（它跑在独立的 15s 定时器里）
+      if (announce) pushLocal('warn', '守护状态刷新异常：' + ((e && e.message) || e));
+    }
   }
 
-  // 渲染进程侧即时提示（写进同一日志流由主进程推送；此处仅在无法回传时兜底）
+  // 渲染进程侧即时提示（与主进程日志流共用同一个 DOM；只做"本地兜底"）
   function pushLocal(level, msg) {
     const box = $('#log-list');
     if (!box || S.logPaused) return;
+    // level 必须是已知级别，否则 LV_TEXT 查不到、class 也可能被注入奇怪值
+    const lv = LV_TEXT[level] ? level : 'info';
+    const text = String(msg == null ? '' : msg);
     if (box.querySelector('.empty')) box.innerHTML = '';
     const d = new Date();
     const ts = [d.getHours(), d.getMinutes(), d.getSeconds()].map((n) => String(n).padStart(2, '0')).join(':');
     const row = document.createElement('div');
     row.className = 'log-row';
     row.innerHTML = `<span class="log-t">${esc(ts)}</span>
-      <span class="log-lv ${esc(level)}">${esc(LV_TEXT[level] || level.toUpperCase())}</span>
-      <span class="log-msg">${esc(msg)}</span>
-      <div class="log-detail">${esc(msg)}</div>`;
+      <span class="log-lv ${esc(lv)}">${esc(LV_TEXT[lv])}</span>
+      <span class="log-msg">${esc(text)}</span>
+      <div class="log-detail">${esc(text)}</div>`;
     box.insertBefore(row, box.firstChild);
     while (box.children.length > 200) box.removeChild(box.lastChild);
   }
@@ -479,12 +503,14 @@
     const hp = $('#h-panel');
     if (hp) hp.textContent = String(snap.panelUrl || '').replace(/^https?:\/\//, '') || '未配置';
 
-    if (m.latency > 0) {
+    // 延迟过期（metrics.latencyStale）时不再画入曲线，避免"幽灵延迟"
+    const latFresh = m.latency > 0 && m.latencyStale !== true;
+    if (latFresh) {
       S.latencyHist.push(m.latency);
       if (S.latencyHist.length > 120) S.latencyHist.shift();
       drawSpark();
     }
-    const hl = $('#h-latency'); if (hl) hl.textContent = m.latency > 0 ? m.latency + ' ms' : '—';
+    const hl = $('#h-latency'); if (hl) hl.textContent = latFresh ? m.latency + ' ms' : '—';
 
     // 连接状态 pill 必须跟着心跳一起更新（它就是权威状态源）
     refreshHealthPill();
@@ -495,10 +521,13 @@
     renderLogs(snap.logs, snap.logSeq);
     renderLiveMeta(snap.sessions);
 
+    // 与 pill 严格同口径：pill 是权威源，这里不再自己判一次，
+    // 否则「pill=检测中」而横幅写「实时连接正常」会自相矛盾（早先 null 时就是如此）。
+    const connected = HEALTH.connected;
     setLive(
-      snap.panelOk !== false,
-      snap.panelOk === false ? '面板连接已中断' : '实时连接正常',
-      `${sanitizePanel(snap.panelUrl)} · 面板延迟 ${m.latency || 0}ms · 链路 ${fmtSpeed(m.upSpeed)}↑ ${fmtSpeed(m.downSpeed)}↓`
+      connected !== false,
+      connected === false ? '面板连接已中断' : (connected === true ? '实时连接正常' : '等待首次往返…'),
+      `${sanitizePanel(snap.panelUrl)} · 面板延迟 ${latFresh ? m.latency : 0}ms · 链路 ${fmtSpeed(m.upSpeed)}↑ ${fmtSpeed(m.downSpeed)}↓`
     );
   }
   function sanitizePanel(u) {
@@ -528,8 +557,18 @@
     set('#live-total', String(list.length));
   }
 
-  tdai.on('metrics', ({ payload }) => { tick(payload); });
-  setInterval(() => { refreshDaemon(false); }, 15000);
+  // tick 是 async：早先直接 `tick(payload)` 会把内部异常变成 unhandledRejection，
+  // 整块总览静默停止刷新且无任何提示。现在显式串行 + 捕获。
+  let tickRunning = false;
+  tdai.on('metrics', ({ payload } = {}) => {
+    if (tickRunning) return;   // 上一次还没画完就丢弃这一帧（1s 一帧，丢帧无害）
+    tickRunning = true;
+    Promise.resolve()
+      .then(() => tick(payload))
+      .catch((e) => { try { pushLocal('error', '总览刷新异常：' + ((e && e.message) || e)); } catch (_) { } })
+      .then(() => { tickRunning = false; });
+  });
+  setInterval(() => { refreshDaemon(false).catch(() => { }); }, 15000);
   // 连接状态兜底刷新：即使 metrics 推送中断，也保证不会永远卡在"检测中"
   setInterval(refreshHealthPill, 2000);
   // 运行时长独立刷新：不依赖 metrics 推送，切页面时也不会停在旧值
@@ -540,9 +579,17 @@
     if (up) up.textContent = fmtUptime(S.snap.uptime + (Date.now() - S.snap.at));
   }, 1000);
   setInterval(() => {
-    if ($('.page[data-page="home"]').classList.contains('active')) renderScanCountdown();
-    if ($('.page[data-page="live"]').classList.contains('active')) renderScanCountdown();
+    // 早先直接 $('.page[...]').classList —— 元素缺失时抛 TypeError，
+    // 1s 定时器每次都炸一次（静默刷屏）。统一走 activePage() 并做空值保护。
+    const cur = activePage();
+    if (cur === 'home' || cur === 'live') renderScanCountdown();
   }, 1000);
+
+  // 当前激活页面（元素缺失时返回 ''，绝不抛错）
+  function activePage() {
+    const p = $('.page.active');
+    return (p && p.dataset && p.dataset.page) || '';
+  }
 
   /* ============================================================
      总览：记忆库资产
@@ -903,7 +950,16 @@
       const c = await tdai.connSave(body);
       $('#set-key').value = '';
       if (c.hasUserKey) $('#set-key').placeholder = `${c.userKeyMasked}（已保存，留空则不修改）`;
-      banner('b-conn', 'ok', '配置已保存（原文件备份为 .bak），后台守护已按新配置重启。');
+      // 守护重启结果必须如实回显：早先主进程把错误吞掉，这里无脑报"已重启"，
+      // 用户会以为新地址生效了，实际守护还跑在旧配置上。
+      const rs = c.restart || {};
+      if (rs.ok === false) {
+        banner('b-conn', 'err', `配置已保存，但后台守护重启失败：${rs.error || '未知原因'}。请到「设置 → 更新」或用托盘菜单重启应用。`);
+      } else if (rs.external) {
+        banner('b-conn', 'ok', '配置已保存。端口被外部守护进程占用，已切换为外部守护模式（由该进程继续提供本地服务）。');
+      } else {
+        banner('b-conn', 'ok', '配置已保存（原文件备份为 .bak），后台守护已按新配置重启。');
+      }
       await tdai.refresh();
     } catch (e) {
       banner('b-conn', 'err', '保存失败：' + (e && e.message ? e.message : e));
@@ -982,6 +1038,22 @@
       <span class="badge ${esc(it.status)}">${esc(STATUS_LABEL[it.status] || it.status)}</span>
     </div>`).join('');
   });
+
+  /* ============================================================
+     波纹反馈（原型 v3 同款）：把点击点坐标写进 --rx / --ry，
+     由 CSS 的 .btn-*::after 径向渐变在按下时从该点扩散。
+     ============================================================ */
+  (function bindRipple() {
+    const SEL = '.btn-primary, .btn-ghost, .btn-danger, .ghost, .mini, .icon-btn';
+    document.addEventListener('pointerdown', (e) => {
+      const el = e.target.closest && e.target.closest(SEL);
+      if (!el || el.disabled) return;
+      const r = el.getBoundingClientRect();
+      if (!r.width || !r.height) return;
+      el.style.setProperty('--rx', (((e.clientX - r.left) / r.width) * 100).toFixed(2) + '%');
+      el.style.setProperty('--ry', (((e.clientY - r.top) / r.height) * 100).toFixed(2) + '%');
+    }, { passive: true });
+  })();
 
   /* ---------- 启动 ---------- */
   onHomeShown();
