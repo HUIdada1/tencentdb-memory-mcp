@@ -1,8 +1,8 @@
 node_modules/
 dist/
 release/
-pet/node_modules/
-pet/dist/
+*.exe
+sea-prep.blob
 *.log
 .tdaipet/
 .DS_Store
@@ -12,9 +12,8 @@ Thumbs.db
 TD记忆守护-设计预览.html
 screenshot*.png
 ui*.png
-pet/final.png
-pet/pet*.log
 .workbuddy-ai/
 方案-后台无感记忆守护.md
 无感记忆方案.md
-TD记忆守护-设计预览.html
+最终方案-无感记忆守护.md
+.mcp.json

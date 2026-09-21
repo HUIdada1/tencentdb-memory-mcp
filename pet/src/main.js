@@ -26,11 +26,11 @@ let lastHealth = { ok: false, at: 0, latencyMs: 0, message: '未初始化' };
 function defaultCfg() {
   return {
     panel: {
-      url: 'http://muhuihao.top:8125',
+      url: '',
       userKey: '',
-      teamId: 'team-zcv52tgzwg',
-      agentId: 'agt-zc6vu8z5ks',
-      taskId: 'task-zdlxl0mp4h',
+      teamId: '',
+      agentId: '',
+      taskId: '',
     },
     pet: {
       x: null, y: null,

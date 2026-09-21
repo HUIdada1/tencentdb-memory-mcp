@@ -15,8 +15,8 @@ c.mcp = c.mcp || {};
 c.mcp.servers = c.mcp.servers || {};
 c.mcp.servers.tdai = {
   type: 'stdio',
-  command: 'E:\\nvm\\v22.22.0\\node.exe',
-  args: ['E:\\idea work\\腾讯记忆链接\\mcp\\tdai-mcp.js'],
+  command: 'node',
+  args: [path.join(__dirname, 'tdai-mcp.js')],
 };
 fs.writeFileSync(CFG, JSON.stringify(c, null, 2));
 console.log('备份:', bak);

@@ -1,0 +1,10 @@
+{
+  "name": "tencentdb-memory-mcp",
+  "version": "0.2.0",
+  "private": true,
+  "description": "TD 记忆守护：MCP server + 后台记忆守护进程（采集上传 + 本地 recall 服务）",
+  "bin": {
+    "tdai-daemon": "daemon/tdai-daemon.js",
+    "tdai-mcp": "mcp/tdai-mcp.js"
+  }
+}

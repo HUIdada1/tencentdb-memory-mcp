@@ -1,9 +1,0 @@
-{
-  "mcpServers": {
-    "tdai": {
-      "type": "stdio",
-      "command": "E:\\nvm\\v22.22.0\\node.exe",
-      "args": ["E:\\idea work\\腾讯记忆链接\\mcp\\tdai-mcp.js"]
-    }
-  }
-}

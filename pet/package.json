@@ -1,6 +1,6 @@
 {
   "name": "tdai-pet",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "TD AI Memory Pet — 桌面记忆守护",
   "main": "src/main.js",
   "author": "huihui",
@@ -20,7 +20,7 @@
     "electron-builder": "^25.1.8"
   },
   "build": {
-    "appId": "top.muhuihao.tdai-pet",
+    "appId": "com.tdai.pet",
     "productName": "TD记忆守护",
     "directories": { "output": "../release", "buildResources": "../build" },
     "electronLanguages": ["zh-CN", "en-US"],

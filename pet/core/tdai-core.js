@@ -11,10 +11,10 @@ const http = require('http');
 const https = require('https');
 
 const CFG_PATH = path.join(os.homedir(), '.zcode', 'tdai-mcp.json');
-const DEFAULT_PANEL = 'http://muhuihao.top:8125';
-const DEFAULT_TEAM = 'team-zcv52tgzwg';
-const DEFAULT_AGENT = 'agt-zc6vu8z5ks';
-const DEFAULT_TASK = 'task-zdlxl0mp4h';
+const DEFAULT_PANEL = '';
+const DEFAULT_TEAM = '';
+const DEFAULT_AGENT = '';
+const DEFAULT_TASK = '';
 const RESULT_LIMIT = 6144; // 单条结果截断 ≤6KB
 const REQ_TIMEOUT = 15000;
 

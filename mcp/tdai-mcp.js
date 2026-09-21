@@ -10,7 +10,7 @@ const readline = require('readline');
 const core = require(path.join(__dirname, '..', 'core', 'tdai-core.js'));
 
 const SERVER_NAME = 'tdai-memory';
-const SERVER_VER = '0.1.0';
+const SERVER_VER = '0.2.0';
 
 /* ---------- 工具目录（inputSchema 用 JSON Schema） ---------- */
 
@@ -20,6 +20,14 @@ const TOOLS = [
     description: 'TD 记忆库健康检查：面板连通性 + 知识面状态。NAS 离线时返回中文可读错误。',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
     run: (c) => c.health(),
+  },
+  {
+    name: 'tdai.my_agents',
+    description: '查看面板里当前用户可见的 Agent 列表（检索前拿维度过滤用）。',
+    inputSchema: {
+      type: 'object', properties: { team_id: { type: 'string' } }, additionalProperties: false,
+    },
+    run: (c, a) => c.myAgents(a),
   },
   {
     name: 'tdai.memory_search',
