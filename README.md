@@ -11,17 +11,42 @@
 ```
 ├─ core/tdai-core.js             # 零依赖客户端：配置加载、面板 API 封装、只读检索 + 会话导入
 ├─ daemon/tdai-daemon.js         # 守护进程（单文件自包含，可打包 SEA exe）
-│   ├─ serve（默认）              #   HTTP :8100（recall/push/health）+ 2 分钟采集上传循环
+│   ├─ serve（默认）              #   HTTP :8100（控制台 + recall/push/health + 配置 API）+ 2 分钟采集上传循环
 │   ├─ push                      #   立即采集上传一轮
 │   ├─ hook                      #   recall hook 入口（stdin/--q → /recall → stdout）
 │   └─ health                    #   健康状态
+│   └─ console.html              #   本地控制台页（GET http://127.0.0.1:8100/）
 ├─ mcp/tdai-mcp.js               # MCP server（stdio，tdai_* 只读工具）+ CLI 双模式
 ├─ register-all.cjs              # 一键注册：全客户端 MCP + Claude Code hook + 指令文件 + 可选自启
 ├─ skills/tdai-memory/SKILL.md   # ZCode skill 兜底（无 MCP 客户端走 CLI）
 ├─ .github/workflows/release.yml # 发版流水线（Node SEA 单文件 exe → GitHub Releases）
-├─ sea-config.json               # SEA 打包配置
+├─ sea-config.json               # SEA 打包配置（内嵌 console.html）
 └─ package.json                  # 版本号（发版用）
 ```
+
+## 本地控制台
+
+守护进程运行时打开 **http://127.0.0.1:8100/**，四个 tab：
+
+| Tab | 内容 |
+|---|---|
+| 连接 | panelUrl / userKey / teamId / agentId / taskId / blockId 配置（每项带小问号悬浮解释）、**保存配置**、**链接测试**（面板可达性 + 认证） |
+| Agent 接入 | **第一次使用引导**（Agent 怎么连：后台自动处理 / MCP 安装 / hook 信任说明）+ 各客户端接入状态实时检测（已接入 / 未接入 / 未安装） |
+| 状态 | 守护进程 / NAS 可达性 / 配置完整性 / hook 调用次数 / 最近上传 / 离线队列（无数据显示 `-`） |
+| 设置 | **检查更新**（线上最新 release vs 当前版本）+ 更新方式说明 |
+
+配置在控制台保存后立即生效（写 `~/.zcode/tdai-mcp.json`，原文件备份为 `.bak`），userKey 只回显脱敏形式。
+
+## 首次使用：Agent 怎么连？
+
+分两种方式，**装一次就永久生效，之后每次对话都不用手动指定任何东西**：
+
+1. **后台自动处理（推送 + 注入）**——守护进程启动后无需任何配置：自动采集各 Agent 的会话增量上传记忆库（Push）；登录自启用 `node register-all.cjs --autostart`。
+2. **MCP 安装（Agent 主动检索）**——跑一次 `node register-all.cjs`：自动把记忆工具写进本机所有支持 MCP 的客户端配置（ZCode / Claude Code / Cursor / Codex），并追加全局指令文件（档 B 兜底）。之后每个新会话自动携带记忆工具，模型需要时自主调用（Pull）。
+
+Claude Code 额外注入 `UserPromptSubmit` hook：每次提问前自动检索相关记忆并注入上下文，真正无感（不依赖模型主动调用）。**首次使用时客户端会提示「信任」该 hook，点一次即可**；未信任时 hook 静默不执行，MCP + 指令文件仍兜底。
+
+**接入状态提示**：控制台「Agent 接入」tab 实时显示每个客户端的接入状态（已接入 / 未接入 / 未安装客户端），未接入的给出 `register-all.cjs` 一键修复提示。
 
 ## 快速开始
 

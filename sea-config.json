@@ -1,5 +1,8 @@
 {
   "main": "daemon/tdai-daemon.js",
   "output": "sea-prep.blob",
-  "disableExperimentalSEAWarning": true
+  "disableExperimentalSEAWarning": true,
+  "assets": {
+    "console.html": "./daemon/console.html"
+  }
 }

@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TD 记忆守护 · 控制台</title>
+<style>
+  :root {
+    --bg: #0f1115; --surface: #161a21; --surface2: #1c212b; --border: #262c38;
+    --text: #e6e9ef; --muted: #8a93a3; --accent: #4f9cf7; --ok: #4ade80; --warn: #fbbf24; --err: #f87171;
+    --radius: 10px; --mono: ui-monospace, Consolas, monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font: 14px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; min-height: 100dvh; }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 32px 20px 48px; }
+  h1 { font-size: 18px; font-weight: 600; letter-spacing: -0.01em; }
+  .sub { color: var(--muted); font-size: 12.5px; margin-top: 2px; }
+  /* tabs */
+  .tabs { display: flex; gap: 4px; margin: 24px 0 20px; border-bottom: 1px solid var(--border); }
+  .tab { padding: 8px 16px; cursor: pointer; color: var(--muted); font-size: 13.5px; border-bottom: 2px solid transparent; margin-bottom: -1px; user-select: none; }
+  .tab:hover { color: var(--text); }
+  .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .panel { display: none; }
+  .panel.active { display: block; }
+  /* form */
+  .field { margin-bottom: 16px; }
+  label { display: block; font-size: 13px; color: var(--text); margin-bottom: 6px; }
+  input { width: 100%; padding: 9px 12px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); font-size: 13.5px; outline: none; }
+  input:focus { border-color: var(--accent); }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 5px; }
+  /* 问号 tooltip */
+  .q { position: relative; display: inline-flex; width: 15px; height: 15px; margin-left: 6px; border-radius: 50%; border: 1px solid var(--muted); color: var(--muted); font-size: 10px; align-items: center; justify-content: center; cursor: help; vertical-align: 1px; }
+  .q:hover { border-color: var(--accent); color: var(--accent); }
+  .q .tip { display: none; position: absolute; bottom: 22px; left: 50%; transform: translateX(-50%); width: 240px; padding: 8px 10px; background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; color: var(--text); font-size: 12px; line-height: 1.5; z-index: 10; text-align: left; box-shadow: 0 6px 24px rgba(0,0,0,.4); }
+  .q:hover .tip { display: block; }
+  /* buttons */
+  .btn { padding: 8px 18px; border: none; border-radius: var(--radius); background: var(--accent); color: #fff; font-size: 13.5px; cursor: pointer; }
+  .btn:hover { filter: brightness(1.1); }
+  .btn:active { transform: scale(.98); }
+  .btn:disabled { opacity: .5; cursor: wait; }
+  .btn.ghost { background: transparent; border: 1px solid var(--border); color: var(--muted); }
+  .btn.ghost:hover { color: var(--text); border-color: var(--muted); }
+  .row { display: flex; gap: 10px; align-items: center; margin-top: 18px; }
+  /* result banner */
+  .banner { margin-top: 14px; padding: 10px 14px; border-radius: var(--radius); font-size: 13px; display: none; }
+  .banner.show { display: block; }
+  .banner.ok { background: rgba(74,222,128,.08); border: 1px solid rgba(74,222,128,.3); color: var(--ok); }
+  .banner.err { background: rgba(248,113,113,.08); border: 1px solid rgba(248,113,113,.3); color: var(--err); }
+  .banner.warn { background: rgba(251,191,36,.08); border: 1px solid rgba(251,191,36,.3); color: var(--warn); }
+  /* status list */
+  .list { border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+  .li { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-bottom: 1px solid var(--border); }
+  .li:last-child { border-bottom: none; }
+  .li .name { flex: 1; font-size: 13.5px; }
+  .li .detail { color: var(--muted); font-size: 12px; }
+  .badge { font-size: 11.5px; padding: 2px 10px; border-radius: 999px; border: 1px solid; }
+  .badge.installed { color: var(--ok); border-color: rgba(74,222,128,.4); }
+  .badge.missing { color: var(--warn); border-color: rgba(251,191,36,.4); }
+  .badge.absent { color: var(--muted); border-color: var(--border); }
+  /* kv */
+  .kv { display: grid; grid-template-columns: 140px 1fr; gap: 8px 16px; padding: 14px 0; }
+  .kv .k { color: var(--muted); font-size: 13px; }
+  .kv .v { font-size: 13px; font-family: var(--mono); word-break: break-all; }
+  .guide { border: 1px solid var(--border); border-radius: var(--radius); padding: 16px 18px; margin-top: 16px; font-size: 13px; color: var(--text); line-height: 1.7; }
+  .guide b { color: var(--accent); font-weight: 600; }
+  .guide ol { padding-left: 20px; margin-top: 6px; }
+  code { font-family: var(--mono); font-size: 12px; background: var(--surface2); padding: 1px 6px; border-radius: 5px; }
+  .loading { color: var(--muted); font-size: 13px; padding: 20px 0; }
+  .empty { color: var(--muted); font-size: 13px; text-align: center; padding: 24px 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>TD 记忆守护</h1>
+  <div class="sub">本地控制台 · 127.0.0.1:8100 · 密钥仅存本机</div>
+
+  <div class="tabs" role="tablist">
+    <div class="tab active" data-tab="conn">连接</div>
+    <div class="tab" data-tab="agents">Agent 接入</div>
+    <div class="tab" data-tab="status">状态</div>
+    <div class="tab" data-tab="settings">设置</div>
+  </div>
+
+  <!-- 连接 -->
+  <div class="panel active" id="p-conn">
+    <div class="field">
+      <label>面板地址<span class="q">?<span class="tip">Memory Hub 面板地址，含端口。本地 NAS 部署形如 http://&lt;nas-host&gt;:8125。可不带末尾斜杠。</span></span></label>
+      <input id="c-panelUrl" placeholder="http://192.168.x.x:8125">
+      <div class="hint">面板同时是检索 API 网关，守护进程与 MCP 都从这里读数据。</div>
+    </div>
+    <div class="field">
+      <label>User Key<span class="q">?<span class="tip">业务用户的 API Key，形如 sk-mem-...。在面板「成员管理」里创建用户后获取，仅存本机配置文件，不上传。</span></span></label>
+      <input id="c-userKey" type="password" placeholder="sk-mem-...">
+    </div>
+    <div class="field">
+      <label>Team ID<span class="q">?<span class="tip">团队 ID，形如 team-...。上传的记忆和检索都归属这个团队。在面板左上角团队切换处创建。</span></span></label>
+      <input id="c-teamId" placeholder="team-...">
+    </div>
+    <div class="field">
+      <label>Agent ID<span class="q">?<span class="tip">Agent ID，形如 agt-...。会话记忆关联到这个 Agent；缺失时上传会失败，可在面板的 Agents 页创建后填入。</span></span></label>
+      <input id="c-agentId" placeholder="agt-...">
+    </div>
+    <div class="field">
+      <label>Task ID（可选）<span class="q">?<span class="tip">任务 ID，形如 task-...。可留空：留空时记忆不带任务维度，检索范围更宽。</span></span></label>
+      <input id="c-taskId" placeholder="task-...">
+    </div>
+    <div class="field">
+      <label>Block ID（可选）<span class="q">?<span class="tip">面板检索的块标识，默认 chat-memory。一般不用改；仅当面板要求特定取值时填写。</span></span></label>
+      <input id="c-blockId" placeholder="chat-memory">
+    </div>
+    <div class="row">
+      <button class="btn" id="btn-save">保存配置</button>
+      <button class="btn ghost" id="btn-test">链接测试</button>
+    </div>
+    <div class="banner" id="b-conn"></div>
+  </div>
+
+  <!-- Agent 接入 -->
+  <div class="panel" id="p-agents">
+    <div class="guide">
+      <b>第一次使用，Agent 怎么连？</b> 分两种，装一次就永久生效，之后每次对话都不用管：
+      <ol>
+        <li><b>后台自动（推送 + 注入）</b>：守护进程启动后自动处理，采集各 Agent 的会话增量上传记忆库，无需任何配置。登录自启用 <code>node register-all.cjs --autostart</code>。</li>
+        <li><b>MCP 安装（Agent 主动检索）</b>：跑一次 <code>node register-all.cjs</code>，会自动把记忆工具写进本机所有支持 MCP 的客户端配置（ZCode / Claude Code / Cursor / Codex），并追加全局指令文件。之后每个新会话自动携带记忆工具，模型需要时自主调用。</li>
+      </ol>
+      Claude Code 还会注入 <code>UserPromptSubmit</code> hook：每次提问前自动检索相关记忆并注入上下文（真正无感，不依赖模型主动调用）。首次使用时客户端会提示「信任」该 hook，点一次即可。
+    </div>
+    <h1 style="font-size:14px; margin:20px 0 10px;">各客户端接入状态</h1>
+    <div class="loading" id="agents-loading">检测中…</div>
+    <div class="list" id="agents-list" style="display:none"></div>
+    <div class="banner" id="b-agents"></div>
+  </div>
+
+  <!-- 状态 -->
+  <div class="panel" id="p-status">
+    <div class="loading" id="st-loading">读取中…</div>
+    <div id="st-body" style="display:none">
+      <div class="kv">
+        <div class="k">守护进程</div><div class="v" id="st-local">-</div>
+        <div class="k">NAS 记忆库</div><div class="v" id="st-nas">-</div>
+        <div class="k">配置完整性</div><div class="v" id="st-config">-</div>
+        <div class="k">hook 调用次数</div><div class="v" id="st-hook">-</div>
+        <div class="k">最近上传</div><div class="v" id="st-lastpush">-</div>
+        <div class="k">离线积压队列</div><div class="v" id="st-queue">-</div>
+        <div class="k">运行起始</div><div class="v" id="st-uptime">-</div>
+        <div class="k">版本</div><div class="v" id="st-ver">-</div>
+      </div>
+      <button class="btn ghost" id="btn-refresh">刷新</button>
+    </div>
+  </div>
+
+  <!-- 设置 -->
+  <div class="panel" id="p-settings">
+    <div class="kv">
+      <div class="k">当前版本</div><div class="v" id="up-cur">-</div>
+      <div class="k">线上最新版</div><div class="v" id="up-latest">-</div>
+    </div>
+    <div class="row" style="margin-top:4px">
+      <button class="btn" id="btn-update">检查更新</button>
+    </div>
+    <div class="banner" id="b-update"></div>
+    <div class="guide" style="margin-top:20px">
+      <b>更新方式</b>：从 GitHub Releases 下载新版 <code>tdai-daemon exe</code> 替换旧文件即可，配置与运行时数据在 <code>~/.zcode/</code> 下不受影响。
+      <div style="margin-top:8px"><span class="hint">登录自启：node register-all.cjs --autostart</span></div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  var $ = function (id) { return document.getElementById(id); };
+  var API = location.origin;
+
+  // tab 切换
+  var tabs = document.querySelectorAll('.tab');
+  for (var i = 0; i < tabs.length; i++) {
+    tabs[i].addEventListener('click', function () {
+      document.querySelectorAll('.tab').forEach(function (t) { t.classList.remove('active'); });
+      document.querySelectorAll('.panel').forEach(function (p) { p.classList.remove('active'); });
+      this.classList.add('active');
+      $('p-' + this.dataset.tab).classList.add('active');
+      if (this.dataset.tab === 'agents') loadAgents();
+      if (this.dataset.tab === 'status') loadStatus();
+    });
+  }
+
+  function banner(id, cls, text) {
+    var b = $(id);
+    b.className = 'banner show ' + cls;
+    b.textContent = text;
+  }
+  function fmt(v) { return (v === null || v === undefined || v === '') ? '-' : String(v); }
+
+  // 加载配置（脱敏回显）
+  fetch(API + '/api/config').then(function (r) { return r.json(); }).then(function (c) {
+    $('c-panelUrl').value = c.panelUrl || '';
+    $('c-teamId').value = c.teamId || '';
+    $('c-agentId').value = c.agentId || '';
+    $('c-taskId').value = c.taskId || '';
+    $('c-blockId').value = c.blockId || '';
+    if (c.hasUserKey) {
+      $('c-userKey').placeholder = c.userKeyMasked + '（已保存，留空则不修改）';
+    }
+  });
+
+  // 保存
+  $('btn-save').addEventListener('click', function () {
+    var btn = this; btn.disabled = true;
+    var body = {
+      panelUrl: $('c-panelUrl').value,
+      teamId: $('c-teamId').value,
+      agentId: $('c-agentId').value,
+      taskId: $('c-taskId').value,
+      blockId: $('c-blockId').value
+    };
+    var key = $('c-userKey').value.trim();
+    if (key) body.userKey = key;
+    fetch(API + '/api/config/save', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        btn.disabled = false;
+        if (j.ok) { banner('b-conn', 'ok', '配置已保存（原文件备份为 .bak）。'); if (!key) $('c-userKey').placeholder = j.config.userKeyMasked + '（已保存，留空则不修改）'; $('c-userKey').value = ''; }
+        else banner('b-conn', 'err', '保存失败：' + j.error);
+      })
+      .catch(function (e) { btn.disabled = false; banner('b-conn', 'err', '保存失败：' + e.message); });
+  });
+
+  // 链接测试
+  $('btn-test').addEventListener('click', function () {
+    var btn = this; btn.disabled = true; btn.textContent = '测试中…';
+    fetch(API + '/api/test-connection', { method: 'POST' })
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        btn.disabled = false; btn.textContent = '链接测试';
+        if (j.nas && j.auth) banner('b-conn', 'ok', '连接成功：面板可达且认证通过（' + j.latencyMs + 'ms）。');
+        else if (j.hint) banner('b-conn', 'err', '连接失败：' + j.hint);
+        else banner('b-conn', 'err', '连接失败：面板不可达。');
+      })
+      .catch(function (e) { btn.disabled = false; btn.textContent = '链接测试'; banner('b-conn', 'err', '测试失败：' + e.message); });
+  });
+
+  // Agent 接入状态
+  function loadAgents() {
+    $('agents-loading').style.display = 'block';
+    $('agents-list').style.display = 'none';
+    fetch(API + '/api/agents-status').then(function (r) { return r.json(); }).then(function (j) {
+      $('agents-loading').style.display = 'none';
+      var list = $('agents-list');
+      list.innerHTML = '';
+      var label = { installed: '已接入', missing: '未接入', absent: '未安装客户端' };
+      (j.items || []).forEach(function (it) {
+        var d = document.createElement('div'); d.className = 'li';
+        d.innerHTML = '<div class="name">' + it.name + (it.detail ? ' <span class="detail">' + it.detail + '</span>' : '') + '</div><span class="badge ' + it.status + '">' + (label[it.status] || it.status) + '</span>';
+        list.appendChild(d);
+      });
+      list.style.display = 'block';
+      var missing = (j.items || []).filter(function (x) { return x.status === 'missing'; }).length;
+      if (missing) {
+        banner('b-agents', 'warn', '有 ' + missing + ' 项未接入：跑一次 node register-all.cjs 即可全部接入（幂等）。ZCode 的 hook 需要在客户端里点一次「信任」。');
+      } else if ((j.items || []).length) {
+        banner('b-agents', 'ok', '所有已安装客户端均已接入。');
+      }
+    }).catch(function () { $('agents-loading').style.display = 'none'; });
+  }
+
+  // 状态页
+  function loadStatus() {
+    $('st-loading').style.display = 'block'; $('st-body').style.display = 'none';
+    fetch(API + '/health').then(function (r) { return r.json(); }).then(function (h) {
+      $('st-loading').style.display = 'none'; $('st-body').style.display = 'block';
+      $('st-local').textContent = h.local ? '运行中' : '-';
+      $('st-nas').textContent = h.nas === true ? '可达' : (h.nas === false ? '不可达' : '-');
+      $('st-config').textContent = h.configOk ? '完整' : '缺失（连接页补齐）';
+      $('st-hook').textContent = fmt(h.hookCalls);
+      $('st-lastpush').textContent = fmt(h.lastPush);
+      $('st-queue').textContent = fmt(h.queueLen) + ' 项';
+      $('st-uptime').textContent = fmt(h.uptimeSince);
+      $('st-ver').textContent = fmt(h.version);
+    }).catch(function () { $('st-loading').style.display = 'none'; });
+  }
+  $('btn-refresh').addEventListener('click', loadStatus);
+
+  // 更新检查
+  $('btn-update').addEventListener('click', function () {
+    var btn = this; btn.disabled = true; btn.textContent = '检查中…';
+    $('up-cur').textContent = '-'; $('up-latest').textContent = '-';
+    fetch(API + '/api/update-check').then(function (r) { return r.json(); }).then(function (j) {
+      btn.disabled = false; btn.textContent = '检查更新';
+      $('up-cur').textContent = fmt(j.current);
+      $('up-latest').textContent = fmt(j.latest);
+      if (j.upToDate === true) banner('b-update', 'ok', '已是最新版本。');
+      else if (j.upToDate === false) banner('b-update', 'warn', '有新版本 v' + j.latest + '：到 GitHub Releases 下载替换。');
+      else banner('b-update', 'err', '无法获取线上版本（离线或限流）。');
+    }).catch(function () { btn.disabled = false; btn.textContent = '检查更新'; banner('b-update', 'err', '检查失败。'); });
+  });
+})();
+</script>
+</body>
+</html>

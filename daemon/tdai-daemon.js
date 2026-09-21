@@ -23,6 +23,8 @@ const QUEUE_DIR = path.join(DATA_DIR, 'queue');
 const LOG_PATH = path.join(DATA_DIR, 'daemon.log');
 
 const RECALL_PORT = Number(process.env.TDAI_DAEMON_PORT) || 8100;
+const APP_VER = '0.2.2';         // 与 package.json 同步；SEA exe 的版本号
+const REPO_API = 'https://api.github.com/repos/HUIdada1/tencentdb-memory-mcp/releases/latest';
 const RECALL_TIMEOUT_MS = 800;   // hook 链路硬超时：超时返回空，绝不阻塞对话
 const SCAN_INTERVAL_MS = 2 * 60 * 1000;  // 采集循环 2 分钟
 const MSG_MAX_CHARS = 8192;      // 面板单条消息硬限制
@@ -384,6 +386,106 @@ async function buildRecall(cfg, api, cache, query) {
   return parts.join('\n\n');
 }
 
+/* ---------- 控制台 API：配置读写 / 连接测试 / Agent 接入状态 / 更新检查 ---------- */
+
+// agent 接入状态：fs 检测各客户端配置（installed=已接入 / absent=客户端未安装 / missing=未接入）
+function agentStatus() {
+  const home = os.homedir();
+  const readJSON = (f) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch (_) { return null; } };
+  const readText = (f) => { try { return fs.readFileSync(f, 'utf8'); } catch (_) { return null; } };
+  const items = [];
+
+  // ZCode CLI
+  let f = path.join(home, '.zcode', 'cli', 'config.json');
+  let c = readJSON(f);
+  items.push({ name: 'ZCode CLI', status: c == null ? 'absent' : (c.mcp && c.mcp.servers && c.mcp.servers.tdai ? 'installed' : 'missing') });
+
+  // Claude Code（MCP + hook）
+  f = path.join(home, '.claude.json');
+  c = readJSON(f);
+  const ccMcp = c != null && c.mcpServers && c.mcpServers.tdai ? 'installed' : (c == null ? 'absent' : 'missing');
+  f = path.join(home, '.claude', 'settings.json');
+  const s = readJSON(f);
+  const ccHook = s != null && s.hooks && JSON.stringify(s.hooks.UserPromptSubmit || []).includes('tdai-daemon');
+  items.push({ name: 'Claude Code', status: ccMcp, detail: ccHook ? 'hook 已注入' : undefined });
+
+  // Cursor
+  f = path.join(home, '.cursor', 'mcp.json');
+  c = readJSON(f);
+  items.push({ name: 'Cursor', status: c == null ? 'absent' : (c.mcpServers && c.mcpServers.tdai ? 'installed' : 'missing') });
+
+  // Codex
+  f = path.join(home, '.codex', 'config.toml');
+  const t = readText(f);
+  items.push({ name: 'Codex', status: t == null ? 'absent' : (t.includes('[mcp_servers.tdai]') ? 'installed' : 'missing') });
+
+  // 指令文件（档 B 兜底）
+  const inst1 = readText(path.join(home, '.zcode', 'AGENTS.md'));
+  const inst2 = readText(path.join(home, '.claude', 'CLAUDE.md'));
+  items.push({ name: '全局指令文件', status: (inst1 && inst1.includes('tdai-memory:begin')) || (inst2 && inst2.includes('tdai-memory:begin')) ? 'installed' : 'missing' });
+
+  return items;
+}
+
+// 更新检查：GitHub 最新 release vs 当前版本
+async function updateCheck() {
+  try {
+    const r = await requestRaw(REPO_API, { timeout: 8000, headers: { 'User-Agent': 'tdai-daemon' } });
+    if (r.status !== 200) return { latest: null, current: APP_VER, upToDate: null };
+    const j = JSON.parse(r.body);
+    const latest = (j.tag_name || '').replace(/^v/, '');
+    const gt = (a, b) => {
+      const pa = String(a).split('.').map((n) => parseInt(n, 10) || 0);
+      const pb = String(b).split('.').map((n) => parseInt(n, 10) || 0);
+      for (let i = 0; i < Math.max(pa.length, pb.length); i++) { const d = (pa[i] || 0) - (pb[i] || 0); if (d) return d > 0; }
+      return false;
+    };
+    return { latest: latest || null, current: APP_VER, upToDate: latest ? !gt(latest, APP_VER) : null, downloadUrl: j.html_url || null };
+  } catch (_) {
+    return { latest: null, current: APP_VER, upToDate: null }; // 离线静默：null = 未知
+  }
+}
+
+// 配置读（脱敏 userKey）写（白名单字段，跑前备份）
+function readPublicConfig(cfg) {
+  const key = cfg.userKey || '';
+  return {
+    panelUrl: cfg.panelUrl || '',
+    teamId: cfg.teamId || '',
+    agentId: cfg.agentId || '',
+    taskId: cfg.taskId || '',
+    blockId: cfg.blockId || '',
+    userKeyMasked: key ? key.slice(0, 7) + '***' + key.slice(-4) : '',
+    hasUserKey: !!key,
+    uploadSources: cfg.upload && cfg.upload.enabledSources ? cfg.upload.enabledSources : {},
+  };
+}
+
+function writeConfig(body) {
+  let disk = {};
+  try { disk = JSON.parse(fs.readFileSync(CFG_PATH, 'utf8')); } catch (_) { }
+  const whitelist = ['panelUrl', 'userKey', 'teamId', 'agentId', 'taskId', 'blockId'];
+  for (const k of whitelist) {
+    if (typeof body[k] === 'string' && body[k].trim()) disk[k] = body[k].trim();
+  }
+  fs.mkdirSync(path.dirname(CFG_PATH), { recursive: true });
+  try { fs.copyFileSync(CFG_PATH, CFG_PATH + '.bak'); } catch (_) { }
+  fs.writeFileSync(CFG_PATH, JSON.stringify(disk, null, 2));
+  return loadConfig();
+}
+
+// 控制台页：SEA 内嵌资源优先，开发态回退磁盘
+function consolePage() {
+  try {
+    const sea = require('node:sea');
+    if (sea.isSea()) {
+      const asset = sea.getAsset('console.html');
+      return Buffer.from(asset).toString('utf8'); // getAsset 返回 ArrayBuffer
+    }
+  } catch (_) { }
+  try { return fs.readFileSync(path.join(__dirname, 'console.html'), 'utf8'); } catch (_) { return '<h1>console.html 缺失</h1>'; }
+}
+
 /* ---------- HTTP 服务（:8100） ---------- */
 
 function mkState() {
@@ -394,6 +496,58 @@ function startServer(cfg, api, cache, state) {
   const server = http.createServer(async (req, res) => {
     const u = new URL(req.url, 'http://localhost');
     try {
+      if (u.pathname === '/' || u.pathname === '/console') {
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end(consolePage());
+        return;
+      }
+      if (u.pathname === '/api/config') {
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify(readPublicConfig(cfg)));
+        return;
+      }
+      if (u.pathname === '/api/config/save' && req.method === 'POST') {
+        let body = '';
+        req.on('data', (c) => (body += c));
+        req.on('end', async () => {
+          try {
+            const nc = writeConfig(JSON.parse(body || '{}'));
+            Object.assign(cfg, { panelUrl: nc.panelUrl, userKey: nc.userKey, teamId: nc.teamId, agentId: nc.agentId, taskId: nc.taskId, blockId: nc.blockId || cfg.blockId });
+            res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify({ ok: true, config: readPublicConfig(loadConfig()) }));
+          } catch (e) {
+            res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify({ ok: false, error: e.message }));
+          }
+        });
+        return;
+      }
+      if (u.pathname === '/api/test-connection' && req.method === 'POST') {
+        const t0 = Date.now();
+        let nas = false, auth = false, hint = '';
+        if (cfg.panelUrl && cfg.userKey) {
+          try {
+            const r = await api('/skill/list', { method: 'POST', body: { team_id: cfg.teamId || undefined }, timeout: 8000 });
+            nas = r.status >= 200 && r.status < 300;
+            auth = nas;
+            if (!nas && r.status === 401 || r.status === 403) { auth = false; hint = 'userKey 可能失效'; }
+            else if (!nas) hint = `面板返回 HTTP ${r.status}`;
+          } catch (e) { hint = `面板不可达 (${e.message})`; }
+        } else hint = '请先填写 panelUrl 和 userKey';
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ nas, auth, latencyMs: Date.now() - t0, hint }));
+        return;
+      }
+      if (u.pathname === '/api/agents-status') {
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ items: agentStatus() }));
+        return;
+      }
+      if (u.pathname === '/api/update-check') {
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify(await updateCheck()));
+        return;
+      }
       if (u.pathname === '/health') {
         let queueLen = 0;
         try { queueLen = fs.readdirSync(QUEUE_DIR).length; } catch (_) { }
@@ -402,7 +556,7 @@ function startServer(cfg, api, cache, state) {
           try { const r = await api('/skill/list', { method: 'POST', body: { team_id: cfg.teamId }, timeout: 5000 }); nas = r.status >= 200 && r.status < 300; } catch (_) { nas = false; }
         }
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify({ local: true, nas, configOk: !missingConfig(cfg), hookCalls: state.hookCalls, lastPush: state.lastPush, queueLen, uptimeSince: state.startedAt }));
+        res.end(JSON.stringify({ local: true, nas, configOk: !missingConfig(cfg), version: APP_VER, hookCalls: state.hookCalls, lastPush: state.lastPush, queueLen, uptimeSince: state.startedAt }));
         return;
       }
       if (u.pathname === '/recall') {

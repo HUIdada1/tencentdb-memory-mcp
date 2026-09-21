@@ -109,6 +109,34 @@ function startMock() {
       let b = ''; hp.stdout.on('data', (c) => (b += c)); hp.on('close', () => res(b));
     });
     check('hook 子命令输出记忆片段', hookRes.includes('MOCK-MEM-HIT'));
+
+    // 8) 控制台页
+    const page = await get('/');
+    check('控制台页 HTML 可访问', page.status === 200 && page.body.includes('TD 记忆守护') && page.body.includes('Agent 接入'));
+
+    // 9) 配置读（脱敏）
+    const cfgRes = JSON.parse((await get('/api/config')).body);
+    check('config 读取并脱敏 userKey', cfgRes.panelUrl.includes('18999') && /sk-mem-\*\*\*|sk-mem-t\*\*\*/.test(cfgRes.userKeyMasked) && cfgRes.hasUserKey === true);
+
+    // 10) 配置保存（含新字段 + 不传 userKey 不清空）
+    const saveRes = await new Promise((res) => {
+      const r = http.request(`http://127.0.0.1:${PORT}/api/config/save`, { method: 'POST', headers: { 'Content-Type': 'application/json' } }, (r2) => { let b = ''; r2.on('data', (c) => (b += c)); r2.on('end', () => res({ status: r2.statusCode, body: b })); });
+      r.end(JSON.stringify({ teamId: 'team-updated', taskId: 'task-new' }));
+    });
+    const saved = JSON.parse(saveRes.body);
+    check('config 保存生效且 userKey 不丢失', saved.ok && saved.config.teamId === 'team-updated' && saved.config.taskId === 'task-new' && saved.config.hasUserKey === true);
+
+    // 11) 链接测试（mock 面板在线）
+    const tc = JSON.parse((await post('/api/test-connection')).body);
+    check('test-connection 返回 nas+auth', tc.nas === true && tc.auth === true && typeof tc.latencyMs === 'number');
+
+    // 12) Agent 接入状态（隔离 HOME：客户端均未安装 → absent）
+    const ags = JSON.parse((await get('/api/agents-status')).body);
+    check('agents-status 返回列表', Array.isArray(ags.items) && ags.items.some((x) => x.name === 'ZCode CLI') && ags.items.every((x) => ['installed', 'missing', 'absent'].includes(x.status)));
+
+    // 13) 更新检查（离线静默降级为 null）
+    const up = JSON.parse((await get('/api/update-check')).body);
+    check('update-check 当前版本 + 离线容错', typeof up.current === 'string' && /^\d+\.\d+\.\d+$/.test(up.current));
   } catch (e) {
     console.error('测试异常:', e.message, '\ndaemon 输出:', dOut);
     results.push(['无异常', false]);
