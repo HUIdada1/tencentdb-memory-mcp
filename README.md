@@ -1,75 +1,120 @@
 # TD 记忆守护（TencentDB Memory MCP）
 
-腾讯云 TencentDB 记忆库的完整接入工具集：**MCP Server**（供 ZCode 等 Agent 接入团队记忆）+ **桌面宠物 App**（Windows 托盘常驻的记忆守护与控制台）。
+腾讯云 TencentDB 记忆库的无感接入工具集：**MCP Server**（Agent 按需检索）+ **后台守护进程**（自动采集上传 + 本地 recall 注入服务）。零 npm 依赖，纯 Node ≥16，密钥不出本机。
 
 - 仓库：https://github.com/HUIdada1/tencentdb-memory-mcp
-- 发版资产（exe 下载）：https://github.com/HUIdada1/tencentdb-memory-mcp/releases
+- 发版（exe 下载）：https://github.com/HUIdada1/tencentdb-memory-mcp/releases
+- 架构：**Push（扫本地会话文件增量上传）与 Pull（hook 强制注入 / MCP 按需检索）彻底解耦**，与用哪个模型服务商聊天完全无关，不经过 NAS proxy（8096）。
 
 ## 目录结构
 
 ```
-├─ core/tdai-core.js        # 记忆库核心客户端（面板连接、鉴权、各 API 封装）
-├─ mcp/
-│  ├─ tdai-mcp.js           # MCP Server（stdio），暴露 tdai_* 系列工具
-│  └─ register-zcode.cjs    # 一键注册到 ZCode 的 MCP 配置
-├─ pet/                     # 桌面宠物 App（Electron）
-│  ├─ src/main.js           # 主进程：双窗口（Pet + Console）/ 托盘 / 设置 / 热更新接线
-│  ├─ src/updater.js        # 自更新模块（安装版 electron-updater / 便携版 latest.yml 比对）
-│  ├─ src/console.html/css/js  # 控制台 UI（双主题液态毛玻璃，样式对齐设计稿）
-│  ├─ src/pet.html/js       # 桌宠小窗（透明置顶、状态点、消息气泡）
-│  └─ src/preload.js        # contextBridge 白名单
-├─ .github/workflows/release.yml  # 发版流水线（手动触发，构建并发布 exe）
-└─ build/ assets/           # 图标资源
+├─ core/tdai-core.js             # 零依赖客户端：配置加载、面板 API 封装、只读检索 + 会话导入
+├─ daemon/tdai-daemon.js         # 守护进程（单文件自包含，可打包 SEA exe）
+│   ├─ serve（默认）              #   HTTP :8100（recall/push/health）+ 2 分钟采集上传循环
+│   ├─ push                      #   立即采集上传一轮
+│   ├─ hook                      #   recall hook 入口（stdin/--q → /recall → stdout）
+│   └─ health                    #   健康状态
+├─ mcp/tdai-mcp.js               # MCP server（stdio，tdai_* 只读工具）+ CLI 双模式
+├─ register-all.cjs              # 一键注册：全客户端 MCP + Claude Code hook + 指令文件 + 可选自启
+├─ skills/tdai-memory/SKILL.md   # ZCode skill 兜底（无 MCP 客户端走 CLI）
+├─ .github/workflows/release.yml # 发版流水线（Node SEA 单文件 exe → GitHub Releases）
+├─ sea-config.json               # SEA 打包配置
+└─ package.json                  # 版本号（发版用）
 ```
 
-## MCP Server（ZCode 接入）
+## 快速开始
 
-1. 安装依赖：`npm install`（无根级依赖，仅 Node 18+）。
-2. 注册到 ZCode：`node mcp/register-zcode.cjs`，或手动在 MCP 配置里指向 `mcp/tdai-mcp.js`。
-3. 可用工具：`tdai_health` / `tdai_memory_search` / `tdai_memory_layers` / `tdai_team_assets` / `tdai_skill_list` / `tdai_skill_get` / `tdai_wiki_search` / `tdai_wiki_read` / `tdai_codegraph_search` / `tdai_codegraph_explore`。
+### 1. 配置
 
-连接配置（面板地址 / User Key / Team ID 等）见 `mcp/tdai-mcp.js` 顶部说明。
+写 `~/.zcode/tdai-mcp.json`（资产 ID 从面板获取；env `TDAI_PANEL_URL` 等同权覆盖）：
 
-## 桌面宠物 App
+```json
+{
+  "panelUrl": "http://<nas-host>:8125",
+  "userKey": "sk-mem-...",
+  "teamId": "team-...",
+  "agentId": "agt-..."
+}
+```
 
-### 功能
-
-- **双窗口**：桌宠小窗（透明置顶、可拖动、连接状态点、消息气泡）+ 控制台（总览 / 记忆 / 技能 / Wiki / 图谱 / 更新中心）。
-- **健康轮询**：按设置间隔轮询记忆库健康状态，同步到桌宠状态点与控制台状态胶囊。
-- **设置持久化**：`~/.tdai-pet/config.json`（连接、桌宠、外观主题、开机自启、更新开关、AI 人格）。
-- **双主题**：深色 / 浅色 / 跟随系统，液态毛玻璃风格。
-
-### 开发与调试
+### 2. 一键注册（幂等，跑前自动备份）
 
 ```bash
-cd pet
-npm install
-npm start          # 开发模式（不写注册表、不检查更新）
+node register-all.cjs              # MCP 全客户端 + Claude Code hook + 指令文件
+node register-all.cjs --autostart  # 同时写启动文件夹 VBS，登录自启守护进程
+node register-all.cjs --no-hook --no-instructions  # 只注册 MCP
 ```
 
-### 本地打包
+注册内容：
+
+| 目标 | 动作 |
+|---|---|
+| ZCode CLI | `~/.zcode/cli/config.json` 的 `mcp.servers.tdai` |
+| Claude Code | `~/.claude.json` 的 `mcpServers.tdai` + `settings.json` 的 `UserPromptSubmit` hook |
+| Cursor | `~/.cursor/mcp.json` |
+| Codex | `~/.codex/config.toml` 的 `[mcp_servers.tdai]` |
+| 全局指令文件 | `~/.zcode/AGENTS.md` / `~/.claude/CLAUDE.md` 追加记忆检索硬规则（幂等标记 `tdai-memory:begin`） |
+
+> ZCode 的 hook 配置是**项目级**且需在客户端点一次「信任」；未信任时 hook 静默不执行，MCP + 指令文件（档 B）仍兜底。
+
+### 3. 启动守护进程
 
 ```bash
-cd pet
-npm run pack       # 仅打包到 ../dist/win-unpacked，本机验证
-npm run dist       # 打包 NSIS 安装版 + 便携版到 ../release/
+node daemon/tdai-daemon.js        # serve：:8100 服务 + 采集上传循环
+node daemon/tdai-daemon.js push   # 手动触发一轮采集上传
 ```
 
-### 热更新机制
+或用 `--autostart` 注册的 VBS（登录自启）。发版 exe 同样支持：`tdai-daemon.exe [serve|push|hook|health]`。
 
-- **安装版（NSIS）**：electron-updater 拉取 GitHub Release 的 `latest.yml`；启动 60 秒后首次检查，之后每小时一次；更新中心可手动检查 / 下载 / 重启安装；下载与安装均由用户触发。
-- **便携版（portable）**：只读 `latest.yml` 比对版本号，检测到新版提示到 Releases 页手动下载替换。
+## 工作原理
 
-## 发版（exe 线上发布）
+### Push（自动上传，无感）
 
-任何会话对项目说「发版」即按以下流程执行，不得跳步：
+守护进程每 2 分钟扫描本地会话落盘文件：
 
-1. 升 `pet/package.json` 的 `version`（须严格高于远端最新 tag，tag 一经发布不可复用）。
-2. 提交并推送 main：`git add -A && git commit -m "feat: …" && git push origin main`（仓库已配代理 `127.0.0.1:7897` 与中性身份）。
-3. 触发 GitHub Actions **Release** workflow（workflow_dispatch 手动触发，网页或 API 均可），CI 在 windows-latest 上执行 `electron-builder --win --publish always`，自动创建 tag + Release（Setup exe / portable exe / blockmap / latest.yml）并校验发布结果。
-4. 验证：`curl -sSL https://github.com/HUIdada1/tencentdb-memory-mcp/releases/latest/download/latest.yml | head -1` 应为新版本号。
-5. 补 Release 更新说明（Markdown，勿写 HTML），客户端更新页将其作为更新日志展示。
+| 客户端 | 路径 | 优先级 |
+|---|---|---|
+| ZCode CLI | `~/.zcode/cli/agents/<sess>/<agent>/transcript.jsonl` | P0 |
+| Claude Code | `~/.claude/projects/<proj>/<sid>.jsonl` | P0 |
 
-## 相关文档
+- **字节偏移增量游标**（持久化 `~/.zcode/tdai-daemon/cursors.json`），首见按当前大小做种子，**不回传历史**
+- 只上传完整轮次；单条消息切片 ≤8192 字符（面板硬限制）
+- NAS 离线进**本地队列**（`~/.zcode/tdai-daemon/queue/`，上限 200），恢复后自动补传，不丢数据
+- 上传走面板 API：`/chat-memory/import` + `/skill/conversation/add`（触发 L1/技能抽取）
+- `upload.enabledSources` 白名单控制哪些客户端入库；agent 缺失时按配置尝试自动创建（`daemon-<source>`）
 
-内部方案与接入记录已移出版本库（含连接凭据等私密信息），请勿提交到开源仓库。
+### Pull（自动检索，无感）
+
+两路并存，互为托底：
+
+- **档 A · hook 强制注入（主）**：`UserPromptSubmit` hook（Claude Code 全局 / ZCode 项目级）调用本地 `:8100/recall`，**800ms 硬超时**（超时返回空，绝不阻塞对话）。意图门控：命中「之前/上次/还记得…」才做远程 search；未命中只注入缓存的技能目录固定块；单次注入 ≤2KB；NAS 离线静默降级。
+- **档 B · MCP + 指令文件（兜底）**：`tdai-mcp.js` 注册进客户端配置后每次会话自动可用；指令文件写死触发规则。9 个只读工具：`tdai.health / my_agents / memory_search / memory_layers / team_assets / skill_list / skill_get / wiki_search / wiki_read / codegraph_search / codegraph_explore`（CLI 兜底：`node mcp/tdai-mcp.js run <tool> --json '{...}'`）。
+
+### 托底判断
+
+| 失效环节 | 行为 |
+|---|---|
+| NAS 离线 | 检索返回空静默降级；上传进本地队列补传 |
+| hook 未信任 / :8100 挂 | 档 B（MCP + 指令文件）兜底 |
+| userKey 失效 | `/health` 的 `nas:false` + `configOk` 可查 |
+| MCP 客户端不可用 | skill 兜底 `skills/tdai-memory/SKILL.md` |
+
+## 运行时数据
+
+全部在 `~/.zcode/tdai-daemon/`：`cursors.json`（增量游标）、`queue/`（离线积压）、`daemon.log`。删除即重置。
+
+## 发版
+
+`package.json` 版本号递增 → GitHub Actions `Release` workflow（手动触发）→ Node SEA 构建单文件 `tdai-daemon-vX.Y.Z-win-x64.exe` → GitHub Releases（构建前后各跑一轮冒烟自检）。
+
+```bash
+gh workflow run release.yml -f version=0.2.0
+```
+
+## 注意事项
+
+- Windows：脚本全程 UTF-8（Node `JSON.stringify`）；不要用 Git Bash 内联 `curl -d` 传中文（GBK 乱码）
+- hook 场景 stdin 可能不关闭，daemon hook 子命令限时 300ms 收数
+- 检索的 `block_id` 默认 `chat-memory`，可在配置里加 `"blockId"` 按面板实际取值覆盖
+- 本机 Node 16 无 fetch 也能跑（内置 http/https），推荐 Node ≥18

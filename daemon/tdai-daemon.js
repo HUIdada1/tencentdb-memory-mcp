@@ -330,19 +330,23 @@ async function scanAndUpload(cfg, api, state) {
 /* ---------- 本地缓存固定块（persona + skill 目录） ---------- */
 
 function mkCache(cfg, api) {
-  const cache = { persona: '', skills: '', ts: 0 };
-  return async function refresh() {
-    if (Date.now() - cache.ts < CACHE_TTL_MS) return;
-    try {
-      const s = await api('/skill/list', { method: 'POST', body: { team_id: cfg.teamId } });
-      if (s.status >= 200 && s.status < 300 && s.json && s.json.data) {
-        const items = s.json.data.items || s.json.data || [];
-        const names = Array.isArray(items) ? items.map((x) => x && (x.name || x.skill_name)).filter(Boolean).slice(0, 30) : [];
-        cache.skills = names.length ? names.join('、') : '';
-      }
-      cache.ts = Date.now();
-    } catch (_) { cache.ts = Date.now(); } // 失败也记账，避免每轮打 NAS
+  const cache = {
+    skills: '',
+    ts: 0,
+    async refresh() {
+      if (Date.now() - cache.ts < CACHE_TTL_MS) return;
+      try {
+        const s = await api('/skill/list', { method: 'POST', body: { team_id: cfg.teamId } });
+        if (s.status >= 200 && s.status < 300 && s.json && s.json.data) {
+          const items = s.json.data.items || s.json.data || [];
+          const names = Array.isArray(items) ? items.map((x) => x && (x.name || x.skill_name)).filter(Boolean).slice(0, 30) : [];
+          cache.skills = names.length ? names.join('、') : '';
+        }
+        cache.ts = Date.now();
+      } catch (_) { cache.ts = Date.now(); } // 失败也记账，避免每轮打 NAS
+    },
   };
+  return cache;
 }
 
 /* ---------- recall 组装 ---------- */
@@ -411,8 +415,9 @@ function startServer(cfg, api, cache, state) {
       }
       if (u.pathname === '/push' && req.method === 'POST') {
         const r = await scanAndUpload(cfg, api, state);
+        const q = await flushQueue(cfg, api, state);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify(r));
+        res.end(JSON.stringify({ pushed: r.pushed, queueFlushed: q }));
         return;
       }
       res.writeHead(404); res.end();
