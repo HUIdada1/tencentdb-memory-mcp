@@ -17,6 +17,7 @@
 │   └─ health                    #   健康状态
 │   └─ console.html              #   本地控制台页（GET http://127.0.0.1:8100/）
 ├─ mcp/tdai-mcp.js               # MCP server（stdio，tdai_* 只读工具）+ CLI 双模式
+├─ pet/                          # Electron 桌宠应用（NSIS 安装版 + 便携版 + electron-updater 热更新）
 ├─ register-all.cjs              # 一键注册：全客户端 MCP + Claude Code hook + 指令文件 + 可选自启
 ├─ skills/tdai-memory/SKILL.md   # ZCode skill 兜底（无 MCP 客户端走 CLI）
 ├─ .github/workflows/release.yml # 发版流水线（Node SEA 单文件 exe → GitHub Releases）
@@ -131,11 +132,20 @@ node daemon/tdai-daemon.js push   # 手动触发一轮采集上传
 
 ## 发版
 
-`package.json` 版本号递增 → GitHub Actions `Release` workflow（手动触发）→ Node SEA 构建单文件 `tdai-daemon-vX.Y.Z-win-x64.exe` → GitHub Releases（构建前后各跑一轮冒烟自检）。
+`pet/package.json` 与根 `package.json` 版本号同步递增 → GitHub Actions `Release` workflow（手动触发）→ 双产物发布到 GitHub Releases（参照 AgentHub 发版模式）：
+
+- **Electron 宠物应用**（`npx electron-builder --win --publish always`）：NSIS 安装版 `TDMemoryPet-Setup-vX.Y.Z.exe` + 便携版 + `latest.yml`/blockmap（tag 与 Release 由 electron-builder 自动创建）
+- **Node SEA 单文件守护进程** `tdai-daemon-vX.Y.Z-win-x64.exe`（构建前后各跑一轮冒烟自检，构建完成后上传到同一 Release）
+- 发布后校验 `latest.yml` 可下载且版本匹配——安装版 electron-updater 与便携版的更新检查都依赖该资产
 
 ```bash
-gh workflow run release.yml -f version=0.2.0
+gh workflow run release.yml -f version=0.3.0
 ```
+
+### 更新机制（同 AgentHub）
+
+- **安装版**：electron-updater 启动 60 秒后首查 + 每小时一查，下载/安装均由用户触发（`autoDownload=false`）
+- **便携版**：只读 `releases/latest/download/latest.yml` 比对版本并提示手动下载；exe 同目录放 `portable.flag` 可手动开启便携模式
 
 ## 注意事项
 

@@ -1,13 +1,14 @@
 # 发布流水线：手动触发（workflow_dispatch）。
-# 构建 Node SEA 单文件守护进程 exe（含 serve/push/hook/health 子命令），发布到 GitHub Releases。
-# 版本号严格递增，tag 一经发布不可复用。
+# 双产物：① Electron 宠物应用（electron-builder --publish always，NSIS 安装版 + 便携版 + latest.yml，
+#   安装版走 electron-updater 热更新，便携版读 latest.yml 比对版本提示手动下载）；② Node SEA 单文件守护进程 exe。
+# 参照 AgentHub 发版模式；版本号严格递增，tag 一经发布不可复用。
 name: Release
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: '版本号（留空则用根 package.json 的 version）'
+        description: '版本号（留空则用 pet/package.json 的 version）'
         required: false
         default: ''
 
@@ -19,25 +20,30 @@ jobs:
   build:
     runs-on: windows-latest
     permissions:
-      contents: write
+      contents: write # 创建 Release/tag 必需，否则 electron-builder 发布 403
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: npm
+          cache-dependency-path: pet/package-lock.json
 
-      - name: 版本校验
+      - name: 校验版本号（root/pet 一致 + 与输入一致 + 严格高于 GitHub 最新 tag）
         shell: bash
         run: |
-          PKG_VERSION="$(node -p "require('./package.json').version")"
+          PET_VERSION="$(node -p "require('./pet/package.json').version")"
+          ROOT_VERSION="$(node -p "require('./package.json').version")"
           INPUT_VERSION="${{ inputs.version }}"
+          # electron-builder 按 v{version} 创建 tag，已存在即失败；tag 一旦发布版本号永久不可复用
           EXISTING_TAGS="$(git ls-remote --tags https://github.com/HUIdada1/tencentdb-memory-mcp.git 'refs/tags/v*' | sed 's#.*refs/tags/##;s#\^{}##' || true)"
           LATEST_TAG="$(printf '%s\n' "$EXISTING_TAGS" | sort -V | tail -1 || true)"
           node -e "
             const argv = process.argv.slice(1);
-            const pkg = argv[0], input = argv[1], latest = argv[2] || '';
-            if (input && input !== pkg) { console.error('输入版本 ' + input + ' 与 package.json 的 ' + pkg + ' 不一致'); process.exit(1); }
+            const pet = argv[0], root = argv[1], input = argv[2], latest = argv[3] || '';
+            if (input && input !== pet) { console.error('输入版本 ' + input + ' 与 pet/package.json 的 ' + pet + ' 不一致'); process.exit(1); }
+            if (pet !== root) { console.error('pet/package.json (' + pet + ') 与根 package.json (' + root + ') 版本不一致，请同步'); process.exit(1); }
             const gt = (a, b) => {
               const pa = String(a).replace(/^v/, '').split('.').map((n) => parseInt(n, 10) || 0);
               const pb = String(b).replace(/^v/, '').split('.').map((n) => parseInt(n, 10) || 0);
@@ -48,9 +54,9 @@ jobs:
               }
               return false;
             };
-            if (latest && !gt(pkg, latest)) { console.error('版本 ' + pkg + ' 必须严格高于 GitHub 当前最新 tag ' + latest); process.exit(1); }
-            console.log('版本校验通过：' + pkg + (latest ? ' > ' + latest : '（首个版本）'));
-          " "$PKG_VERSION" "$INPUT_VERSION" "$LATEST_TAG"
+            if (latest && !gt(pet, latest)) { console.error('版本 ' + pet + ' 必须严格高于 GitHub 当前最新 tag ' + latest + '（tag 一旦发布不可复用，请升级版本号）'); process.exit(1); }
+            console.log('版本校验通过：' + pet + (latest ? ' > ' + latest : '（首个版本）'));
+          " "$PET_VERSION" "$ROOT_VERSION" "$INPUT_VERSION" "$LATEST_TAG"
 
       - name: 冒烟自检（源码运行）
         shell: bash
@@ -58,7 +64,7 @@ jobs:
           node daemon/tdai-daemon.js health
           node mcp/tdai-mcp.js list
 
-      - name: 构建 SEA 单文件 exe
+      - name: 构建 SEA 单文件守护进程 exe
         shell: bash
         run: |
           node --experimental-sea-config sea-config.json
@@ -66,44 +72,47 @@ jobs:
           npx --yes postject tdai-daemon.exe NODE_SEA_BLOB sea-prep.blob \
             --sentinel-fuse NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2
 
-      - name: 冒烟自检（exe 运行）
+      - name: 冒烟自检（daemon exe 运行）
         shell: bash
         run: |
           ./tdai-daemon.exe health
           ./tdai-daemon.exe hook --q "test" | wc -c
 
-      - name: 发布 Release
+      - name: 安装依赖（pet）
+        run: npm ci --prefix pet
+
+      - name: 打包并发布 Electron 宠物应用（NSIS + 便携版 + latest.yml）
+        run: npx electron-builder --win --publish always
+        working-directory: pet
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 上传守护进程 exe 到同一 Release
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VERSION="$(node -p "require('./package.json').version")"
+          VERSION="$(node -p "require('./pet/package.json').version")"
           mv tdai-daemon.exe "tdai-daemon-v${VERSION}-win-x64.exe"
-          gh release create "v${VERSION}" "tdai-daemon-v${VERSION}-win-x64.exe" \
-            --title "v${VERSION}" \
-            --notes "TD 记忆守护 v${VERSION}（去掉宠物模块，改为零依赖单文件守护进程）。
+          gh release upload "v${VERSION}" "tdai-daemon-v${VERSION}-win-x64.exe" --clobber
 
-          - daemon/tdai-daemon.js：守护服务（:8100 recall/push/health）+ 采集上传（ZCode / Claude Code 会话增量入 NAS）
-          - mcp/tdai-mcp.js：MCP server（tdai_* 只读检索工具，新增 my_agents）
-          - register-all.cjs：一键注册全客户端（MCP + Claude Code hook + 指令文件 + 可选自启）
-
-          exe 子命令：serve（默认）/ push / hook / health" \
-            --latest
-
-      - name: 校验 Release 资产
+      - name: 校验 latest.yml 与资产已正确发布
         shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VERSION="$(node -p "require('./package.json').version")"
-          URL="https://github.com/HUIdada1/tencentdb-memory-mcp/releases/download/v${VERSION}/tdai-daemon-v${VERSION}-win-x64.exe"
-          for i in 1 2 3 4 5; do
-            if curl -fsIL "$URL" > /dev/null 2>&1; then
-              echo "Release 资产校验通过：tdai-daemon-v${VERSION}-win-x64.exe"
+          VERSION="$(node -p "require('./pet/package.json').version")"
+          # 用带 tag 的直链（无 latest 路由索引延迟）；安装版与便携版的更新检查都依赖 latest.yml
+          YML_URL="https://github.com/HUIdada1/tencentdb-memory-mcp/releases/download/v${VERSION}/latest.yml"
+          SETUP_URL="https://github.com/HUIdada1/tencentdb-memory-mcp/releases/download/v${VERSION}/TDMemoryPet-Setup-${VERSION}.exe"
+          DAEMON_URL="https://github.com/HUIdada1/tencentdb-memory-mcp/releases/download/v${VERSION}/tdai-daemon-v${VERSION}-win-x64.exe"
+          for i in 1 2 3 4 5 6; do
+            if curl -fsSL "$YML_URL" 2>/dev/null | grep -q "^version: ${VERSION}$" \
+              && curl -fsIL "$SETUP_URL" > /dev/null 2>&1 \
+              && curl -fsIL "$DAEMON_URL" > /dev/null 2>&1; then
+              echo "发布校验通过：latest.yml version=${VERSION} + Setup exe + daemon exe"
               exit 0
             fi
             echo "第 $i 次校验未通过，20 秒后重试…"
             sleep 20
           done
-          echo "::error::Release 资产校验失败"
+          echo "::error::发布校验失败（2 分钟内 latest.yml 或资产不可下载/版本不匹配），请检查 Release 资产"
           exit 1
