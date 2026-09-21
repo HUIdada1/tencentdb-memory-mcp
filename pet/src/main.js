@@ -11,6 +11,8 @@ const os = require('os');
 const guard = require('./guard.js');
 const register = require('./register.js');
 const updater = require('./updater.js');
+const metricsMod = require('./metrics.js');
+const sessionsMod = require('./sessions.js');
 
 const IS_DEV = !app.isPackaged;
 const HOME = os.homedir();
@@ -35,6 +37,19 @@ let core = null;
 let prefs = null;
 let healthTimer = null;
 let lastHealth = { running: false, health: null };
+
+/* ---------- 实时指标（总览页数据源） ---------- */
+// 计量链路：core 的 _onHttp/_onHttpStart 观察者（真实 socket 字节）→ metrics
+//          → 1s 心跳 webContents.send('metrics', snapshot) → 渲染进程六分区
+const metrics = metricsMod.createMetrics();
+let tickTimer = null;
+let sessionScanTimer = null;
+let lastSessionScan = { ok: true, files: 0, total: 0, sessions: [] };
+let lastCursor = { ok: false, count: 0, bySource: {} };
+
+const fmtBytes = metricsMod.fmtBytes;
+const fmtSpeed = metricsMod.fmtSpeed;
+const shortEndpoint = metricsMod.shortEndpoint;
 
 /* ---------- 应用偏好（主题 / 自启 / 自动更新） ---------- */
 
@@ -87,7 +102,46 @@ function applyAutoStart() {
 
 function publicConn() { return dm.readPublicConfig(dm.loadConfig()); }
 
-function rebuildCore() { core = tdai.create(); }
+// 重建 core 时挂上流量观察者：
+//   上行字节 = 真实请求体长度（core 用 Buffer.byteLength 精确算出）+ HTTP 头固定开销
+//   下行字节 = 真实响应体长度 + 固定开销
+// 观察者缺省 noop，这里显式传入；失败也不抛出（core 内部已 try/catch）。
+const HTTP_HDR_UP = 240;    // 请求头典型开销（Host/Content-Type/两个自定义 X-Tdai-*）
+const HTTP_HDR_DOWN = 200;  // 响应头典型开销
+
+function rebuildCore() {
+  core = tdai.create({
+    _onHttpStart: (info) => {
+      const dir = info.method === 'GET' ? 'down' : 'up';
+      metrics.beginTask(dir, { label: shortEndpoint(info.url), url: info.url, method: info.method });
+      metrics.setCurrent(dir, shortEndpoint(info.url));
+    },
+    _onHttp: (info) => {
+      const st = info.status == null ? 0 : info.status;
+      const ok = st >= 200 && st < 300;
+      const ep = shortEndpoint(info.url);
+      const dir = info.method === 'GET' ? 'down' : 'up';
+      const upBytes = (info.reqBytes || 0) + HTTP_HDR_UP;
+      const downBytes = (info.resBytes || 0) + HTTP_HDR_DOWN;
+
+      metrics.meter({ dir: 'up', bytes: upBytes, ms: info.ms, status: st, url: info.url, method: info.method, error: info.error });
+      metrics.meter({ dir: 'down', bytes: downBytes, ms: info.ms, status: st, url: info.url, method: info.method, error: info.error });
+      metrics.endTask(dir, {
+        state: ok ? 'done' : 'error',
+        bytes: dir === 'up' ? upBytes : downBytes,
+        ms: info.ms, status: st,
+      });
+
+      if (ok) {
+        metrics.pushLog('ok', `${ok && info.method === 'GET' ? '检索' : '提交'}成功 · ${ep} · ${info.ms}ms`,
+          `HTTP ${st}\nendpoint : ${ep}\n方法     : ${info.method}\n上行     : ${fmtBytes(upBytes)}\n下行     : ${fmtBytes(downBytes)}\n耗时     : ${info.ms} ms`);
+      } else {
+        metrics.pushLog('error', `${st === 0 ? '连接失败' : 'HTTP ' + st} · ${ep}`,
+          `${st === 0 ? '连接失败（面板不可达/超时）' : 'HTTP ' + st}\nendpoint : ${ep}\n方法     : ${info.method}\n错误     : ${info.error || '—'}\n耗时     : ${info.ms} ms`);
+      }
+    },
+  });
+}
 
 function saveConn(body) {
   const cfg = dm.writeConfig(body || {});           // 白名单字段 + 跑前备份 .bak
@@ -130,6 +184,86 @@ async function pollHealth() {
 function startPolling() { stopPolling(); pollHealth(); healthTimer = setInterval(pollHealth, 30000); }
 function stopPolling() { if (healthTimer) { clearInterval(healthTimer); healthTimer = null; } }
 
+/* ---------- 实时心跳（1s）----------
+ * 每秒：采样速率 → 合并会话/日志/守护状态 → 推给控制台窗口。
+ * 窗口不存在时也照常采样（序列保持连续），只是没人接收。
+ */
+
+function currentSnapshot() {
+  return metrics.snapshot({
+    panelUrl: (core && core.cfg && core.cfg.panelUrl) || '',
+  });
+}
+
+function startTick() {
+  stopTick();
+  metrics.pushLog('info', `控制台已启动 · 守护端口 ${guard.port()}`);
+  tickTimer = setInterval(() => {
+    try {
+      metrics.sample();
+      const snap = currentSnapshot();
+      if (consoleWin && !consoleWin.isDestroyed()) {
+        consoleWin.webContents.send('metrics', snap);
+      }
+    } catch (e) {
+      metrics.pushLog('error', '心跳采样异常：' + e.message);
+    }
+  }, 1000);
+}
+function stopTick() { if (tickTimer) { clearInterval(tickTimer); tickTimer = null; } }
+
+/* ---------- 会话扫描（4s，供总览"实时会话"） ---------- */
+
+function refreshSessions(reason) {
+  try {
+    const r = sessionsMod.scanSessions({ limit: 40 });
+    lastSessionScan = r;
+    lastCursor = sessionsMod.cursorStats();
+    for (const s of r.sessions) metrics.touchSession(s);
+    metrics.dropSessions(r.sessions.map((s) => s.id));
+    return { ok: true, files: r.files, total: r.total };
+  } catch (e) {
+    metrics.pushLog('warn', '会话扫描失败：' + e.message);
+    return { ok: false, error: e.message };
+  }
+}
+function startSessionScan() {
+  stopSessionScan();
+  refreshSessions('start');
+  sessionScanTimer = setInterval(() => refreshSessions('tick'), 4000);
+}
+function stopSessionScan() { if (sessionScanTimer) { clearInterval(sessionScanTimer); sessionScanTimer = null; } }
+
+/* ---------- 守护探活（计入真实流量：这是本机 HTTP，但能反映"本地服务在不在"） ---------- */
+
+function daemonPing() {
+  return new Promise((resolve) => {
+    const t0 = Date.now();
+    const port = guard.port();
+    const req = require('http').request({ host: '127.0.0.1', port, path: '/health', method: 'GET', timeout: 4000 }, (res) => {
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => {
+        const ms = Date.now() - t0;
+        const resBytes = chunks.reduce((n, c) => n + c.length, 0);
+        let json = null;
+        try { json = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch (_) { }
+        metrics.meter({ dir: 'down', bytes: resBytes + HTTP_HDR_DOWN, ms, status: res.statusCode, url: `http://127.0.0.1:${port}/health`, method: 'GET' });
+        metrics.meter({ dir: 'up', bytes: HTTP_HDR_UP, ms, status: res.statusCode, url: `http://127.0.0.1:${port}/health`, method: 'GET' });
+        metrics.setLatency(ms);
+        metrics.setCurrent('down', '/health');
+        resolve({ ok: !!(res.statusCode === 200 && json), ms, payload: json, error: res.statusCode === 200 ? '' : 'HTTP ' + res.statusCode });
+      });
+    });
+    req.on('timeout', () => { req.destroy(); metrics.pushLog('warn', `守护进程 :${port} 探活超时`); resolve({ ok: false, ms: Date.now() - t0, payload: null, error: 'timeout' }); });
+    req.on('error', (e) => {
+      metrics.meter({ dir: 'up', bytes: HTTP_HDR_UP, ms: Date.now() - t0, status: 0, url: `http://127.0.0.1:${port}/health`, method: 'GET', error: e.code });
+      resolve({ ok: false, ms: Date.now() - t0, payload: null, error: e.code || e.message });
+    });
+    req.end();
+  });
+}
+
 /* ---------- 控制台窗口 ---------- */
 
 function createConsole() {
@@ -146,6 +280,10 @@ function createConsole() {
   });
   consoleWin.loadFile(path.join(__dirname, 'console.html'));
   consoleWin.once('ready-to-show', () => consoleWin.show());
+  // 首屏立即推一次，避免等 1s 心跳导致白屏
+  consoleWin.webContents.once('did-finish-load', () => {
+    try { consoleWin.webContents.send('metrics', currentSnapshot()); } catch (_) { }
+  });
   consoleWin.on('closed', () => { consoleWin = null; });
 }
 
@@ -220,6 +358,41 @@ ipcMain.handle('agents-register', () => {
 ipcMain.handle('get-health', () => lastHealth);
 ipcMain.handle('refresh', () => pollHealth());
 
+/* ---------- 实时监控 IPC ---------- */
+
+// 仪表盘全量快照（渲染进程首屏 + 兜底轮询用）
+ipcMain.handle('metrics-get', () => currentSnapshot());
+
+// 会话扫描（可强制刷新）
+ipcMain.handle('sessions-scan', (_e, opts) => {
+  if (opts && opts.force) refreshSessions('manual');
+  return { ok: true, files: lastSessionScan.files, total: lastSessionScan.total, sessions: lastSessionScan.sessions };
+});
+
+// 游标统计
+ipcMain.handle('cursor-stats', () => lastCursor);
+
+// 守护进程探活（真实 HTTP 到 127.0.0.1:<port>/health）
+ipcMain.handle('daemon-ping', () => daemonPing());
+
+// 渲染进程侧被动流量上报（preload 拦截 fetch/XHR 得到语义，主进程补真实字节）
+ipcMain.on('flow-passive', (_e, ev) => {
+  if (!ev || !ev.dir) return;
+  metrics.meter({
+    dir: ev.dir, bytes: Number(ev.bytes) || 0, ms: ev.ms,
+    status: ev.status, url: ev.url, method: ev.method, error: ev.error,
+  });
+});
+
+// 复制到剪贴板
+ipcMain.handle('clipboard-write', (_e, text) => {
+  try { require('electron').clipboard.writeText(String(text || '')); return { ok: true }; }
+  catch (e) { return { ok: false, error: e.message }; }
+});
+
+// 打开目录/文件
+ipcMain.handle('reveal-path', (_e, p) => { try { shell.showItemInFolder(String(p)); return { ok: true }; } catch (e) { return { ok: false, error: e.message }; } });
+
 ipcMain.handle('tool-call', async (_e, { tool, args }) => {
   if (!core) return { ok: false, error: 'core 未初始化' };
   const map = {
@@ -236,7 +409,21 @@ ipcMain.handle('tool-call', async (_e, { tool, args }) => {
   };
   const fn = map[tool];
   if (!fn) return { ok: false, error: `未知工具 ${tool}` };
-  try { return await fn(); } catch (e) { return { ok: false, error: e.message }; }
+  const t0 = Date.now();
+  metrics.beginTask('down', { label: tool, url: tool, method: 'POST' });
+  metrics.setCurrent('down', tool);
+  try {
+    const r = await fn();
+    const ms = Date.now() - t0;
+    metrics.endTask('down', { state: r.ok ? 'done' : 'error', bytes: 0, ms, status: r.ok ? 200 : 0 });
+    if (r.ok) metrics.pushLog('flow', `工具调用 ${tool}`, `工具     : ${tool}\n耗时     : ${ms} ms\n参数     : ${JSON.stringify(args || {}).slice(0, 300)}`);
+    else metrics.pushLog('warn', `工具调用失败 ${tool}`, `工具     : ${tool}\n错误     : ${r.error || ''}\n提示     : ${r.hint || ''}`);
+    return r;
+  } catch (e) {
+    metrics.endTask('down', { state: 'error', bytes: 0, ms: Date.now() - t0, status: 0 });
+    metrics.pushLog('error', `工具调用异常 ${tool}`, e.message);
+    return { ok: false, error: e.message };
+  }
 });
 
 // 更新（安装版 electron-updater / 便携版 latest.yml 比对）
@@ -270,10 +457,17 @@ else {
     updater.init();
     updater.setAutoCheck(prefs.update.autoCheck);
     startPolling();
-    guard.start(dm).then(() => pollHealth()).catch(() => { });
+    startTick();
+    startSessionScan();
+    guard.start(dm).then(() => {
+      pollHealth();
+      metrics.pushLog('ok', `守护进程已就绪 · 本地服务 127.0.0.1:${guard.port()}`);
+    }).catch((e) => {
+      metrics.pushLog('warn', '守护进程启动失败：' + (e && e.message));
+    });
     globalShortcut.register('CommandOrControl+Shift+M', () => createConsole());
   });
 
-  app.on('will-quit', () => { globalShortcut.unregisterAll(); stopPolling(); guard.stop(); });
+  app.on('will-quit', () => { globalShortcut.unregisterAll(); stopPolling(); stopTick(); stopSessionScan(); guard.stop(); });
   app.on('window-all-closed', () => { /* 关窗不退出：守护与托盘继续运行 */ });
 }

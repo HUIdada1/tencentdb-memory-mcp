@@ -23,7 +23,7 @@ const QUEUE_DIR = path.join(DATA_DIR, 'queue');
 const LOG_PATH = path.join(DATA_DIR, 'daemon.log');
 
 const RECALL_PORT = Number(process.env.TDAI_DAEMON_PORT) || 8100;
-const APP_VER = '0.4.1';         // 与 package.json 同步；SEA exe 的版本号
+const APP_VER = '0.5.0';         // 与 package.json 同步；SEA exe 的版本号
 const REPO_API = 'https://api.github.com/repos/HUIdada1/tencentdb-memory-mcp/releases/latest';
 const RECALL_TIMEOUT_MS = 800;   // hook 链路硬超时：超时返回空，绝不阻塞对话
 const SCAN_INTERVAL_MS = 2 * 60 * 1000;  // 采集循环 2 分钟
@@ -129,12 +129,15 @@ function mkApi(cfg) {
 
 // ZCode CLI：~/.zcode/cli/agents/<sess>/<agent>/transcript.jsonl
 // 已验证映射：用户输入=turn_started.payload.input；最终答复=turn_complete.payload.response。
+// 注意：真实文件里事件类型字段是 `type`（不是 `event`）。早期只判 `j.event` 会导致一条都解析不出来，
+//       采集静默为空；这里两者都认，并在两侧都缺失时保持静默（不误报）。
 function parseZCodeLine(line) {
   let j; try { j = JSON.parse(line); } catch (_) { return []; }
   const out = [];
-  if (j.event === 'turn_started' && j.payload && j.payload.input != null && String(j.payload.input).trim()) {
+  const kind = j.type || j.event;
+  if (kind === 'turn_started' && j.payload && j.payload.input != null && String(j.payload.input).trim()) {
     out.push({ role: 'user', content: String(j.payload.input) });
-  } else if (j.event === 'turn_complete' && j.payload && j.payload.response != null && String(j.payload.response).trim()) {
+  } else if (kind === 'turn_complete' && j.payload && j.payload.response != null && String(j.payload.response).trim()) {
     out.push({ role: 'assistant', content: String(j.payload.response) });
   }
   return out;

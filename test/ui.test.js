@@ -19,15 +19,26 @@ const uniq = (a) => Array.from(new Set(a));
 const matchAll = (text, re) => { const out = []; let m; while ((m = re.exec(text))) out.push(m); return out; };
 
 /* ---------- DOM 选择器 ---------- */
-const htmlIds = uniq(matchAll(html, /\bid="([^"]+)"/g).map((m) => m[1]));
+const htmlNoComment = html.replace(/<!--[\s\S]*?-->/g, '');
+const htmlIds = uniq(matchAll(htmlNoComment, /\bid="([^"]+)"/g).map((m) => m[1]));
 const jsIds = uniq(matchAll(js, /\$\('#([\w-]+)'\)/g).map((m) => m[1]));
 const missingIds = jsIds.filter((id) => !htmlIds.includes(id));
-check(`console.js 引用的 ${jsIds.length} 个 DOM id 全部存在` + (missingIds.length ? `（缺：${missingIds.join(', ')}）` : ''), missingIds.length === 0);
+check(`console.js 引用的 ${jsIds.length} 个 DOM id 全部存在于「可见」HTML` + (missingIds.length ? `（缺：${missingIds.join(', ')}）` : ''), missingIds.length === 0);
 
-/* ---------- 顶栏 tab 与页面 ---------- */
-const tabNames = uniq(matchAll(html, /data-tab="([\w-]+)"/g).map((m) => m[1]));
-const pageNames = uniq(matchAll(html, /data-page="([\w-]+)"/g).map((m) => m[1]));
+/* ---------- 顶栏 tab 与页面 ----------
+ * 注意：必须先把 HTML 注释剥掉，否则被整段注释隐藏的 tab（技能/wiki/图谱）
+ * 仍会被正则匹配到，导致「已隐藏」这件事永远验不出来 —— 这是个真实踩过的坑。
+ */
+const htmlLive = html.replace(/<!--[\s\S]*?-->/g, '');
+const tabNames = uniq(matchAll(htmlLive, /data-tab="([\w-]+)"/g).map((m) => m[1]));
+const pageNames = uniq(matchAll(htmlLive, /data-page="([\w-]+)"/g).map((m) => m[1]));
 check('顶栏 tab 与页面一一对应：' + tabNames.join(' / '), tabNames.length > 0 && tabNames.every((t) => pageNames.includes(t)) && pageNames.every((p) => tabNames.includes(p)));
+// 明确：技能 / wiki / 图谱 必须已不可见；记忆必须可见
+const HIDDEN_TABS = ['skills', 'wiki', 'graph'];
+const stillVisible = HIDDEN_TABS.filter((t) => tabNames.includes(t) || pageNames.includes(t));
+check('技能 / Wiki / 图谱 三个 tab 已隐藏（注释）' + (stillVisible.length ? `（仍可见：${stillVisible.join(', ')}）` : ''), stillVisible.length === 0);
+check('记忆 tab 保留可用', tabNames.includes('memory') && pageNames.includes('memory'));
+check('Agent 接入为独立 tab', tabNames.includes('agent') && pageNames.includes('agent'));
 check('设置已并入顶栏 tab（不再有独立「更新」tab）', tabNames.includes('settings') && !tabNames.includes('update'));
 
 /* ---------- 设置内二级 tab 与子面板 ---------- */
@@ -65,9 +76,14 @@ check('打包配置不再包含宠物模块（files 仅 src）', JSON.stringify(
 check('resources 打平了 core / mcp / daemon 供一键接入使用', ['core', 'mcp', 'daemon'].every((d) => pkg.build.extraResources.some((r) => r.to === d)));
 check('升级路径 appId 未变（老用户可平滑升级）', pkg.build.appId === 'com.tdai.pet');
 
-/* ---------- 无数据占位统一为 "-" ---------- */
-const placeholders = matchAll(html, /<b id="(?:s|up)-[\w-]+">([^<]*)<\/b>|<div class="[kv]" id="(?:k|a)-[\w-]+">([^<]*)<\/div>/g).map((m) => m[1] || m[2]);
-check(`数据展示位（${placeholders.length} 处）初始占位统一为 "-"`, placeholders.length > 0 && placeholders.every((t) => t.trim() === '-'));
+/* ---------- 无数据占位统一（- 或 —） ----------
+ * 只检查「纯占位」形态的展示位：形如 - / — / 0 / 0 B / 0 B/s / 0 ms / 0 / 0 / 未配置。
+ * 有实际语义的初始文案（如「暂无上传任务」）不在此列。
+ */
+const placeholders = matchAll(html, /<b id="(?:s|up|down|h|d)-[\w-]+">([^<]*)<\/b>/g).map((m) => m[1]);
+const PLACEHOLDER_RE = /^(?:[-—]|0(?:\.\d+)?(?: [KMGT]?B(?:\/s)?| ms| 个)?(?:\s*\/\s*0)?|未配置)$/;
+const badPh = placeholders.filter((t) => !PLACEHOLDER_RE.test(t.trim()));
+check(`数据展示位（${placeholders.length} 处）初始占位统一为 "-" / "—" / "0…"` + (badPh.length ? `（不合格：${badPh.join(' | ')}）` : ''), placeholders.length > 0 && badPh.length === 0);
 
 const failed = results.filter((r) => !r[1]);
 console.log(failed.length ? `\nUI 静态校验失败 ${failed.length} 项` : `\nUI 静态校验全部通过（${results.length} 项）`);

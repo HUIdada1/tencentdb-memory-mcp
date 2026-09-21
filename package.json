@@ -1,10 +1,24 @@
 {
   "name": "tencentdb-memory-mcp",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "private": true,
   "description": "TD 记忆守护：MCP server + 后台记忆守护进程（采集上传 + 本地 recall 服务）",
   "bin": {
     "tdai-daemon": "daemon/tdai-daemon.js",
     "tdai-mcp": "mcp/tdai-mcp.js"
+  },
+  "scripts": {
+    "test": "node test/functional.test.js",
+    "test:metrics": "node test/metrics-smoke.js",
+    "test:flow": "node test/flow-integration.js",
+    "test:e2e": "node test/e2e-live.js",
+    "test:dom": "node test/renderer-dom.js",
+    "test:register": "node test/register.test.js",
+    "test:ui": "node test/ui.test.js",
+    "test:preview": "node scripts/make-preview.cjs && node test/preview-verify.js",
+    "preview": "node scripts/make-preview.cjs",
+    "test:all": "node test/functional.test.js && node test/metrics-smoke.js && node test/flow-integration.js && node test/e2e-live.js && node test/renderer-dom.js && node test/register.test.js && node test/ui.test.js && node scripts/make-preview.cjs && node test/preview-verify.js",
+    "daemon": "node daemon/tdai-daemon.js",
+    "pet": "cd pet && npm start"
   }
 }

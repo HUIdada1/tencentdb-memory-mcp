@@ -20,9 +20,12 @@
   <nav id="tabs">
     <button data-tab="home" class="active">总览</button>
     <button data-tab="memory">记忆</button>
+    <!-- 暂不实现：技能 / Wiki / 图谱（取消注释即可恢复，需同时恢复下方对应 section 与 console.js 分支）
     <button data-tab="skills">技能</button>
     <button data-tab="wiki">Wiki</button>
     <button data-tab="graph">图谱</button>
+    -->
+    <button data-tab="agent">Agent 接入</button>
     <button data-tab="settings">设置</button>
   </nav>
   <div class="bar-ctl">
@@ -38,38 +41,167 @@
 <!-- ====== 主区 ====== -->
 <main id="main">
 
-  <!-- ====== 总览 ====== -->
+  <!-- ====== 总览（实时监控台） ====== -->
   <section data-page="home" class="page active">
-    <div class="row stat-row">
-      <div class="stat glass"><i></i><div><b id="s-status">-</b><span>记忆库</span></div></div>
-      <div class="stat glass"><i></i><div><b id="s-latency">-</b><span>往返延迟</span></div></div>
-      <div class="stat glass"><i></i><div><b id="s-guard">-</b><span>后台守护</span></div></div>
-      <div class="stat glass"><i></i><div><b id="s-queue">-</b><span>待上传队列</span></div></div>
+
+    <!-- ① 连接体征条 -->
+    <div class="hero glass">
+      <div class="live">
+        <span id="live-badge" class="live-badge"><i></i></span>
+        <div class="live-txt">
+          <b id="live-text">正在建立实时连接…</b>
+          <span id="live-sub">等待首次心跳</span>
+        </div>
+      </div>
+      <div class="hero-kv">
+        <div><label>记忆库面板</label><b id="h-panel">未配置</b></div>
+        <div><label>面板延迟</label><b id="h-latency">—</b></div>
+        <div><label>守护探活</label><b id="h-beat">—</b></div>
+        <div><label>运行时长</label><b id="h-uptime">—</b></div>
+        <div><label>版本</label><b id="h-ver">—</b></div>
+      </div>
+      <div class="spark-wrap">
+        <label>延迟波形（最近 60s）</label>
+        <svg id="spark" viewBox="0 0 220 44" preserveAspectRatio="none">
+          <polyline id="spark-fill" fill="none" stroke="none" points=""></polyline>
+          <polyline id="spark-line" fill="none" stroke="#378ADD" stroke-width="1.5" points=""></polyline>
+        </svg>
+      </div>
     </div>
+
+    <!-- ② 关键指标卡 -->
+    <div class="row stat-row">
+      <div class="stat glass" id="c-status"><i></i><div><b id="s-status">—</b><span>连接状态</span></div></div>
+      <div class="stat glass" id="c-up"><i></i><div><b id="s-up">—</b><span>上传速度</span></div></div>
+      <div class="stat glass" id="c-down"><i></i><div><b id="s-down">—</b><span>下载速度</span></div></div>
+      <div class="stat glass"><i></i><div><b id="s-sess">—</b><span>进行中会话</span></div></div>
+      <div class="stat glass"><i></i><div><b id="s-reqs">—</b><span>累计请求</span></div></div>
+      <div class="stat glass" id="c-err"><i></i><div><b id="s-err">—</b><span>失败请求</span></div></div>
+    </div>
+
+    <!-- ③ 实时会话 -->
+    <div class="row">
+      <div class="card glass" style="flex:1">
+        <h3>实时会话
+          <span class="hd-note" id="sess-count">—</span>
+          <button class="mini" data-act="sess-refresh">立即刷新</button>
+        </h3>
+        <div class="sess-wrap">
+          <div class="sess-head">
+            <span>会话 / 来源</span><span>状态</span><span>轮次</span><span>最近交互</span><span>内容摘要</span>
+          </div>
+          <div id="sess-list" class="sess-list"><div class="empty">扫描中…</div></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ④ 上下行流量 -->
+    <div class="row two-col">
+      <div class="card glass flow-card up">
+        <h3><span class="tag up">上行</span>上传流量</h3>
+        <div class="flow-top">
+          <div class="gauge">
+            <svg viewBox="0 0 120 120">
+              <circle cx="60" cy="60" r="52" fill="none" stroke="var(--gauge-track,#C0DD97)" stroke-width="10"/>
+              <circle id="up-arc" cx="60" cy="60" r="52" fill="none" stroke="#639922" stroke-width="10"
+                      stroke-linecap="round" stroke-dasharray="326.7" stroke-dashoffset="326.7"
+                      transform="rotate(-90 60 60)"/>
+            </svg>
+            <div class="gauge-txt"><b id="up-speed">0 B/s</b><span>当前速率</span></div>
+          </div>
+          <div class="flow-kv">
+            <div><label>累计上传</label><b id="up-total">0 B</b></div>
+            <div><label>峰值速率</label><b id="up-peak">0 B/s</b></div>
+            <div><label>成功 / 失败</label><b id="up-ok">0 / 0</b></div>
+            <div><label>提交批次</label><b id="up-commits">0</b></div>
+          </div>
+        </div>
+        <div class="task">
+          <div class="task-head"><span id="up-task-name">暂无上传任务</span><b id="up-task-pct">—</b></div>
+          <div class="prog"><i id="up-task-bar" style="width:0%"></i></div>
+          <div class="task-foot" id="up-task-foot">等待下次采集…</div>
+        </div>
+        <div class="bars" id="up-bars"></div>
+        <div class="flow-note" id="up-bytes-note">字节数为真实 socket 计量</div>
+      </div>
+
+      <div class="card glass flow-card down">
+        <h3><span class="tag down">下行</span>下载流量</h3>
+        <div class="flow-top">
+          <div class="gauge">
+            <svg viewBox="0 0 120 120">
+              <circle cx="60" cy="60" r="52" fill="none" stroke="var(--gauge-track,#9FE1CB)" stroke-width="10"/>
+              <circle id="down-arc" cx="60" cy="60" r="52" fill="none" stroke="#1D9E75" stroke-width="10"
+                      stroke-linecap="round" stroke-dasharray="326.7" stroke-dashoffset="326.7"
+                      transform="rotate(-90 60 60)"/>
+            </svg>
+            <div class="gauge-txt"><b id="down-speed">0 B/s</b><span>当前速率</span></div>
+          </div>
+          <div class="flow-kv">
+            <div><label>累计下载</label><b id="down-total">0 B</b></div>
+            <div><label>峰值速率</label><b id="down-peak">0 B/s</b></div>
+            <div><label>成功 / 失败</label><b id="down-ok">0 / 0</b></div>
+            <div><label>平均耗时</label><b id="down-avg">0 ms</b></div>
+          </div>
+        </div>
+        <div class="task">
+          <div class="task-head"><span id="down-task-name">暂无下载任务</span><b id="down-task-pct">—</b></div>
+          <div class="prog"><i id="down-task-bar" style="width:0%"></i></div>
+          <div class="task-foot" id="down-task-foot">等待请求…</div>
+        </div>
+        <div class="bars" id="down-bars"></div>
+        <div class="flow-note" id="down-bytes-note">字节数为真实 socket 计量</div>
+      </div>
+    </div>
+
+    <!-- ⑤ 实时日志 -->
+    <div class="row">
+      <div class="card glass" style="flex:1">
+        <h3>实时日志
+          <span class="hd-note" id="log-count">—</span>
+          <button class="mini" id="log-pause">暂停</button>
+          <button class="mini" id="log-clear">清空</button>
+        </h3>
+        <div id="log-list" class="log-list"><div class="empty">等待日志…</div></div>
+      </div>
+    </div>
+
+    <!-- ⑥ 守护状态 + 记忆库资产 -->
     <div class="row two-col">
       <div class="card glass">
-        <h3>最近记忆 <button class="mini" data-act="reload-layers">刷新</button></h3>
-        <div id="layers" class="list"><div class="empty">加载中…</div></div>
+        <h3>守护状态 <button class="mini" data-act="guard-ping">探活</button></h3>
+        <div class="kv-list">
+          <div class="kv"><span>进程模式</span><b id="d-mode">—</b></div>
+          <div class="kv"><span>守护启动于</span><b id="d-since">—</b></div>
+          <div class="kv"><span>最近上传</span><b id="d-lastpush">—</b></div>
+          <div class="kv"><span>待传队列</span><b id="d-queue">—</b></div>
+          <div class="kv"><span>hook 调用</span><b id="d-hooks">—</b></div>
+          <div class="kv"><span>游标文件</span><b id="d-files">—</b></div>
+          <div class="kv"><span>下次采集倒计时</span><b id="d-nextscan">—</b></div>
+          <div class="kv"><span>本地服务</span><b id="d-port">—</b></div>
+        </div>
       </div>
       <div class="card glass">
+        <h3>记忆库资产 <button class="mini" data-act="reload-layers">刷新</button></h3>
+        <div class="kv-list">
+          <div class="kv"><span>团队技能</span><b id="s-assets">—</b></div>
+          <div class="kv"><span>记忆总量</span><b id="s-mem">—</b></div>
+          <div class="kv"><span>已建立游标</span><b id="s-seeded">—</b></div>
+          <div class="kv"><span>上传来源</span><b id="s-srcs">—</b></div>
+        </div>
+        <div id="layers" class="list"><div class="empty">加载中…</div></div>
+      </div>
+    </div>
+
+    <!-- 快速检索（保留：总览就地检索） -->
+    <div class="row">
+      <div class="card glass" style="flex:1">
         <h3>快速检索</h3>
         <div class="quick-search">
           <input id="qs-input" placeholder="比如：排涝站 数据库 设计">
           <button id="qs-go" class="btn-primary">检索</button>
         </div>
         <div id="qs-result" class="result"></div>
-      </div>
-    </div>
-    <div class="row">
-      <div class="card glass" style="flex:1">
-        <h3>运行信息 <button class="mini" data-act="reload-guard">刷新</button></h3>
-        <div class="kv">
-          <div class="k">最近上传</div><div class="v" id="k-lastpush">-</div>
-          <div class="k">hook 调用次数</div><div class="v" id="k-hookcalls">-</div>
-          <div class="k">守护启动于</div><div class="v" id="k-uptime">-</div>
-          <div class="k">本地服务</div><div class="v" id="k-port">-</div>
-          <div class="k">配置文件</div><div class="v" id="k-cfg">-</div>
-        </div>
       </div>
     </div>
   </section>
@@ -85,15 +217,16 @@
     <div id="mem-out" class="out glass"></div>
   </section>
 
-  <!-- ====== 技能 ====== -->
+  <!-- 暂不实现：技能页
   <section data-page="skills" class="page">
     <div class="toolbar glass">
       <button data-act="skill-list" class="btn-primary">刷新目录</button>
     </div>
     <div id="skill-out" class="out glass grid"></div>
   </section>
+  -->
 
-  <!-- ====== Wiki ====== -->
+  <!-- 暂不实现：Wiki 页
   <section data-page="wiki" class="page">
     <div class="toolbar glass">
       <input id="wiki-q" placeholder="检索 Wiki…">
@@ -101,8 +234,9 @@
     </div>
     <div id="wiki-out" class="out glass"></div>
   </section>
+  -->
 
-  <!-- ====== 图谱 ====== -->
+  <!-- 暂不实现：图谱页
   <section data-page="graph" class="page">
     <div class="toolbar glass">
       <input id="graph-q" placeholder="检索代码图谱…">
@@ -110,6 +244,60 @@
     </div>
     <div id="graph-out" class="out glass"></div>
   </section>
+  -->
+
+  <!-- ====== Agent 接入（独立功能页） ====== -->
+  <section data-page="agent" class="page">
+    <div class="core-strip glass">
+      <div class="cs-item"><label>守护内核</label><b id="ag-core">检测中…</b></div>
+      <div class="cs-item"><label>本地服务</label><b id="ag-port">—</b></div>
+      <div class="cs-item"><label>hook 调用</label><b id="ag-hooks">—</b></div>
+      <div class="cs-item"><label>已接入客户端</label><b id="ag-clients">—</b></div>
+      <button class="mini" data-act="agent-refresh">刷新状态</button>
+    </div>
+
+    <div class="card glass">
+      <h3>三步接入</h3>
+      <div class="steps">
+        <div class="step">
+          <span class="no">1</span>
+          <div>
+            <b>确认守护在跑</b>
+            <span>本应用自身即后台守护，负责采集会话增量并上传。上方「守护内核」应为在线。</span>
+          </div>
+        </div>
+        <div class="step">
+          <span class="no">2</span>
+          <div>
+            <b>一键写入客户端配置</b>
+            <span>把 <code>tdai</code> 记忆工具写进已安装客户端（ZCode CLI / Claude Code / Cursor / Codex）的配置，并追加全局指令文件。幂等，重复点不会重复写。</span>
+          </div>
+        </div>
+        <div class="step">
+          <span class="no">3</span>
+          <div>
+            <b>新开会话即生效</b>
+            <span>Claude Code 首次会提示「信任」hook，点一次即可；之后每次提问前自动检索并注入相关记忆。</span>
+          </div>
+        </div>
+      </div>
+      <div class="ag-actions">
+        <button class="btn-primary" id="agent-register">一键接入全部客户端</button>
+        <button class="btn-ghost" data-act="agent-refresh">刷新状态</button>
+        <button class="btn-ghost" data-act="agent-copy-cmd">复制手动接入命令</button>
+        <button class="btn-ghost" data-act="agent-open-console">打开网页控制台</button>
+      </div>
+      <div class="banner" id="b-agent"></div>
+      <div class="ag-tip">接入目标是本程序自身，无需安装 Node，也不依赖源码目录。未安装的客户端会自动跳过。</div>
+    </div>
+
+    <div class="card glass">
+      <h3>客户端接入状态</h3>
+      <div class="status-list" id="agent-list"><div class="empty">检测中…</div></div>
+      <div class="out" id="agent-log" style="display:none"></div>
+    </div>
+  </section>
+
 
   <!-- ====== 设置（分类 tab） ====== -->
   <section data-page="settings" class="page">
