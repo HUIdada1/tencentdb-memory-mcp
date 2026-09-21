@@ -117,15 +117,19 @@ function status({ home = os.homedir(), exePath = '' } = {}) {
   for (const cls of CLIENTS) {
     const installed = exists(cls.probe(home));
     const entry = entryOf(cls, home);
+    // byApp=true 表示由本应用接入（exe 路径一致）；否则是旧版/源码版 node 接入，
+    // 需要在界面提示"建议切换到本应用接入"，否则升级后旧路径可能失效。
+    const byApp = entry ? (cls.kind === 'dsh-patch' ? false : samePath(entry.command, exePath)) : false;
     const detail = entry
       ? (cls.kind === 'dsh-patch' ? '已写入 cordis.patch'
-        : samePath(entry.command, exePath) ? '本应用接入' : `由 ${path.basename(entry.command || '')} 接入`)
+        : byApp ? '本应用接入' : `由 ${path.basename(entry.command || '')} 接入（旧路径，建议点开关重连）`)
       : '';
     items.push({
       key: cls.key,
       name: cls.name,
       status: !installed ? 'absent' : (entry ? 'installed' : 'missing'),
       detail,
+      byApp,
     });
   }
 
@@ -258,4 +262,157 @@ function register({ home = os.homedir(), exePath, mcpJs, daemonJs } = {}) {
   return results;
 }
 
-module.exports = { status, register, mcpEntry, hookScript, hookCmdPath, dshPatchBlock, INSTR, CLIENTS, HOOK_MARK };
+/* ---------- 单个客户端的接入 / 断开（手动开关用） ---------- */
+
+// 把某客户端的 MCP 注册流程单独抽出，给"接入单个"开关复用（与 register 内对应分支口径一致）
+function registerOne(cls, { home, exePath, mcpJs, daemonJs }, results) {
+  const file = cls.file(home);
+  if (!exists(cls.probe(home))) { results.push({ target: cls.name, action: '跳过', detail: '未安装该客户端' }); return; }
+  try {
+    if (cls.kind === 'toml') {
+      const text = readText(file) || '';
+      if (text.includes('[mcp_servers.tdai]')) { results.push({ target: cls.name, action: '跳过', detail: '已注册 [mcp_servers.tdai]' }); return; }
+      const esc = (s) => String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+      backup(file);
+      fs.appendFileSync(file, `\n[mcp_servers.tdai]\ncommand = "${esc(exePath)}"\nargs = ["${esc(mcpJs)}"]\nenv = { ELECTRON_RUN_AS_NODE = "1" }\n`);
+      results.push({ target: cls.name, action: '追加', detail: '[mcp_servers.tdai]' });
+    } else if (cls.kind === 'dsh-patch') {
+      let profiles = [];
+      try { profiles = fs.readdirSync(file).filter((n) => n !== 'node_modules'); } catch (_) { }
+      let wrote = 0, skipped = 0;
+      for (const p of profiles) {
+        const f = path.join(file, p, 'cordis.patch.yml');
+        if (!exists(f)) continue;
+        const text = readText(f) || '';
+        if (text.includes('dsh-mcp-client')) { skipped++; continue; }
+        backup(f);
+        const body = text.split('\n').filter((l) => !l.trim().startsWith('#')).join('\n').trim();
+        if (body === '' || body === '[]') {
+          const header = text.split('\n').filter((l) => l.trim().startsWith('#')).join('\n');
+          fs.writeFileSync(f, (header ? header + '\n' : '') + dshPatchBlock({ exePath, mcpJs }).replace(/^\n+/, ''));
+        } else {
+          fs.writeFileSync(f, text.replace(/\s*$/, '') + '\n' + dshPatchBlock({ exePath, mcpJs }));
+        }
+        wrote++;
+      }
+      if (wrote) results.push({ target: cls.name, action: '追加', detail: `${wrote} 个 profile 写入 insert 条目` });
+      else if (skipped) results.push({ target: cls.name, action: '跳过', detail: 'patch 已存在' });
+      else results.push({ target: cls.name, action: '跳过', detail: '~/.dsh/profiles 下无 cordis.patch.yml' });
+    } else {
+      const c = readJson(file) || {};
+      const next = mcpEntry({ exePath, mcpJs });
+      const zcodeStyle = cls.pointer === '/mcp/servers/tdai';
+      if (zcodeStyle) { c.mcp = c.mcp || {}; c.mcp.servers = c.mcp.servers || {}; }
+      else { c.mcpServers = c.mcpServers || {}; }
+      const prev = zcodeStyle ? c.mcp.servers.tdai : c.mcpServers.tdai;
+      if (prev && JSON.stringify(prev) === JSON.stringify(next)) { results.push({ target: cls.name, action: '跳过', detail: '已是本应用接入' }); return; }
+      if (zcodeStyle) c.mcp.servers.tdai = next; else c.mcpServers.tdai = next;
+      backup(file); writeJson(file, c);
+      results.push({ target: cls.name, action: prev ? '覆盖' : '新增', detail: prev ? '更新为当前程序路径' : cls.pointer });
+    }
+  } catch (e) { results.push({ target: cls.name, action: '失败', detail: e.message }); }
+}
+
+// 接入单个客户端（用户手动开启）：等于 register 的对应子集，返回 results
+function registerOneClient(key, opts) {
+  const cls = CLIENTS.find((x) => x.key === key);
+  if (!cls) throw new Error('未知客户端: ' + key);
+  const results = [];
+  registerOne(cls, { home: opts.home, exePath: opts.exePath, mcpJs: opts.mcpJs, daemonJs: opts.daemonJs }, results);
+  // Claude Code / ZCode 同时补 hook（开关语义：开启即完整接入）
+  if (key === 'claude-code' || key === 'zcode') {
+    try {
+      const home = opts.home;
+      const t = key === 'claude-code'
+        ? { name: 'Claude Code hook', homeDir: path.join(home, '.claude'), file: path.join(home, '.claude', 'settings.json') }
+        : { name: 'ZCode hook', homeDir: path.join(home, '.zcode'), file: path.join(home, '.zcode', 'cli', 'config.json') };
+      if (exists(t.homeDir)) {
+        const cmdFile = hookCmdPath(home);
+        ensureDir(path.dirname(cmdFile));
+        fs.writeFileSync(cmdFile, hookScript({ exePath: opts.exePath, daemonJs: opts.daemonJs }));
+        const c = readJson(t.file) || {};
+        c.hooks = c.hooks || {};
+        c.hooks.UserPromptSubmit = c.hooks.UserPromptSubmit || [];
+        if (JSON.stringify(c.hooks.UserPromptSubmit).includes(HOOK_MARK)) {
+          results.push({ target: t.name, action: '跳过', detail: 'hook 已存在（脚本已更新）' });
+        } else {
+          c.hooks.UserPromptSubmit.push({ matcher: '*', hooks: [{ type: 'command', command: `"${cmdFile}"` }] });
+          backup(t.file); writeJson(t.file, c);
+          results.push({ target: t.name, action: '新增', detail: 'UserPromptSubmit → 本应用' });
+        }
+      }
+    } catch (e) { results.push({ target: key + ' hook', action: '失败', detail: e.message }); }
+  }
+  return results;
+}
+
+// 断开单个客户端（用户手动关闭）：删除其 MCP 条目 + hook（若有）
+function unregisterOneClient(key, { home = os.homedir() } = {}) {
+  const cls = CLIENTS.find((x) => x.key === key);
+  if (!cls) throw new Error('未知客户端: ' + key);
+  const results = [];
+  const file = cls.file(home);
+  try {
+    if (cls.kind === 'toml') {
+      const text = readText(file) || '';
+      const m = text.match(/\n?\[mcp_servers\.tdai\][\s\S]*?(?=\n\[|$)/);
+      if (m) { backup(file); fs.writeFileSync(file, text.replace(m[0], '\n')); results.push({ target: cls.name, action: '移除', detail: '[mcp_servers.tdai]' }); }
+      else results.push({ target: cls.name, action: '跳过', detail: '无 tdai 条目' });
+    } else if (cls.kind === 'dsh-patch') {
+      let profiles = [];
+      try { profiles = fs.readdirSync(file).filter((n) => n !== 'node_modules'); } catch (_) { }
+      let removed = 0;
+      for (const p of profiles) {
+        const f = path.join(file, p, 'cordis.patch.yml');
+        const text = readText(f) || '';
+        if (!text.includes('dsh-mcp-client')) continue;
+        backup(f);
+        // 移除 tdai-memory 注入块（含其上的注释行）：按行过滤掉注释+insert 块
+        const lines = text.split('\n');
+        const out = [];
+        let skip = false;
+        for (const l of lines) {
+          if (/tdai-memory:begin/.test(l)) { skip = true; continue; }
+          if (skip) {
+            if (l.trim().startsWith('- insert:')) continue;
+            if (l.trim().startsWith('- resolve:')) continue;
+            if (/dsh-mcp-client/.test(l)) continue;
+            if (l.trim().startsWith('config:') || l.trim().startsWith('transport:') || l.trim().startsWith('serverName:')
+              || l.trim().startsWith('command:') || l.trim().startsWith('args:') || l.trim().startsWith('- ')
+              || l.trim().startsWith('ELECTRON_RUN_AS_NODE') || l.trim() === '') continue;
+            skip = false;
+          }
+          out.push(l);
+        }
+        fs.writeFileSync(f, out.join('\n').replace(/\n{3,}/g, '\n\n'));
+        removed++;
+      }
+      results.push({ target: cls.name, action: removed ? '移除' : '跳过', detail: removed ? `${removed} 个 profile 移除 insert 条目` : '无 tdai 条目' });
+    } else {
+      const c = readJson(file);
+      if (!c) { results.push({ target: cls.name, action: '跳过', detail: '配置文件不存在' }); return results; }
+      const zcodeStyle = cls.pointer === '/mcp/servers/tdai';
+      const has = zcodeStyle ? (c.mcp && c.mcp.servers && c.mcp.servers.tdai) : (c.mcpServers && c.mcpServers.tdai);
+      if (!has) { results.push({ target: cls.name, action: '跳过', detail: '无 tdai 条目' }); return results; }
+      if (zcodeStyle) delete c.mcp.servers.tdai; else delete c.mcpServers.tdai;
+      backup(file); writeJson(file, c);
+      results.push({ target: cls.name, action: '移除', detail: cls.pointer });
+    }
+  } catch (e) { results.push({ target: cls.name, action: '失败', detail: e.message }); }
+  // 同步移除 Claude Code / ZCode 的 hook
+  if (key === 'claude-code' || key === 'zcode') {
+    try {
+      const f = key === 'claude-code' ? path.join(home, '.claude', 'settings.json') : path.join(home, '.zcode', 'cli', 'config.json');
+      const c = readJson(f);
+      if (c && c.hooks && Array.isArray(c.hooks.UserPromptSubmit)) {
+        const before = c.hooks.UserPromptSubmit.length;
+        c.hooks.UserPromptSubmit = c.hooks.UserPromptSubmit.filter((x) => !JSON.stringify(x).includes(HOOK_MARK));
+        if (c.hooks.UserPromptSubmit.length !== before) { backup(f); writeJson(f, c); results.push({ target: key + ' hook', action: '移除', detail: 'UserPromptSubmit' }); }
+        else results.push({ target: key + ' hook', action: '跳过', detail: '无 tdai hook' });
+      }
+    } catch (e) { results.push({ target: key + ' hook', action: '失败', detail: e.message }); }
+  }
+  return results;
+}
+
+module.exports = { status, register, registerOneClient, unregisterOneClient, mcpEntry, hookScript, hookCmdPath, dshPatchBlock, INSTR, CLIENTS, HOOK_MARK };

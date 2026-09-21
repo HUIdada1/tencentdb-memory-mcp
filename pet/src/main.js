@@ -467,6 +467,19 @@ ipcMain.handle('app-info', () => ({
 ipcMain.handle('conn-load', () => publicConn());
 ipcMain.handle('conn-save', (_e, body) => saveConn(body));
 ipcMain.handle('conn-test', () => testConn());
+// 记忆策略（recallAlways）：只改配置里的这一项，不触发守护重启。
+// hook 每次实时读配置 → 立即生效；采集循环的 enabledSources 不受影响。
+ipcMain.handle('recall-set', (_e, v) => {
+  try {
+    const disk = (() => { try { return JSON.parse(fs.readFileSync(dm.CFG_PATH, 'utf8')); } catch (_) { return {}; } })();
+    disk.recallAlways = !!v;
+    fs.mkdirSync(path.dirname(dm.CFG_PATH), { recursive: true });
+    try { fs.copyFileSync(dm.CFG_PATH, dm.CFG_PATH + '.bak'); } catch (_) { }
+    fs.writeFileSync(dm.CFG_PATH, JSON.stringify(disk, null, 2));
+    metrics.pushLog('info', `记忆策略已切换为「${disk.recallAlways ? '每次对话都存读' : '仅提到才存读'}」`);
+    return { ok: true, recallAlways: disk.recallAlways };
+  } catch (e) { return { ok: false, error: (e && e.message) || String(e) }; }
+});
 
 ipcMain.handle('prefs-load', () => prefs);
 ipcMain.handle('prefs-save', (_e, patch) => {
@@ -517,6 +530,17 @@ ipcMain.handle('agents-status', () => register.status({ home: HOME, exePath: pro
 ipcMain.handle('agents-register', () => {
   const results = register.register({ home: HOME, exePath: process.execPath, mcpJs: MCP_JS, daemonJs: DAEMON_JS });
   return { results, items: register.status({ home: HOME, exePath: process.execPath }) };
+});
+// 单个客户端开关：{ key, enable: true|false } → 接入 / 断开该客户端
+ipcMain.handle('agents-toggle', (_e, { key, enable } = {}) => {
+  try {
+    const results = enable
+      ? register.registerOneClient(key, { home: HOME, exePath: process.execPath, mcpJs: MCP_JS, daemonJs: DAEMON_JS })
+      : register.unregisterOneClient(key, { home: HOME });
+    return { ok: true, results, items: register.status({ home: HOME, exePath: process.execPath }) };
+  } catch (e) {
+    return { ok: false, error: (e && e.message) || String(e) };
+  }
 });
 
 ipcMain.handle('get-health', () => lastHealth);
@@ -573,6 +597,22 @@ ipcMain.on('flow-passive', (_e, ev) => {
 ipcMain.handle('clipboard-write', (_e, text) => {
   try { require('electron').clipboard.writeText(String(text || '')); return { ok: true }; }
   catch (e) { return { ok: false, error: e.message }; }
+});
+
+// 实时日志导出：保存为 .log 文本文件
+ipcMain.handle('log-export', async (_e, { text, suggestedName } = {}) => {
+  try {
+    const { dialog } = require('electron');
+    const name = suggestedName || `tdai-logs-${new Date().toISOString().replace(/[:.]/g, '-')}.log`;
+    const r = await dialog.showSaveDialog({
+      title: '导出实时日志',
+      defaultPath: name,
+      filters: [{ name: '日志文件', extensions: ['log', 'txt'] }],
+    });
+    if (r.canceled || !r.filePath) return { ok: false, canceled: true };
+    fs.writeFileSync(r.filePath, String(text || ''), 'utf8');
+    return { ok: true, path: r.filePath };
+  } catch (e) { return { ok: false, error: (e && e.message) || String(e) }; }
 });
 
 // 打开目录/文件

@@ -1206,6 +1206,39 @@ input.switch:disabled{opacity:.5;cursor:not-allowed}
 .agent-badge.missing{background:var(--warn-soft);color:var(--warn-text);border-color:var(--warn)}
 .agent-badge.absent{background:transparent;color:var(--txt-3);border-color:var(--line-2)}
 
+/* 客户端接入开关：与 checkbox.switch 同尺寸，可点击行内任意处触发 */
+.agent-toggle{
+  display:inline-flex;align-items:center;gap:7px;cursor:pointer;user-select:none;
+  font-size:11px;color:var(--txt-3);white-space:nowrap;
+}
+.agent-toggle .sw{
+  width:36px;height:19px;border-radius:var(--r-pill);background:var(--txt-3);
+  border:1px solid var(--line-2);position:relative;transition:background var(--dur-fast) var(--ease-out-quart);
+  flex:none;
+}
+.agent-toggle .sw::after{
+  content:'';position:absolute;left:1px;top:1px;width:15px;height:15px;border-radius:50%;
+  background:#fff;transition:transform var(--dur-fast) var(--ease-out-quart);
+}
+.agent-toggle.on .sw{background:var(--brand);border-color:var(--brand)}
+.agent-toggle.on .sw::after{transform:translateX(17px)}
+.agent-toggle.disabled{opacity:.4;cursor:not-allowed}
+/* 旧路径提示（由 node.exe 接入） */
+.ar-old{font-size:10px;color:var(--warn-text);margin-left:6px}
+
+/* 实时会话页：动态来源统计列表 */
+.src-list{display:flex;flex-direction:column;gap:6px;margin-bottom:10px}
+.src-row{
+  display:flex;align-items:center;justify-content:space-between;gap:var(--sp-3);
+  padding:7px 11px;border:1px solid var(--line);border-radius:var(--r-s);
+  font-size:var(--fs-sm);background:var(--line);
+}
+.src-row b{color:var(--txt);font-weight:550}
+.src-row span{color:var(--txt-3);font-size:var(--fs-xs)}
+
+/* 实时会话行：文件路径核对 */
+.sess-file{font-size:10px;color:var(--txt-3);font-family:var(--font-mono);word-break:break-all}
+
 /* 客户端接入状态列表 */
 .status-list{border:1px solid var(--line);border-radius:var(--r-m);overflow:hidden;background:var(--line)}
 .status-list .li{

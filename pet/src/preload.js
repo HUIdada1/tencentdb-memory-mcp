@@ -23,6 +23,9 @@ contextBridge.exposeInMainWorld('tdai', {
   // Agent 接入
   agentsStatus: () => ipcRenderer.invoke('agents-status'),
   agentsRegister: () => ipcRenderer.invoke('agents-register'),
+  agentsToggle: (key, enable) => ipcRenderer.invoke('agents-toggle', { key, enable }),
+  recallSet: (v) => ipcRenderer.invoke('recall-set', v),
+  logExport: (text, suggestedName) => ipcRenderer.invoke('log-export', { text, suggestedName }),
 
   // 记忆库只读工具 / 健康
   toolCall: (tool, args) => ipcRenderer.invoke('tool-call', { tool, args }),

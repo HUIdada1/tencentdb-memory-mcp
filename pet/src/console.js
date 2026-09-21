@@ -239,7 +239,8 @@
      ③ 实时会话列表
      ============================================================ */
   const ST = { thinking: '交互中', active: '交互中', idle: '空闲', stale: '休眠', err: '异常' };
-  const SRC_NAME = { zcode: 'ZCode CLI', 'claude-code': 'Claude Code' };
+  // 来源显示名（缺失的来源直接用原始 source 字符串，界面不会显示空白或 "undefined"）
+  const SRC_NAME = { zcode: 'ZCode CLI', 'zcode-rollout': 'ZCode Rollout', 'claude-code': 'Claude Code', cursor: 'Cursor', codex: 'Codex', trae: 'Trae', 'deepseek-harness': 'DeepSeek Harness' };
 
   function renderSessions(list) {
     const box = $('#sess-list');
@@ -257,10 +258,12 @@
     box.innerHTML = list.map((s) => {
       const state = ST[s.state] || s.state || '—';
       const stale = (s.state === 'stale') ? ' dim' : '';
-      return `<div class="sess-row${stale}">
+      const file = s.file || '';
+      return `<div class="sess-row${stale}" title="${esc(file)}">
         <div class="sess-name">
           <b title="${esc(s.id)}">${esc(s.label || s.id)}</b>
-          <span>${esc(SRC_NAME[s.source] || s.source)}</span>
+          <span>${esc(SRC_NAME[s.source] || srcName(s.source))}</span>
+          ${file ? `<span class="sess-file">${esc(file)}</span>` : ''}
         </div>
         <span class="badge-st ${esc(s.state || '')}">${esc(state)}</span>
         <span>${esc(String(s.turns || 0))} 轮</span>
@@ -402,6 +405,31 @@
     logPause.textContent = S.logPaused ? '继续' : '暂停';
     if (!S.logPaused && S.snap) renderLogs(S.snap.logs, S.snap.logSeq);
   });
+  // 导出日志：当前视图（应用"清空"水位线之后的全部日志）→ 保存为 .log 文件
+  const logExport = $('#log-export');
+  if (logExport) logExport.addEventListener('click', async () => {
+    const snap = S.snap;
+    const floor = S.logClearSeq || 0;
+    const logs = ((snap && snap.logs) || []).filter((l) => (l.seq || 0) > floor);
+    if (!logs.length) {
+      logExport.textContent = '无日志';
+      setTimeout(() => { logExport.textContent = '导出'; }, 1500);
+      return;
+    }
+    const lines = logs.map((l) => `[${l.ts}] [${(LV_TEXT[l.level] || String(l.level || '')).toUpperCase()}] ${l.msg}${l.detail && l.detail !== l.msg ? '\n  ' + l.detail.split('\n').join('\n  ') : ''}`);
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const r = await tdai.logExport(lines.join('\n\n') + '\n', `tdai-logs-${stamp}.log`);
+    if (r && r.ok) {
+      logExport.textContent = '已导出';
+      pushLocal('ok', `实时日志已导出：${logs.length} 条 → ${r.path}`);
+    } else if (r && r.canceled) {
+      logExport.textContent = '已取消';
+    } else {
+      logExport.textContent = '导出失败';
+      pushLocal('warn', '日志导出失败：' + ((r && r.error) || '未知'));
+    }
+    setTimeout(() => { logExport.textContent = '导出'; }, 2000);
+  });
   // 点击行展开详情（事件委托）
   document.addEventListener('click', (e) => {
     const row = e.target.closest && e.target.closest('.log-row');
@@ -440,9 +468,10 @@
       const he = $('#d-hooks'); if (he) he.textContent = String(p.hookCalls != null ? p.hookCalls : 0);
       const hv = $('#h-ver'); if (hv) hv.textContent = p.version || '—';
       const hb = $('#h-beat'); if (hb) hb.textContent = r.ms + ' ms';
-      // 采集锚点：优先最近上传时间，退回进程启动时间
-      const anchor = p.lastPush ? Date.parse(p.lastPush) : (p.uptimeSince ? Date.parse(p.uptimeSince) : 0);
-      if (anchor) S.scanAnchor = anchor;
+      // 采集锚点：优先守护自报的下轮采集时刻（持久化，重启不断档）；
+      // 老版本守护没有 nextScanAt 时退回"最近上传 / 启动时间"估算。
+      const anchor = p.nextScanAt ? Date.parse(p.nextScanAt) : (p.lastPush ? Date.parse(p.lastPush) + S.scanInterval * 1000 : (p.uptimeSince ? Date.parse(p.uptimeSince) : 0));
+      if (anchor && !isNaN(anchor)) S.scanAnchor = anchor;
       renderScanCountdown();
       if (announce) pushLocal('ok', `守护探活成功 · ${r.ms}ms · 队列 ${q}`);
     } else {
@@ -547,14 +576,44 @@
     renderScanCountdown();
   }
 
-  /* ---------- 实时会话页：来源统计 ---------- */
+  /* ---------- 实时会话页：动态来源统计 ----------
+   * 不再写死"ZCode CLI / Claude Code"：按扫描结果实际出现的 source 动态列出行，
+   * 未出现的来源不出现在列表里；同时生成对应的来源说明文案。
+   */
+  const SRC_DESC = {
+    'zcode': { name: 'ZCode CLI', dir: '~/.zcode/cli/agents/' },
+    'zcode-rollout': { name: 'ZCode Rollout', dir: '~/.zcode/cli/rollout/' },
+    'claude-code': { name: 'Claude Code', dir: '~/.claude/projects/' },
+  };
+  function srcName(src) { return (SRC_DESC[src] && SRC_DESC[src].name) || src; }
+
   function renderLiveMeta(list) {
     list = list || [];
-    const by = (src) => list.filter((x) => x.source === src).length;
-    const set = (id, v) => { const el = $(id); if (el) el.textContent = v; };
-    set('#live-zcode', by('zcode') + ' 个');
-    set('#live-claude', by('claude-code') + ' 个');
-    set('#live-total', String(list.length));
+    // ① 动态来源行：只列出本次扫描实际出现的来源
+    const bySrc = {};
+    list.forEach((x) => { const s = x.source || '未知'; bySrc[s] = (bySrc[s] || 0) + 1; });
+    const box = $('#live-src-stats');
+    if (box) {
+      const rows = Object.entries(bySrc)
+        .sort((a, b) => b[1] - a[1])
+        .map(([s, n]) => `<div class="kv"><span>${esc(srcName(s))}</span><b>${n} 个</b></div>`)
+        .join('');
+      const base = `<div class="kv"><span>扫描会话总数</span><b id="live-total">${list.length}</b></div>
+        <div class="kv"><span>下次自动扫描</span><b id="live-nextscan">—</b></div>`;
+      box.innerHTML = rows + base;
+    }
+    // ② 来源说明：列出实际出现的来源及其会话文件目录
+    const hint = $('#live-src-hint');
+    if (hint) {
+      const parts = Object.keys(bySrc).map((s) => {
+        const d = SRC_DESC[s];
+        return d ? `${d.name}（<code>${d.dir}</code>）` : `${srcName(s)}`;
+      });
+      hint.innerHTML = (parts.length
+        ? '当前识别到 ' + parts.join('、') + '。'
+        : '尚未扫描到任何会话文件。')
+        + '每 4 秒自动扫描一次。状态：交互中（15 秒内）/ 空闲（3 分钟内）/ 休眠（更久）。';
+    }
   }
 
   // tick 是 async：早先直接 `tick(payload)` 会把内部异常变成 unhandledRejection，
@@ -571,6 +630,20 @@
   setInterval(() => { refreshDaemon(false).catch(() => { }); }, 15000);
   // 连接状态兜底刷新：即使 metrics 推送中断，也保证不会永远卡在"检测中"
   setInterval(refreshHealthPill, 2000);
+  // 速率卡独立 1s 刷新：主动向主进程取最新快照重算（主进程每秒 sample 一次），
+  // 即使 metrics 推送被丢帧/窗口切走，"上传/下载速度"等速率卡也保证每秒都在动。
+  let speedTimerRunning = false;
+  setInterval(() => {
+    if (speedTimerRunning) return;
+    speedTimerRunning = true;
+    tdai.metricsGet().then((snap) => {
+      if (snap && snap.metrics) {
+        S.snap = snap;
+        renderStats(snap.metrics, snap);
+        renderFlow(snap.metrics, snap.series);
+      }
+    }).catch(() => { }).then(() => { speedTimerRunning = false; });
+  }, 1000);
   // 运行时长独立刷新：不依赖 metrics 推送，切页面时也不会停在旧值
   setInterval(() => {
     if (!S.snap) return;
@@ -603,9 +676,23 @@
       ]);
       layers = lyr;
       if (assets && assets.ok) {
-        const d = assets.data && (assets.data.data || assets.data);
-        const sa = $('#s-assets'); if (sa) sa.textContent = ((d && (d.skill_count ?? d.skills)) ?? '—') + ' 技能';
-        const sm = $('#s-mem'); if (sm) sm.textContent = ((d && (d.memory_count ?? d.memories)) ?? '—') + ' 条';
+        // 面板返回 {code,message,data:{...}}：资产字段在 data 里，先剥一层
+        const d0 = assets.data && (assets.data.data || assets.data);
+        const items = (d0 && d0.items) || [];
+        const sa = $('#s-assets'); if (sa) sa.textContent = ((d0 && (d0.skill_count ?? d0.skills)) ?? items.length ?? '—') + ' 技能';
+        // 记忆总量：面板 team-assets 常为空，真正的记忆数从分层数据来
+        const total = (layers && layers.ok && (() => {
+          const dl = layers.data && (layers.data.data || layers.data);
+          return dl && (dl.total ?? dl.count);
+        })()) || ((d0 && (d0.memory_count ?? d0.memories)) ?? '—');
+        const sm = $('#s-mem'); if (sm) sm.textContent = total + ' 条';
+      } else if (assets && !assets.ok) {
+        // 资产查询失败时，至少把记忆总量从分层数据里补出来
+        const total = (layers && layers.ok && (() => {
+          const dl = layers.data && (layers.data.data || layers.data);
+          return dl && (dl.total ?? dl.count);
+        })()) || null;
+        if (total != null) { const sm = $('#s-mem'); if (sm) sm.textContent = total + ' 条'; }
       }
     } catch (_) { /* 面板不可达时静默，日志里有心跳失败记录 */ }
     renderLayers(layers);
@@ -840,29 +927,72 @@
      ============================================================ */
   const STATUS_LABEL = { installed: '已接入', missing: '未接入', absent: '未安装' };
 
+  // 开关切换：接入 / 断开单个客户端
+  async function toggleAgent(key, enable) {
+    const b = $('#b-agent');
+    try {
+      if (b) { b.className = 'banner show ok'; b.textContent = (enable ? '正在接入 ' : '正在断开 ') + key + '…'; }
+      const r = await tdai.agentsToggle(key, enable);
+      if (r && r.ok) {
+        if (r.items) renderAgentItems(r.items);
+        const results = (r.results || []).map((x) => `[${x.action}] ${x.target} — ${x.detail}`).join('\n');
+        if (b) { b.className = 'banner show ok'; b.textContent = (enable ? '已接入 ' : '已断开 ') + key + (results ? '：' + results.replace(/\n/g, '；') : ''); }
+        const log = $('#agent-log');
+        if (log && results) { log.style.display = 'block'; log.textContent = results; }
+      } else {
+        if (b) { b.className = 'banner show err'; b.textContent = (enable ? '接入 ' : '断开 ') + key + ' 失败：' + ((r && r.error) || '未知错误'); }
+      }
+      await refreshAgentCore();
+    } catch (e) {
+      if (b) { b.className = 'banner show err'; b.textContent = '操作失败：' + ((e && e.message) || e); }
+    }
+  }
+
+  // 统一的客户端行渲染（开关 + 名称 + 状态徽章）
+  function renderAgentItems(items) {
+    const list = $('#agent-list');
+    if (!list) return;
+    if (!items || !items.length) { list.innerHTML = '<div class="empty">未检测到客户端</div>'; return; }
+    list.innerHTML = items.map((it) => {
+      const absent = it.status === 'absent';
+      const on = it.status === 'installed';
+      // 旧路径接入（node.exe）时给切换提示，但开关仍显示"开"（重新点一下即切换到本应用）
+      const oldTip = on && it.byApp === false ? '<span class="ar-old">旧接入路径，建议关→开切换</span>' : '';
+      return `<div class="agent-row" data-key="${esc(it.key)}">
+        <div class="ar-name">
+          <b>${esc(it.name)}</b>
+          <span>${esc(it.detail || '')}${oldTip}</span>
+        </div>
+        <span class="agent-badge ${esc(it.status || '')}">${esc(STATUS_LABEL[it.status] || it.status)}</span>
+        <span class="agent-toggle ${on ? 'on' : ''} ${absent ? 'disabled' : ''}" title="${absent ? '未安装该客户端' : (on ? '点击断开' : '点击接入')}">
+          <span class="sw"></span>${on ? '已接入' : (absent ? '未安装' : '未接入')}
+        </span>
+      </div>`;
+    }).join('');
+    // 事件委托：点整行任意处切换
+    list.querySelectorAll('.agent-row').forEach((row) => {
+      row.addEventListener('click', () => {
+        const key = row.dataset.key;
+        const it = (items || []).find((x) => x.key === key);
+        if (!it || it.status === 'absent') return;   // 未安装的不响应
+        toggleAgent(key, it.status !== 'installed');
+      });
+    });
+  }
+
   async function loadAgents() {
     let items = [];
     try { items = await tdai.agentsStatus(); } catch (_) { items = []; }
-    const list = $('#agent-list');
-    if (list) {
-      if (!items || !items.length) list.innerHTML = '<div class="empty">未检测到客户端</div>';
-      else list.innerHTML = items.map((it) => `<div class="agent-row">
-        <div class="ar-name">
-          <b>${esc(it.name)}</b>
-          <span>${esc(it.detail || '')}</span>
-        </div>
-        <span class="agent-badge ${esc(it.status || '')}">${esc(STATUS_LABEL[it.status] || it.status)}</span>
-      </div>`).join('');
-    }
+    renderAgentItems(items);
     const installed = (items || []).filter((x) => x.status === 'installed').length;
     const total = (items || []).length;
     const ac = $('#ag-clients'); if (ac) ac.textContent = `${installed} / ${total}`;
     const b = $('#b-agent');
     if (b && items && items.length) {
       const missing = items.filter((x) => x.status === 'missing').length;
-      if (missing) { b.className = 'banner show warn'; b.textContent = `有 ${missing} 项已安装但未接入：点「一键接入全部客户端」即可（幂等）。`; }
-      else if (installed) { b.className = 'banner show ok'; b.textContent = `已接入 ${installed} 个客户端，可直接使用 tdai 记忆工具。`; }
-      else { b.className = 'banner show warn'; b.textContent = '尚未接入任何客户端：点「一键接入全部客户端」。'; }
+      if (missing) { b.className = 'banner show warn'; b.textContent = `有 ${missing} 项已安装但未接入：点对应行开关即可（也可点上方「一键接入全部客户端」）。`; }
+      else if (installed) { b.className = 'banner show ok'; b.textContent = `已接入 ${installed} 个客户端，可直接使用 tdai 记忆工具。点击任意行可单独断开 / 重连。`; }
+      else { b.className = 'banner show warn'; b.textContent = '尚未接入任何客户端：点任意行开关，或点「一键接入全部客户端」。'; }
     }
     return items;
   }
@@ -887,15 +1017,7 @@
     const btn = this; btn.disabled = true; btn.textContent = '接入中…';
     try {
       const { results, items } = await tdai.agentsRegister();
-      if (items) {
-        const list = $('#agent-list');
-        if (list) list.innerHTML = items.map((it) => `<div class="agent-row">
-          <div class="ar-name"><b>${esc(it.name)}</b><span>${esc(it.detail || '')}</span></div>
-          <span class="agent-badge ${esc(it.status || '')}">${esc(STATUS_LABEL[it.status] || it.status)}</span>
-        </div>`).join('');
-        const ins = items.filter((x) => x.status === 'installed').length;
-        const ac = $('#ag-clients'); if (ac) ac.textContent = `${ins} / ${items.length}`;
-      }
+      if (items) renderAgentItems(items);
       const log = $('#agent-log');
       if (log && results) { log.style.display = 'block'; log.textContent = results.map((r) => `[${r.action}] ${r.target} — ${r.detail}`).join('\n'); }
       const done = (results || []).filter((r) => ['新增', '追加', '覆盖'].includes(r.action)).length;
@@ -933,7 +1055,33 @@
     const k = $('#set-key');
     if (k && c.hasUserKey) k.placeholder = `${c.userKeyMasked}（已保存，留空则不修改）`;
     if (c.panelUrl) S.scanInterval = S.scanInterval || 120;
+    // 记忆策略（recallAlways）：服务端返回布尔
+    applyRecallMode(!!c.recallAlways);
   }
+
+  // 记忆策略 UI：select 值 + 说明文案
+  function applyRecallMode(always) {
+    const sel = $('#set-recall');
+    if (sel) sel.value = always ? 'always' : 'intent';
+    const hint = $('#recall-hint');
+    if (hint) hint.textContent = always
+      ? '当前：每次对话都存读 — 每次对话自动采集上传，且每次提问前自动检索注入相关记忆。'
+      : '当前：仅提到才存读 — 采集上传照常，只有你说「记住」「想一下记忆」等才检索注入。';
+  }
+
+  // 记忆策略切换：立即写入 daemon 配置（hook 实时读配置，下次提问即生效）
+  const recallSel = $('#set-recall');
+  if (recallSel) recallSel.addEventListener('change', async () => {
+    const always = recallSel.value === 'always';
+    const r = await tdai.recallSet(always);
+    if (r && r.ok) {
+      applyRecallMode(always);
+      banner('b-recall', 'ok', always ? '已切换：每次对话都存读（提问前自动检索注入）。' : '已切换：仅提到「记住/想一下记忆」才存读。');
+    } else {
+      banner('b-recall', 'err', '切换失败：' + ((r && r.error) || '未知错误'));
+      recallSel.value = always ? 'intent' : 'always';   // 回滚
+    }
+  });
   const connSave = $('#conn-save');
   if (connSave) connSave.addEventListener('click', async function () {
     const btn = this; btn.disabled = true;

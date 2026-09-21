@@ -156,6 +156,7 @@
       <div class="card glass" style="flex:1">
         <h3>实时日志
           <span class="hd-note" id="log-count">—</span>
+          <button class="mini" id="log-export">导出</button>
           <button class="mini" id="log-pause">暂停</button>
           <button class="mini" id="log-clear">清空</button>
         </h3>
@@ -221,14 +222,12 @@
       </div>
     </div>
     <div class="card glass">
-      <h3>会话来源说明</h3>
-      <div class="kv-list">
-        <div class="kv"><span>ZCode CLI</span><b id="live-zcode">—</b></div>
-        <div class="kv"><span>Claude Code</span><b id="live-claude">—</b></div>
+      <h3>会话来源统计 <span class="hd-note">动态识别，无需手动配置</span></h3>
+      <div class="kv-list" id="live-src-stats">
         <div class="kv"><span>扫描会话总数</span><b id="live-total">—</b></div>
         <div class="kv"><span>下次自动扫描</span><b id="live-nextscan">—</b></div>
       </div>
-      <div class="hint">会话数据来自各 Agent 的本地会话文件（<code>~/.zcode/cli/agents/</code> 与 <code>~/.claude/</code>），每 4 秒自动扫描一次。状态：交互中（15 秒内）/ 空闲（3 分钟内）/ 休眠（更久）。</div>
+      <div class="hint" id="live-src-hint">会话数据来自各 Agent 的本地会话文件，每 4 秒自动扫描一次。状态：交互中（15 秒内）/ 空闲（3 分钟内）/ 休眠（更久）。</div>
     </div>
   </section>
 
@@ -303,11 +302,11 @@
         <button class="btn-ghost" data-act="agent-open-console">打开网页控制台</button>
       </div>
       <div class="banner" id="b-agent"></div>
-      <div class="ag-tip">接入目标是本程序自身，无需安装 Node，也不依赖源码目录。未安装的客户端会自动跳过。</div>
+      <div class="ag-tip">接入目标是本程序自身，无需安装 Node，也不依赖源码目录。未安装的客户端会自动跳过。每个客户端可独立开关。</div>
     </div>
 
     <div class="card glass">
-      <h3>客户端接入状态</h3>
+      <h3>客户端接入状态 <span class="hd-note">独立开关 · 点击即接入 / 断开</span></h3>
       <div class="status-list" id="agent-list"><div class="empty">检测中…</div></div>
       <div class="out" id="agent-log" style="display:none"></div>
     </div>
@@ -325,6 +324,16 @@
 
     <!-- 记忆库连接 -->
     <div class="subpanel active" data-sub="conn">
+      <div class="card glass">
+        <h3>记忆策略</h3>
+        <label class="srow"><span>存读模式<span class="q">?<span class="tip">每次对话都存读：每次对话自动采集上传 + 提问前自动检索注入相关记忆。仅提到才存读：采集照常，但只有你说「记住」「想一下记忆」等才检索注入。切换立即生效（hook 每次实时读配置）。</span></span></span>
+          <select id="set-recall">
+            <option value="always">每次对话都存读（推荐）</option>
+            <option value="intent">仅提到「记住/想一下记忆」才存读</option>
+          </select></label>
+        <div class="hint" id="recall-hint">当前：每次对话都存读 — 采集上传不受此开关影响，只影响「提问前是否自动检索注入记忆」。</div>
+        <div class="banner" id="b-recall"></div>
+      </div>
       <div class="card glass">
         <h3>记忆库连接</h3>
         <label class="srow"><span>面板地址<span class="q">?<span class="tip">Memory Hub 面板地址（含端口），本地部署形如 http://192.168.1.10:8125，也支持 https 域名。不要带结尾斜杠。</span></span></span>

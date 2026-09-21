@@ -1,6 +1,6 @@
 {
   "name": "tdai-guard",
-  "version": "0.5.4",
+  "version": "0.5.5",
   "description": "TD 记忆守护 — 控制台应用 + 内置后台守护（采集上传 / 本地 recall 服务）",
   "main": "src/main.js",
   "author": "huihui",
@@ -17,13 +17,20 @@
   },
   "devDependencies": {
     "electron": "^33.2.0",
-    "electron-builder": "^25.1.8"
+    "electron-builder": "^25.1.8",
+    "jsdom": "^22.1.0"
   },
   "build": {
     "appId": "com.tdai.pet",
     "productName": "TD记忆守护",
-    "directories": { "output": "../release", "buildResources": "../build" },
-    "electronLanguages": ["zh-CN", "en-US"],
+    "directories": {
+      "output": "../release",
+      "buildResources": "../build"
+    },
+    "electronLanguages": [
+      "zh-CN",
+      "en-US"
+    ],
     "publish": [
       {
         "provider": "github",
@@ -36,16 +43,41 @@
       "src"
     ],
     "extraResources": [
-      { "from": "../core", "to": "core" },
-      { "from": "../mcp", "to": "mcp" },
-      { "from": "../daemon", "to": "daemon" },
-      { "from": "../build/icon.png", "to": "build/icon.png" },
-      { "from": "../build/tray.png", "to": "build/tray.png" }
+      {
+        "from": "../core",
+        "to": "core"
+      },
+      {
+        "from": "../mcp",
+        "to": "mcp"
+      },
+      {
+        "from": "../daemon",
+        "to": "daemon"
+      },
+      {
+        "from": "../build/icon.png",
+        "to": "build/icon.png"
+      },
+      {
+        "from": "../build/tray.png",
+        "to": "build/tray.png"
+      }
     ],
     "win": {
       "target": [
-        { "target": "nsis", "arch": ["x64"] },
-        { "target": "portable", "arch": ["x64"] }
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
       ],
       "icon": "../build/icon.ico"
     },
@@ -60,7 +92,9 @@
       "installerHeaderIcon": "../build/icon.ico",
       "artifactName": "TDMemoryGuard-Setup-${version}.exe"
     },
-    "portable": { "artifactName": "TDMemoryGuard-${version}-portable.exe" },
+    "portable": {
+      "artifactName": "TDMemoryGuard-${version}-portable.exe"
+    },
     "compression": "maximum"
   }
 }

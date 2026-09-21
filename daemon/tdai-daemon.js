@@ -23,7 +23,7 @@ const QUEUE_DIR = path.join(DATA_DIR, 'queue');
 const LOG_PATH = path.join(DATA_DIR, 'daemon.log');
 
 const RECALL_PORT = Number(process.env.TDAI_DAEMON_PORT) || 8100;
-const APP_VER = '0.5.4';         // 与 package.json 同步；SEA exe 的版本号
+const APP_VER = '0.5.5';         // 与 package.json 同步；SEA exe 的版本号
 const REPO_API = 'https://api.github.com/repos/HUIdada1/tencentdb-memory-mcp/releases/latest';
 const RECALL_TIMEOUT_MS = 800;   // hook 链路硬超时：超时返回空，绝不阻塞对话
 const SCAN_INTERVAL_MS = 2 * 60 * 1000;  // 采集循环 2 分钟
@@ -385,7 +385,7 @@ async function scanAndUpload(cfg, api, state) {
         _source: source,
       };
       const r = await uploadBatch(cfg, api, payload, state);
-      if (r === true) { pushed++; state.lastPush = new Date().toISOString(); }
+      if (r === true) { pushed++; state.lastPush = new Date().toISOString(); saveStatus({ lastPush: state.lastPush }); }
       else if (r === false) enqueue(cfg, payload);
       // r === 'skip'：4xx 放弃
     }
@@ -526,6 +526,7 @@ function readPublicConfig(cfg) {
     userKeyMasked: key ? key.slice(0, 7) + '***' + key.slice(-4) : '',
     hasUserKey: !!key,
     uploadSources: cfg.upload && cfg.upload.enabledSources ? cfg.upload.enabledSources : {},
+    recallAlways: cfg.recallAlways === true || String(cfg.recallAlways) === 'true',
   };
 }
 
@@ -536,6 +537,9 @@ function writeConfig(body) {
   for (const k of whitelist) {
     if (typeof body[k] === 'string' && body[k].trim()) disk[k] = body[k].trim();
   }
+  // recallAlways：布尔可写（记忆策略开关），字符串 'true'/'false' 也可
+  if (typeof body.recallAlways === 'boolean') disk.recallAlways = body.recallAlways;
+  else if (body.recallAlways === 'true' || body.recallAlways === 'false') disk.recallAlways = body.recallAlways === 'true';
   fs.mkdirSync(path.dirname(CFG_PATH), { recursive: true });
   try { fs.copyFileSync(CFG_PATH, CFG_PATH + '.bak'); } catch (_) { }
   fs.writeFileSync(CFG_PATH, JSON.stringify(disk, null, 2));
@@ -593,7 +597,9 @@ function jsonRes(res, code, obj) {
 }
 
 function mkState() {
-  return { startedAt: new Date().toISOString(), hookCalls: 0, lastPush: '', agentCreated: {}, queue: 0, nas: null };
+  // lastPush 优先从持久化的 status.json 恢复（守护重启/升级后，"最近上传"不能归零）
+  const saved = loadStatus();
+  return { startedAt: new Date().toISOString(), hookCalls: 0, lastPush: saved.lastPush || '', nextScanAt: saved.nextScanAt || '', agentCreated: {}, queue: 0, nas: null };
 }
 
 function startServer(cfg, api, cache, state) {
@@ -662,7 +668,7 @@ function startServer(cfg, api, cache, state) {
             nas = !!(r && r.status >= 200 && r.status < 300);
           } catch (_) { nas = false; }
         }
-        jsonRes(res, 200, { local: true, nas, configOk: !missingConfig(cfg), version: APP_VER, hookCalls: state.hookCalls, lastPush: state.lastPush, queueLen, uptimeSince: state.startedAt });
+        jsonRes(res, 200, { local: true, nas, configOk: !missingConfig(cfg), version: APP_VER, hookCalls: state.hookCalls, lastPush: state.lastPush, queueLen, uptimeSince: state.startedAt, nextScanAt: state.nextScanAt || '' });
         return;
       }
       if (u.pathname === '/recall') {
@@ -756,7 +762,21 @@ async function runHook() {
 // 已回传文件记入 backfill.json 防重复（重复运行/连点按钮不会重复上传）。
 
 const BACKFILL_PATH = path.join(DATA_DIR, 'backfill.json');
+const STATUS_PATH = path.join(DATA_DIR, 'status.json');
 const bfJob = { running: false, startedAt: '', source: '', filter: '', files: 0, filesDone: 0, msgs: 0, current: '', error: '', doneAt: '' };
+
+// 跨重启保留的运行状态：最近上传时间 + 下轮采集时刻。
+// 守护重启/升级后，控制台"最近上传"不能又变回"尚未上传"、"下次采集"不能归零。
+function loadStatus() {
+  try { return JSON.parse(fs.readFileSync(STATUS_PATH, 'utf8')); } catch (_) { return {}; }
+}
+function saveStatus(patch) {
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    const cur = loadStatus();
+    fs.writeFileSync(STATUS_PATH, JSON.stringify(Object.assign(cur, patch || {}), null, 2));
+  } catch (_) { }
+}
 
 function loadBackfilled() {
   try { return JSON.parse(fs.readFileSync(BACKFILL_PATH, 'utf8')); } catch (_) { return {}; }
@@ -874,8 +894,14 @@ async function main() {
       await cache.refresh();
     } catch (e) { log(`loop error: ${e.message}`); }
   };
+  // 采集循环的心跳：本轮结束后记下"下轮采集时刻"，持久化（重启后倒计时不断档）
+  const markNextScan = () => {
+    state.nextScanAt = new Date(Date.now() + SCAN_INTERVAL_MS).toISOString();
+    saveStatus({ nextScanAt: state.nextScanAt });
+  };
   await loop();
-  setInterval(loop, SCAN_INTERVAL_MS);
+  markNextScan();
+  setInterval(() => { loop().then(markNextScan).catch(() => { }); }, SCAN_INTERVAL_MS);
 }
 
 if (require.main === module) main().catch((e) => { log(`fatal: ${e.message}`); process.exitCode = 1; });
