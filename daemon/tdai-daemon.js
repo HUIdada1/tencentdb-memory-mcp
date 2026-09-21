@@ -23,7 +23,7 @@ const QUEUE_DIR = path.join(DATA_DIR, 'queue');
 const LOG_PATH = path.join(DATA_DIR, 'daemon.log');
 
 const RECALL_PORT = Number(process.env.TDAI_DAEMON_PORT) || 8100;
-const APP_VER = '0.5.2';         // 与 package.json 同步；SEA exe 的版本号
+const APP_VER = '0.5.3';         // 与 package.json 同步；SEA exe 的版本号
 const REPO_API = 'https://api.github.com/repos/HUIdada1/tencentdb-memory-mcp/releases/latest';
 const RECALL_TIMEOUT_MS = 800;   // hook 链路硬超时：超时返回空，绝不阻塞对话
 const SCAN_INTERVAL_MS = 2 * 60 * 1000;  // 采集循环 2 分钟
@@ -51,9 +51,10 @@ function loadConfig() {
     agentId: process.env.TDAI_AGENT_ID,
     taskId: process.env.TDAI_TASK_ID,
     serviceId: process.env.TDAI_SERVICE_ID,
+    recallAlways: process.env.TDAI_RECALL_ALWAYS,
   };
   const cfg = Object.assign(
-    { panelUrl: '', userKey: '', teamId: '', agentId: '', taskId: '', serviceId: 'default' },
+    { panelUrl: '', userKey: '', teamId: '', agentId: '', taskId: '', serviceId: 'default', recallAlways: false },
     disk, Object.fromEntries(Object.entries(env).filter(([, v]) => v))
   );
   cfg.panelUrl = String(cfg.panelUrl || '').replace(/\/+$/, '');
@@ -418,7 +419,9 @@ async function buildRecall(cfg, api, cache, query) {
   if (cache.skills) parts.push(`【团队技能目录】${cache.skills}`);
   if (!cfg.panelUrl || !cfg.userKey) return parts.join('\n');
 
-  if (query && hasIntent(query)) {
+  // recallAlways=true：每条消息都检索（不做意图过滤）；否则仅回忆类提问触发
+  const always = cfg.recallAlways === true || String(cfg.recallAlways) === 'true';
+  if (query && (always || hasIntent(query))) {
     try {
       const r = await requestRaw(cfg.panelUrl + '/api/v1/chat-memory/search', {
         method: 'POST', timeout: RECALL_TIMEOUT_MS - 100,

@@ -13,6 +13,8 @@ const CLIENTS = [
   { key: 'claude-code', name: 'Claude Code', probe: (h) => path.join(h, '.claude.json'), kind: 'json', file: (h) => path.join(h, '.claude.json'), pointer: '/mcpServers/tdai' },
   { key: 'cursor', name: 'Cursor', probe: (h) => path.join(h, '.cursor'), kind: 'json', file: (h) => path.join(h, '.cursor', 'mcp.json'), pointer: '/mcpServers/tdai' },
   { key: 'codex', name: 'Codex', probe: (h) => path.join(h, '.codex', 'config.toml'), kind: 'toml', file: (h) => path.join(h, '.codex', 'config.toml') },
+  { key: 'trae', name: 'Trae', probe: (h) => path.join(h, '.trae'), kind: 'json', file: (h) => path.join(h, '.trae', 'mcp.json'), pointer: '/mcpServers/tdai' },
+  { key: 'deepseek-harness', name: 'DeepSeek Harness', probe: (h) => path.join(h, '.dsh'), kind: 'dsh-patch', file: (h) => path.join(h, '.dsh', 'profiles') },
 ];
 
 const INSTR = [
@@ -59,6 +61,28 @@ function hookScript({ exePath, daemonJs }) {
 
 function hookCmdPath(home) { return path.join(home, '.zcode', 'tdai-daemon', HOOK_MARK); }
 
+// DeepSeek Harness 的用户 patch 层（~/.dsh/profiles/<profile>/cordis.patch.yml）：
+// 官方方言是 PatchOptions { insert: EntryOptions[] }，往配置树追加 MCP 客户端条目
+function dshPatchBlock({ exePath, mcpJs }) {
+  // YAML 单引号串里反斜杠不是转义符（Windows 路径原样写），只有单引号要双写
+  const y = (s) => String(s).replace(/'/g, "''");
+  return [
+    '',
+    '# tdai-memory:begin （TD 记忆 MCP，由 TD记忆守护 一键接入写入）',
+    '- insert:',
+    "    - resolve: '@deepseek-ai/dsh-mcp-client'",
+    '      config:',
+    '        transport: stdio',
+    '        serverName: tdai-memory',
+    `        command: '${y(exePath)}'`,
+    '        args:',
+    `          - '${y(mcpJs)}'`,
+    '        env:',
+    "          ELECTRON_RUN_AS_NODE: '1'",
+    '',
+  ].join('\n');
+}
+
 /* ---------- 状态检测 ---------- */
 
 function entryOf(cls, home) {
@@ -70,6 +94,15 @@ function entryOf(cls, home) {
     if (!m) return null;
     const cmd = (m[1].match(/command\s*=\s*"([^"]+)"/) || [])[1];
     return { command: cmd };
+  }
+  if (cls.kind === 'dsh-patch') {
+    let profiles = [];
+    try { profiles = fs.readdirSync(file).filter((n) => n !== 'node_modules'); } catch (_) { return null; }
+    for (const p of profiles) {
+      const t = readText(path.join(file, p, 'cordis.patch.yml'));
+      if (t && t.includes('dsh-mcp-client')) return { command: 'cordis.patch.yml' };
+    }
+    return null;
   }
   const c = readJson(file);
   const parts = cls.pointer.split('/').filter(Boolean);
@@ -85,7 +118,8 @@ function status({ home = os.homedir(), exePath = '' } = {}) {
     const installed = exists(cls.probe(home));
     const entry = entryOf(cls, home);
     const detail = entry
-      ? (samePath(entry.command, exePath) ? '本应用接入' : `由 ${path.basename(entry.command || '')} 接入`)
+      ? (cls.kind === 'dsh-patch' ? '已写入 cordis.patch'
+        : samePath(entry.command, exePath) ? '本应用接入' : `由 ${path.basename(entry.command || '')} 接入`)
       : '';
     items.push({
       key: cls.key,
@@ -95,11 +129,21 @@ function status({ home = os.homedir(), exePath = '' } = {}) {
     });
   }
 
-  // Claude Code hook
-  const settings = readJson(path.join(home, '.claude', 'settings.json'));
-  const hasHook = !!(settings && JSON.stringify(settings.hooks && settings.hooks.UserPromptSubmit || []).includes(HOOK_MARK));
+  // UserPromptSubmit hook（Claude Code 与 ZCode）
+  const hookOf = (file) => {
+    const s = readJson(file);
+    return !!(s && JSON.stringify(s.hooks && s.hooks.UserPromptSubmit || []).includes(HOOK_MARK));
+  };
   const cc = items.find((x) => x.key === 'claude-code');
-  if (cc) cc.detail = [cc.detail, hasHook ? 'hook 已注入' : (cc.status === 'absent' ? '' : 'hook 未注入')].filter(Boolean).join(' · ');
+  if (cc) {
+    const hasHook = hookOf(path.join(home, '.claude', 'settings.json'));
+    cc.detail = [cc.detail, hasHook ? 'hook 已注入' : (cc.status === 'absent' ? '' : 'hook 未注入')].filter(Boolean).join(' · ');
+  }
+  const zc = items.find((x) => x.key === 'zcode');
+  if (zc) {
+    const hasHook = hookOf(path.join(home, '.zcode', 'cli', 'config.json'));
+    zc.detail = [zc.detail, hasHook ? 'hook 已注入' : (zc.status === 'absent' ? '' : 'hook 未注入')].filter(Boolean).join(' · ');
+  }
 
   // 全局指令文件（MCP 没生效时的兜底硬规则）
   const instrFiles = INSTR_FILES.map((n) => path.join(home, '.claude', n)).concat([path.join(home, '.zcode', 'AGENTS.md')]);
@@ -133,6 +177,29 @@ function register({ home = os.homedir(), exePath, mcpJs, daemonJs } = {}) {
         backup(file);
         fs.appendFileSync(file, `\n[mcp_servers.tdai]\ncommand = "${esc(exePath)}"\nargs = ["${esc(mcpJs)}"]\nenv = { ELECTRON_RUN_AS_NODE = "1" }\n`);
         rec(cls.name, '追加', '[mcp_servers.tdai]');
+      } else if (cls.kind === 'dsh-patch') {
+        let profiles = [];
+        try { profiles = fs.readdirSync(file).filter((n) => n !== 'node_modules'); } catch (_) { }
+        let wrote = 0, skipped = 0;
+        for (const p of profiles) {
+          const f = path.join(file, p, 'cordis.patch.yml');
+          if (!exists(f)) continue; // profile 未初始化（无 patch 文件）不动
+          const text = readText(f) || '';
+          if (text.includes('dsh-mcp-client')) { skipped++; continue; }
+          backup(f);
+          // 模板占位（仅注释或空数组 []）不能直接追加（[] 后跟条目是非法 YAML）：保留注释行、整体重写
+          const body = text.split('\n').filter((l) => !l.trim().startsWith('#')).join('\n').trim();
+          if (body === '' || body === '[]') {
+            const header = text.split('\n').filter((l) => l.trim().startsWith('#')).join('\n');
+            fs.writeFileSync(f, (header ? header + '\n' : '') + dshPatchBlock({ exePath, mcpJs }).replace(/^\n+/, ''));
+          } else {
+            fs.writeFileSync(f, text.replace(/\s*$/, '') + '\n' + dshPatchBlock({ exePath, mcpJs }));
+          }
+          wrote++;
+        }
+        if (wrote) rec(cls.name, '追加', `${wrote} 个 profile 写入 insert 条目`);
+        else if (skipped) rec(cls.name, '跳过', 'patch 已存在');
+        else rec(cls.name, '跳过', '~/.dsh/profiles 下无 cordis.patch.yml');
       } else {
         const c = readJson(file) || {};
         const next = mcpEntry({ exePath, mcpJs });
@@ -149,26 +216,29 @@ function register({ home = os.homedir(), exePath, mcpJs, daemonJs } = {}) {
     } catch (e) { rec(cls.name, '失败', e.message); }
   }
 
-  // 2. Claude Code UserPromptSubmit hook（提问前自动注入记忆，不依赖模型主动调用）
+  // 2. UserPromptSubmit hook（提问前自动注入记忆，不依赖模型主动调用）：Claude Code 与 ZCode
   try {
-    if (!exists(path.join(home, '.claude'))) { rec('Claude Code hook', '跳过', '未安装 Claude Code'); }
-    else {
+    const hookTargets = [
+      { name: 'Claude Code hook', homeDir: path.join(home, '.claude'), file: path.join(home, '.claude', 'settings.json') },
+      { name: 'ZCode hook', homeDir: path.join(home, '.zcode'), file: path.join(home, '.zcode', 'cli', 'config.json') },
+    ];
+    for (const t of hookTargets) {
+      if (!exists(t.homeDir)) { rec(t.name, '跳过', '未安装该客户端'); continue; }
       const cmdFile = hookCmdPath(home);
       ensureDir(path.dirname(cmdFile));
       fs.writeFileSync(cmdFile, hookScript({ exePath, daemonJs }));
-      const f = path.join(home, '.claude', 'settings.json');
-      const c = readJson(f) || {};
+      const c = readJson(t.file) || {};
       c.hooks = c.hooks || {};
       c.hooks.UserPromptSubmit = c.hooks.UserPromptSubmit || [];
       if (JSON.stringify(c.hooks.UserPromptSubmit).includes(HOOK_MARK)) {
-        rec('Claude Code hook', '跳过', 'hook 已存在（脚本已更新）');
+        rec(t.name, '跳过', 'hook 已存在（脚本已更新）');
       } else {
         c.hooks.UserPromptSubmit.push({ matcher: '*', hooks: [{ type: 'command', command: `"${cmdFile}"` }] });
-        backup(f); writeJson(f, c);
-        rec('Claude Code hook', '新增', 'UserPromptSubmit → 本应用');
+        backup(t.file); writeJson(t.file, c);
+        rec(t.name, '新增', 'UserPromptSubmit → 本应用');
       }
     }
-  } catch (e) { rec('Claude Code hook', '失败', e.message); }
+  } catch (e) { rec('UserPromptSubmit hook', '失败', e.message); }
 
   // 3. 全局指令文件（档 B 兜底：告诉模型何时调 tdai 工具）
   for (const rel of [['.zcode', 'AGENTS.md'], ['.claude', 'CLAUDE.md']]) {
@@ -188,4 +258,4 @@ function register({ home = os.homedir(), exePath, mcpJs, daemonJs } = {}) {
   return results;
 }
 
-module.exports = { status, register, mcpEntry, hookScript, hookCmdPath, INSTR, CLIENTS, HOOK_MARK };
+module.exports = { status, register, mcpEntry, hookScript, hookCmdPath, dshPatchBlock, INSTR, CLIENTS, HOOK_MARK };

@@ -73,6 +73,22 @@ const mcpStdio = { type: 'stdio', command: NODE, args: [MCP] };
   record(f, existed ? '覆盖' : '新增', 'mcpServers.tdai');
 }
 
+// Trae（~/.trae/mcp.json）
+{
+  const dir = path.join(os.homedir(), '.trae');
+  if (!fs.existsSync(dir)) record('.trae/mcp.json', '跳过', '未安装 Trae');
+  else {
+    const f = path.join(dir, 'mcp.json');
+    const existed = fs.existsSync(f);
+    const c = existed ? (readJSON(f) || {}) : {};
+    c.mcpServers = c.mcpServers || {};
+    c.mcpServers.tdai = mcpStdio;
+    if (existed) backup(f);
+    writeJSON(f, c);
+    record(f, existed ? '覆盖' : '新增', 'mcpServers.tdai');
+  }
+}
+
 // Codex（TOML 追加）
 {
   const f = path.join(os.homedir(), '.codex', 'config.toml');
@@ -86,6 +102,46 @@ const mcpStdio = { type: 'stdio', command: NODE, args: [MCP] };
       record(f, '追加', '[mcp_servers.tdai]');
     }
   } else record(f, '跳过', '文件不存在（未安装 Codex）');
+}
+
+// DeepSeek Harness（~/.dsh/profiles/*/cordis.patch.yml，官方用户 patch 层：insert 一个 dsh-mcp-client 条目）
+{
+  const profilesDir = path.join(os.homedir(), '.dsh', 'profiles');
+  if (!fs.existsSync(path.join(os.homedir(), '.dsh'))) record('~/.dsh', '跳过', '未安装 DeepSeek Harness');
+  else {
+    let profiles = [];
+    try { profiles = fs.readdirSync(profilesDir).filter((n) => n !== 'node_modules'); } catch (_) { }
+    let wrote = 0, skipped = 0;
+    for (const p of profiles) {
+      const f = path.join(profilesDir, p, 'cordis.patch.yml');
+      if (!fs.existsSync(f)) continue; // profile 未初始化（无 patch 文件）不动
+      const text = fs.readFileSync(f, 'utf8');
+      if (text.includes('dsh-mcp-client')) { skipped++; continue; }
+      backup(f);
+      const block = [
+        '# tdai-memory:begin （TD 记忆 MCP，由 register-all 写入）',
+        '- insert:',
+        "    - resolve: '@deepseek-ai/dsh-mcp-client'",
+        '      config:',
+        '        transport: stdio',
+        '        serverName: tdai-memory',
+        `        command: '${NODE}'`,
+        '        args:',
+        `          - '${MCP}'`,
+        '',
+      ].join('\n');
+      // 模板占位（仅注释或空数组 []）不能直接追加（[] 后跟条目是非法 YAML）：保留注释行、整体重写
+      const body = text.split('\n').filter((l) => !l.trim().startsWith('#')).join('\n').trim();
+      if (body === '' || body === '[]') {
+        const header = text.split('\n').filter((l) => l.trim().startsWith('#')).join('\n');
+        fs.writeFileSync(f, (header ? header + '\n' : '') + block);
+      } else {
+        fs.appendFileSync(f, '\n' + block);
+      }
+      wrote++;
+    }
+    record('~/.dsh/profiles', wrote ? '追加' : '跳过', wrote ? `${wrote} 个 profile 写入 insert 条目` : (skipped ? 'patch 已存在' : '无 cordis.patch.yml'));
+  }
 }
 
 /* ---------- 2. Claude Code UserPromptSubmit hook ---------- */
@@ -104,6 +160,26 @@ if (DO_HOOK) {
     c.hooks.UserPromptSubmit.push(entry);
     backup(f); writeJSON(f, c);
     record(f, '新增', 'UserPromptSubmit → daemon hook');
+  }
+}
+
+// ZCode UserPromptSubmit hook（~/.zcode/cli/config.json）
+if (DO_HOOK) {
+  const f = path.join(os.homedir(), '.zcode', 'cli', 'config.json');
+  if (!fs.existsSync(f)) record(f, '跳过', '未安装 ZCode');
+  else {
+    const c = readJSON(f) || {};
+    c.hooks = c.hooks || {};
+    c.hooks.UserPromptSubmit = c.hooks.UserPromptSubmit || [];
+    const cmd = `${NODE} "${DAEMON}" hook`;
+    const entry = { matcher: '*', hooks: [{ type: 'command', command: cmd }] };
+    if (JSON.stringify(c.hooks.UserPromptSubmit).includes(DAEMON)) {
+      record(f, '跳过', 'hook 已存在');
+    } else {
+      c.hooks.UserPromptSubmit.push(entry);
+      backup(f); writeJSON(f, c);
+      record(f, '新增', 'UserPromptSubmit → daemon hook');
+    }
   }
 }
 
