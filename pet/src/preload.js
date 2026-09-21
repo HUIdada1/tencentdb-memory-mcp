@@ -17,6 +17,7 @@ contextBridge.exposeInMainWorld('tdai', {
   guardStatus: () => ipcRenderer.invoke('guard-status'),
   guardPush: () => ipcRenderer.invoke('guard-push'),
   guardRestart: () => ipcRenderer.invoke('guard-restart'),
+  guardSet: (enabled) => ipcRenderer.invoke('guard-set', enabled),
   backfillStart: (opts) => ipcRenderer.invoke('backfill-start', opts),
   backfillStatus: () => ipcRenderer.invoke('backfill-status'),
 

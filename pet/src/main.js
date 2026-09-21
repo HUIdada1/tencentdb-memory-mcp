@@ -52,9 +52,9 @@ const fmtBytes = metricsMod.fmtBytes;
 const fmtSpeed = metricsMod.fmtSpeed;
 const shortEndpoint = metricsMod.shortEndpoint;
 
-/* ---------- 应用偏好（主题 / 自启 / 自动更新） ---------- */
+/* ---------- 应用偏好（主题 / 自启 / 自动更新 / 守护开关） ---------- */
 
-function defaultPrefs() { return { ui: { theme: 'dark' }, system: { autoStart: false }, update: { autoCheck: true } }; }
+function defaultPrefs() { return { ui: { theme: 'dark' }, system: { autoStart: false, guardEnabled: true }, update: { autoCheck: true } }; }
 
 function mergeDeep(a, b) {
   const out = Object.assign({}, a);
@@ -498,6 +498,21 @@ ipcMain.handle('guard-status', async () => {
 });
 ipcMain.handle('guard-push', () => guard.push());
 ipcMain.handle('guard-restart', () => guard.restart(dm));
+// 守护服务开关（右上角 pill 点击）：停止后不再采集上传 / 不提供本地 recall 服务；
+// 状态持久化在 prefs.system.guardEnabled，重启应用后保持
+ipcMain.handle('guard-set', async (_e, enabled) => {
+  prefs.system.guardEnabled = !!enabled;
+  savePrefs();
+  if (enabled) {
+    const st = await guard.start(dm);
+    metrics.pushLog('ok', '守护服务已手动开启');
+    return { ok: true, running: !!st.running, external: !!st.external, enabled: true };
+  }
+  guard.stop();
+  daemonOk = false; daemonOkAt = Date.now();
+  metrics.pushLog('warn', '守护服务已手动停止（采集上传与本地 recall 服务已暂停）');
+  return { ok: true, running: false, external: false, enabled: false };
+});
 
 /* ---------- 历史会话回传（转发到守护进程 /api/backfill，任务在守护进程内异步跑） ---------- */
 
@@ -523,8 +538,53 @@ function daemonHttp(method, apiPath, body) {
     req.end();
   });
 }
-ipcMain.handle('backfill-start', (_e, opts) => daemonHttp('POST', '/api/backfill', opts || {}));
-ipcMain.handle('backfill-status', () => daemonHttp('GET', '/api/backfill'));
+/* ---------- 历史会话回传 ----------
+ * 优先转发到守护进程 /api/backfill（任务在守护进程内异步跑，进度走 /api/backfill）。
+ * 外部守护是老版本（无 /api/backfill，POST 返回 404）或守护未运行时，降级为应用
+ * 进程内直接跑同一份 startBackfill 实现（daemon 模块已 require 进主进程），
+ * 多机部署场景不再卡"守护进程版本过旧"。进程内回传状态通过 'backfill' 频道推送。
+ */
+const localBackfill = { state: null, timer: null };
+function startLocalBackfill(opts) {
+  if (localBackfill.state && dm.backfillStatus().running) return { ok: false, error: '已有回传任务在进行中，请等它跑完' };
+  const cfg = dm.loadConfig();
+  const api = dm.mkApi(cfg);
+  localBackfill.state = dm.mkState();
+  dm.ensureUserId(cfg, api, localBackfill.state);
+  const r = dm.startBackfill(cfg, api, localBackfill.state, opts || {});
+  if (r && r.ok) {
+    if (localBackfill.timer) clearInterval(localBackfill.timer);
+    localBackfill.timer = setInterval(() => {
+      try { broadcast('backfill', dm.backfillStatus()); } catch (_) { }
+      const st = dm.backfillStatus();
+      if (!st.running) {
+        clearInterval(localBackfill.timer); localBackfill.timer = null;
+        metrics.pushLog('ok', `历史回传完成：${st.filesDone}/${st.files} 个文件 · 共 ${st.msgs} 条`);
+      }
+    }, 1000);
+  }
+  return r;
+}
+ipcMain.handle('backfill-start', async (_e, opts) => {
+  const r = await daemonHttp('POST', '/api/backfill', opts || {});
+  // 外部守护无此接口（404）或守护未运行（连接失败 status 0）→ 进程内兜底
+  if (r && (r.status === 404 || r.status === 0)) {
+    const lr = startLocalBackfill(opts || {});
+    if (lr && lr.ok) return { ok: true, local: true, startedAt: lr.startedAt };
+    return { ok: false, error: (lr && lr.error) || '守护未运行且进程内回传启动失败' };
+  }
+  return r;
+});
+ipcMain.handle('backfill-status', async () => {
+  const r = await daemonHttp('GET', '/api/backfill');
+  // 守护侧有真实回传任务（running 或 doneAt）就用它的；否则看进程内兜底
+  if (r && r.payload && (r.payload.running || r.payload.doneAt)) return r;
+  if (localBackfill.state) {
+    const st = dm.backfillStatus();
+    if (st.running || st.doneAt) return { ok: true, status: 200, payload: st };
+  }
+  return r;
+});
 
 ipcMain.handle('agents-status', () => register.status({ home: HOME, exePath: process.execPath }));
 ipcMain.handle('agents-register', () => {
@@ -700,12 +760,17 @@ else {
     startPolling();
     startTick();
     startSessionScan();
-    guard.start(dm).then(() => {
-      pollHealth();
-      metrics.pushLog('ok', `守护进程已就绪 · 本地服务 127.0.0.1:${guard.port()}`);
-    }).catch((e) => {
-      metrics.pushLog('warn', '守护进程启动失败：' + (e && e.message));
-    });
+    if (prefs.system.guardEnabled === false) {
+      // 用户已手动停止守护：不自动启动，界面保持"已停止"状态
+      metrics.pushLog('info', '守护服务处于停止状态（右上角可重新开启）');
+    } else {
+      guard.start(dm).then(() => {
+        pollHealth();
+        metrics.pushLog('ok', `守护进程已就绪 · 本地服务 127.0.0.1:${guard.port()}`);
+      }).catch((e) => {
+        metrics.pushLog('warn', '守护进程启动失败：' + (e && e.message));
+      });
+    }
     globalShortcut.register('CommandOrControl+Shift+M', () => createConsole());
   });
 

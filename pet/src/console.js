@@ -7,7 +7,7 @@
   const fmt = (v) => (v === null || v === undefined || v === '' ? '—' : String(v));
   const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-  const S = { snap: null, appInfo: null, sessTimer: null, latencyHist: [], lastLogSeq: 0, logPaused: false, logClearSeq: 0, scanAnchor: 0, scanInterval: 120 };
+  const S = { snap: null, appInfo: null, sessTimer: null, latencyHist: [], lastLogSeq: 0, logPaused: false, logClearSeq: 0, scanAnchor: 0, scanInterval: 120, guardEnabled: true };
 
   /* ---------- 数值格式化 ---------- */
   function fmtBytes(n) {
@@ -117,6 +117,13 @@
     const st = $('#set-theme'); if (st) st.value = p.ui.theme || 'dark';
     const sa = $('#set-autostart'); if (sa) sa.checked = !!p.system.autoStart;
     const su = $('#set-autoupdate'); if (su) su.checked = !!p.update.autoCheck;
+    // 守护服务开关状态（右上角 pill 点击切换）：持久化在应用偏好里
+    if (p.system && p.system.guardEnabled === false) {
+      S.guardEnabled = false;
+      const pill = $('#health-pill');
+      if (pill) { pill.classList.remove('on', 'err', 'wait'); pill.classList.add('off'); }
+      const ht = $('#health-text'); if (ht) ht.textContent = '守护已停止';
+    }
   });
   tdai.on('theme', (t) => applyTheme(t));
   $('#btn-theme').addEventListener('click', async () => {
@@ -169,8 +176,47 @@
     }
   }
 
+  /* ---------- 右上角 pill = 守护服务开关 ----------
+   * 点击在「开启守护 / 停止守护」之间切换，状态持久化到应用偏好（重启保持）。
+   * 停止后：采集上传、本地 recall 服务（:8100）、守护探活全部暂停。
+   */
+  let guardToggling = false;
+  async function toggleGuard() {
+    if (guardToggling) return;
+    guardToggling = true;
+    const next = !S.guardEnabled;
+    const pill = $('#health-pill');
+    if (pill) pill.classList.add('wait');
+    const ht = $('#health-text'); if (ht) ht.textContent = next ? '正在开启…' : '正在停止…';
+    try {
+      const r = await tdai.guardSet(next);
+      if (r && r.ok) {
+        S.guardEnabled = next;
+        pushLocal(next ? 'ok' : 'warn', next ? '守护服务已开启' : '守护服务已停止');
+      } else {
+        pushLocal('err', '守护开关操作失败：' + ((r && r.error) || '未知错误'));
+      }
+    } catch (e) {
+      pushLocal('err', '守护开关异常：' + ((e && e.message) || e));
+    } finally {
+      guardToggling = false;
+      refreshHealthPill();
+      refreshDaemon(false);
+    }
+  }
+  const healthPill = $('#health-pill');
+  if (healthPill) {
+    healthPill.style.cursor = 'pointer';
+    healthPill.addEventListener('click', toggleGuard);
+  }
+
   // 每 2s 兜底刷新一次（即使没有 metrics 推送，也不会卡在"检测中"）
   function refreshHealthPill() {
+    // 守护被手动停止：pill 固定显示"守护已停止"，不跑其它判据（避免盖住用户意图）
+    if (S.guardEnabled === false) {
+      setHealthPill('off', '守护已停止', '守护服务已手动停止：采集上传与本地 recall 服务暂停。点击此按钮重新开启。');
+      return;
+    }
     const snap = S.snap;
     const panelUrl = (S.appInfo && S.appInfo.panelUrl) || (snap && snap.panelUrl) || '';
     if (!panelUrl) {
@@ -455,6 +501,13 @@
   async function refreshDaemon(announce) {
     // 全流程兜底：daemonPing / cursorStats 各自有 .catch，但中间的 DOM 渲染
     // 一旦因字段缺失抛错，整个 15s 定时器就会持续抛未捕获异常。
+    // 守护被手动停止时不探活：直接显示"已停止"，探活只会得到失败噪音。
+    if (S.guardEnabled === false) {
+      const mode = $('#d-mode');
+      if (mode) { mode.textContent = '已手动停止'; setCls(mode, 'warn'); }
+      const ns = $('#d-nextscan'); if (ns) { ns.textContent = '—'; setCls(ns, ''); }
+      return;
+    }
     try {
     const r = await tdai.daemonPing().catch(() => ({ ok: false, error: 'ipc 异常' }));
     const mode = $('#d-mode');
@@ -861,16 +914,21 @@
       renderMemResult(r);
     },
     async 'backfill-start'() {
-      // 历史会话一键回传：任务在守护进程内异步跑，这里只负责启动 + 轮询进度
+      // 历史会话一键回传：任务在守护进程（或本应用进程，老守护无接口时自动降级）内异步跑，
+      // 这里只负责启动 + 轮询进度
       try {
-        if (typeof tdai.backfillStart !== 'function') throw new Error('守护进程或应用版本过旧，请升级后重试');
+        if (typeof tdai.backfillStart !== 'function') throw new Error('应用版本过旧，请升级后重试');
         const r = await tdai.backfillStart({});
         if (r && r.ok === false) {
-          const msg = (r.payload && r.payload.error) || (r.status === 404 ? '守护进程版本过旧（无回传接口），请升级后重试' : r.error || '无法启动回传');
+          const msg = (r.payload && r.payload.error) || r.error || '无法启动回传';
           banner('b-backfill', 'warn', msg);
           return;
         }
-        banner('b-backfill', 'ok', '历史回传已启动：正在解析本地会话文件并分批上传（已回传过的文件自动跳过）…');
+        if (r && r.local) {
+          banner('b-backfill', 'ok', '检测到旧版外部守护（无回传接口），已自动切换为本应用进程内回传：正在解析本地会话文件并分批上传…');
+        } else {
+          banner('b-backfill', 'ok', '历史回传已启动：正在解析本地会话文件并分批上传（已回传过的文件自动跳过）…');
+        }
         pollBackfill();
       } catch (e) {
         banner('b-backfill', 'err', '回传启动失败：' + (e && e.message ? e.message : e));

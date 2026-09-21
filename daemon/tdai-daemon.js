@@ -23,7 +23,7 @@ const QUEUE_DIR = path.join(DATA_DIR, 'queue');
 const LOG_PATH = path.join(DATA_DIR, 'daemon.log');
 
 const RECALL_PORT = Number(process.env.TDAI_DAEMON_PORT) || 8100;
-const APP_VER = '0.5.5';         // 与 package.json 同步；SEA exe 的版本号
+const APP_VER = '0.5.6';         // 与 package.json 同步；SEA exe 的版本号
 const REPO_API = 'https://api.github.com/repos/HUIdada1/tencentdb-memory-mcp/releases/latest';
 const RECALL_TIMEOUT_MS = 800;   // hook 链路硬超时：超时返回空，绝不阻塞对话
 const SCAN_INTERVAL_MS = 2 * 60 * 1000;  // 采集循环 2 分钟
@@ -320,14 +320,28 @@ async function ensureAgent(cfg, api, source, state) {
   } catch (_) { }
 }
 
+// 解析当前调用者的 user_id（面板按 user key 鉴权，/chat-memory/my-agents 返回的
+// uploaded_by_user_id 即 owner 用户）。服务端 /skill/conversation/add 要求 user_id 非空，
+// 配置里没有 userId 时必须在这里兜底解析一次（缓存到 state.userId，一次成功终身复用）。
+async function ensureUserId(cfg, api, state) {
+  if (cfg.userId || state.userId) return;
+  try {
+    const r = await api('/chat-memory/my-agents', { method: 'POST', body: { team_id: cfg.teamId || undefined } });
+    const items = (r.json && r.json.data && r.json.data.items) || [];
+    const mine = items.find((x) => x && x.agent_id === cfg.agentId) || items[0];
+    const uid = mine && (mine.uploaded_by_user_id || mine.owner_user_id);
+    if (uid) { state.userId = String(uid); log(`user_id resolved: ${state.userId}`); }
+  } catch (_) { }
+}
+
 async function uploadBatch(cfg, api, payload, state) {
   try {
     const r = await api('/chat-memory/import', { method: 'POST', body: payload });
     if (r.status >= 200 && r.status < 300) {
-      // 入队 L1 抽取：服务端要求 user_id + messages 全量回传；失败必须留痕，不可静默
+      // 入队 L1 抽取：服务端契约要求 user_id 非空 + messages 全量回传；失败必须留痕，不可静默
       const q = await api('/skill/conversation/add', {
         method: 'POST',
-        body: { user_id: cfg.userId, team_id: payload.team_id, agent_id: payload.agent_id, session_id: payload.session_id, messages: payload.messages },
+        body: { user_id: cfg.userId || state.userId || '', team_id: payload.team_id, agent_id: payload.agent_id, session_id: payload.session_id, messages: payload.messages },
       });
       if (!(q.status >= 200 && q.status < 300)) {
         log(`extract enqueue rejected HTTP ${q.status}: ${String((q.json && q.json.message) || q.body || '').slice(0, 200)}`);
@@ -350,6 +364,8 @@ async function uploadBatch(cfg, api, payload, state) {
 async function scanAndUpload(cfg, api, state) {
   const miss = missingConfig(cfg);
   if (miss) { log(`config incomplete: ${miss}`); return { pushed: 0 }; }
+  // user_id 兜底：配置未填 userId 时，先解析一次（conversation/add 契约要求非空）
+  await ensureUserId(cfg, api, state);
   const cursors = loadCursors();
   let pushed = 0;
 
@@ -910,7 +926,7 @@ if (require.main === module) main().catch((e) => { log(`fatal: ${e.message}`); p
 module.exports = {
   loadConfig, missingConfig, mkApi, mkCache, mkState, startServer,
   scanAndUpload, flushQueue, enqueue, buildRecall, hasIntent,
-  runBackfill, startBackfill, backfillStatus,
+  runBackfill, startBackfill, backfillStatus, ensureUserId,
   agentStatus, updateCheck, consolePage, readPublicConfig, writeConfig,
   parseZCodeLine, parseClaudeLine, parseRolloutLine, sliceMessages, readNewLines,
   APP_VER, RECALL_PORT, CFG_PATH, DATA_DIR, QUEUE_DIR, LOG_PATH, SCAN_INTERVAL_MS,

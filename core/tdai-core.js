@@ -270,38 +270,43 @@ function create(overrides) {
       });
     },
 
-    // Wiki 检索
-    async wikiSearch({ query, top_k = 5 } = {}) {
+    // Wiki 检索（服务端契约：wiki_id 必填）
+    async wikiSearch({ query, wiki_id, top_k = 5 } = {}) {
       if (!query) return err('缺少 query');
+      if (!wiki_id) return err('缺少 wiki_id', '面板 Wiki 检索必须指定 wiki_id（wiki-…）。可在面板「知识库 → Wiki」查看已分配的 wiki ID，或先在设置里配置。');
       return api('/knowledge/wiki/search', {
         method: 'POST',
-        body: { query: String(query), top_k: Math.min(Number(top_k) || 5, 20), team_id: cfg.teamId || undefined },
+        body: { wiki_id, query: String(query), limit: Math.min(Number(top_k) || 5, 20), team_id: cfg.teamId || undefined },
       });
     },
 
-    // Wiki 页读取
-    async wikiRead({ page_id } = {}) {
-      if (!page_id) return err('缺少 page_id');
+    // Wiki 页读取（服务端契约：wiki_id + refs/page_id）
+    async wikiRead({ wiki_id, page_id, refs } = {}) {
+      if (!wiki_id) return err('缺少 wiki_id', '读取 Wiki 页必须先指定 wiki_id（wiki-…）。');
+      const refList = Array.isArray(refs) && refs.length ? refs : (page_id ? [page_id] : []);
+      if (!refList.length) return err('缺少 page_id 或 refs');
       return api('/knowledge/wiki/page/read', {
         method: 'POST',
-        body: { page_id },
+        body: { wiki_id, refs: refList },
       });
     },
 
-    // 代码图谱检索
-    async codegraphSearch({ query, top_k = 5 } = {}) {
+    // 代码图谱检索（服务端契约：code_graph_id 必填）
+    async codegraphSearch({ query, code_graph_id, top_k = 5 } = {}) {
       if (!query) return err('缺少 query');
+      if (!code_graph_id) return err('缺少 code_graph_id', '代码图谱检索必须指定 code_graph_id（cg-…）。可在面板「知识库 → 代码图谱」查看已分配的图谱 ID，或先在设置里配置。');
       return api('/knowledge/code-graph/search', {
         method: 'POST',
-        body: { query: String(query), top_k: Math.min(Number(top_k) || 5, 20), team_id: cfg.teamId || undefined },
+        body: { code_graph_id, query: String(query), limit: Math.min(Number(top_k) || 5, 20), team_id: cfg.teamId || undefined },
       });
     },
 
-    // 代码图谱邻域
-    async codegraphExplore({ node_id, depth = 1 } = {}) {
+    // 代码图谱邻域（服务端契约：code_graph_id 必填）
+    async codegraphExplore({ code_graph_id, node_id, depth = 1 } = {}) {
+      if (!code_graph_id) return err('缺少 code_graph_id', '代码图谱探索必须指定 code_graph_id（cg-…）。');
       return api('/knowledge/code-graph/explore', {
         method: 'POST',
-        body: { node_id: node_id || null, depth: Math.min(Number(depth) || 1, 3), team_id: cfg.teamId || undefined },
+        body: { code_graph_id, node_id: node_id || null, depth: Math.min(Number(depth) || 1, 3), team_id: cfg.teamId || undefined },
       });
     },
 
