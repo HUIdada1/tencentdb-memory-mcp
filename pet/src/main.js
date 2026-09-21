@@ -183,7 +183,7 @@ function createConsole() {
   consoleWin = new BrowserWindow({
     width: 1140, height: 740, minWidth: 980, minHeight: 620,
     frame: false,
-    backgroundColor: resolveTheme() === 'dark' ? '#0a0a0f' : '#f4f4f8',
+    backgroundColor: resolveTheme() === 'dark' ? '#08080d' : '#eceef4',
     icon: path.join(__dirname, 'logo-128.png'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
