@@ -388,6 +388,33 @@ ipcMain.handle('guard-status', async () => {
 ipcMain.handle('guard-push', () => guard.push());
 ipcMain.handle('guard-restart', () => guard.restart(dm));
 
+/* ---------- 历史会话回传（转发到守护进程 /api/backfill，任务在守护进程内异步跑） ---------- */
+
+function daemonHttp(method, apiPath, body) {
+  return new Promise((resolve) => {
+    const payload = body == null ? null : JSON.stringify(body);
+    const req = require('http').request({
+      host: '127.0.0.1', port: guard.port(), path: apiPath, method,
+      timeout: 8000,
+      headers: payload ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) } : {},
+    }, (res) => {
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => {
+        let json = null;
+        try { json = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch (_) { }
+        resolve({ ok: res.statusCode >= 200 && res.statusCode < 300, status: res.statusCode, payload: json });
+      });
+    });
+    req.on('timeout', () => { req.destroy(); resolve({ ok: false, status: 0, payload: null, error: 'timeout' }); });
+    req.on('error', (e) => resolve({ ok: false, status: 0, payload: null, error: e.code || e.message }));
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
+ipcMain.handle('backfill-start', (_e, opts) => daemonHttp('POST', '/api/backfill', opts || {}));
+ipcMain.handle('backfill-status', () => daemonHttp('GET', '/api/backfill'));
+
 ipcMain.handle('agents-status', () => register.status({ home: HOME, exePath: process.execPath }));
 ipcMain.handle('agents-register', () => {
   const results = register.register({ home: HOME, exePath: process.execPath, mcpJs: MCP_JS, daemonJs: DAEMON_JS });

@@ -23,7 +23,7 @@ const QUEUE_DIR = path.join(DATA_DIR, 'queue');
 const LOG_PATH = path.join(DATA_DIR, 'daemon.log');
 
 const RECALL_PORT = Number(process.env.TDAI_DAEMON_PORT) || 8100;
-const APP_VER = '0.5.1';         // 与 package.json 同步；SEA exe 的版本号
+const APP_VER = '0.5.2';         // 与 package.json 同步；SEA exe 的版本号
 const REPO_API = 'https://api.github.com/repos/HUIdada1/tencentdb-memory-mcp/releases/latest';
 const RECALL_TIMEOUT_MS = 800;   // hook 链路硬超时：超时返回空，绝不阻塞对话
 const SCAN_INTERVAL_MS = 2 * 60 * 1000;  // 采集循环 2 分钟
@@ -190,8 +190,53 @@ function claudeSources() {
   return files;
 }
 
+// ZCode 新版会话：~/.zcode/cli/rollout/model-io-<sess>.jsonl（每行一次模型调用；request.messages 只带历史尾巴，
+// 必须按内容哈希去重，否则同一轮对话会随每次调用重复上传）
+const rolloutSeen = new Set();
+function rolloutHash(s) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = (h * 0x01000193) >>> 0; }
+  return 'h' + h.toString(36) + '-' + s.length;
+}
+function rolloutText(content) {
+  if (typeof content === 'string') return content.trim();
+  if (Array.isArray(content)) {
+    return content.filter((c) => c && c.type === 'text' && c.text).map((c) => c.text).join('\n').trim();
+  }
+  return '';
+}
+function parseRolloutLine(line) {
+  let j; try { j = JSON.parse(line); } catch (_) { return []; }
+  if (j.type !== 'model_io') return [];
+  const out = [];
+  const msgs = Array.isArray(j.request && j.request.messages) ? j.request.messages : [];
+  // 每行只认最新一条真实用户输入（往前找第一条 user，tool 结果回填一律跳过）
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    if (!msgs[i] || msgs[i].role !== 'user') continue;
+    const text = rolloutText(msgs[i].content);
+    if (!text || text.startsWith('<system-reminder>') || text.startsWith('<task-notification>')) break;
+    const h = rolloutHash(text);
+    if (!rolloutSeen.has(h)) { rolloutSeen.add(h); out.push({ role: 'user', content: text }); }
+    break;
+  }
+  const reply = j.response && typeof j.response.text === 'string' ? j.response.text.trim() : '';
+  if (reply) {
+    const h = rolloutHash(reply);
+    if (!rolloutSeen.has(h)) { rolloutSeen.add(h); out.push({ role: 'assistant', content: reply }); }
+  }
+  return out;
+}
+
+function rolloutSources() {
+  const root = path.join(os.homedir(), '.zcode', 'cli', 'rollout');
+  let names = [];
+  try { names = fs.readdirSync(root); } catch (_) { return []; }
+  return names.filter((n) => /^model-io-sess_.*\.jsonl$/.test(n)).map((n) => path.join(root, n));
+}
+
 const SOURCES = {
   'zcode': { list: zcodeSources, parse: parseZCodeLine },
+  'zcode-rollout': { list: rolloutSources, parse: parseRolloutLine },
   'claude-code': { list: claudeSources, parse: parseClaudeLine },
 };
 
@@ -584,6 +629,23 @@ function startServer(cfg, api, cache, state) {
         res.end(JSON.stringify({ pushed: r.pushed, queueFlushed: q }));
         return;
       }
+      if (u.pathname === '/api/backfill' && req.method === 'POST') {
+        let body = '';
+        req.on('data', (c) => (body += c));
+        req.on('end', () => {
+          let opts = {};
+          try { opts = JSON.parse(body || '{}'); } catch (_) { }
+          const r = startBackfill(cfg, api, state, { source: opts.source || '', filter: opts.filter || '' });
+          res.writeHead(r.ok ? 200 : 409, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify(r));
+        });
+        return;
+      }
+      if (u.pathname === '/api/backfill') {
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify(backfillStatus()));
+        return;
+      }
       res.writeHead(404); res.end();
     } catch (e) {
       log(`http error: ${e.message}`);
@@ -627,6 +689,83 @@ async function runHook() {
   } catch (_) { /* 静默：hook 失败绝不阻塞对话 */ }
 }
 
+/* ---------- 历史回传（backfill）：CLI 子命令与控制台按钮共用 ---------- */
+// 正常采集只回传「首次发现之后」的增量，历史内容须用本流程补。
+// 已回传文件记入 backfill.json 防重复（重复运行/连点按钮不会重复上传）。
+
+const BACKFILL_PATH = path.join(DATA_DIR, 'backfill.json');
+const bfJob = { running: false, startedAt: '', source: '', filter: '', files: 0, filesDone: 0, msgs: 0, current: '', error: '', doneAt: '' };
+
+function loadBackfilled() {
+  try { return JSON.parse(fs.readFileSync(BACKFILL_PATH, 'utf8')); } catch (_) { return {}; }
+}
+function saveBackfilled(m) {
+  try { fs.mkdirSync(DATA_DIR, { recursive: true }); fs.writeFileSync(BACKFILL_PATH, JSON.stringify(m, null, 2)); } catch (_) { }
+}
+
+function backfillStatus() {
+  return Object.assign({}, bfJob, { backfilledFiles: Object.keys(loadBackfilled()).length });
+}
+
+async function runBackfill(cfg, api, state, { source = '', filter = '' } = {}) {
+  const backfilled = loadBackfilled();
+  const sources = source ? [source] : Object.keys(SOURCES);
+  bfJob.running = true; bfJob.startedAt = new Date().toISOString(); bfJob.source = source || 'all'; bfJob.filter = filter;
+  bfJob.files = 0; bfJob.filesDone = 0; bfJob.msgs = 0; bfJob.current = ''; bfJob.error = ''; bfJob.doneAt = '';
+  try {
+    for (const src of sources) {
+      const def = SOURCES[src];
+      if (!def) { bfJob.error = `未知来源: ${src}`; continue; }
+      let files = [];
+      try { files = def.list().filter((f) => !filter || f.includes(filter)); } catch (_) { }
+      bfJob.files += files.length;
+      for (const file of files) {
+        if (bfJob.error) break;
+        if (backfilled[file]) { bfJob.filesDone++; continue; } // 已回传过：跳过
+        bfJob.current = path.basename(file);
+        let text = '';
+        try { text = fs.readFileSync(file, 'utf8'); } catch (_) { continue; }
+        const msgs = [];
+        for (const line of text.split('\n')) {
+          if (!line.trim()) continue;
+          try { msgs.push(...def.parse(line)); } catch (_) { }
+        }
+        if (msgs.length) {
+          const session = path.basename(file).replace(/\.jsonl$/, '') + '-' + path.basename(path.dirname(file));
+          for (let i = 0; i < msgs.length; i += 50) {
+            const payload = {
+              team_id: cfg.teamId,
+              agent_id: cfg.agentId,
+              session_id: `backfill-${src}-${session}`.slice(0, 120),
+              messages: sliceMessages(msgs.slice(i, i + 50).map((m) => ({ ...m, ts: new Date().toISOString() }))),
+              _source: src,
+            };
+            const r = await uploadBatch(cfg, api, payload, state);
+            if (r === 'skip') { bfJob.error = `${path.basename(file)} 上传被拒绝（4xx），放弃该文件`; break; }
+            bfJob.msgs += payload.messages.length; // true=已传，false=已入本地队列待补
+          }
+        }
+        if (!bfJob.error) {
+          backfilled[file] = { msgs: msgs.length, at: new Date().toISOString() };
+          saveBackfilled(backfilled);
+          bfJob.filesDone++;
+        }
+        log(`backfill: ${path.basename(file)} → ${msgs.length} msgs`);
+      }
+    }
+  } finally {
+    bfJob.running = false; bfJob.current = ''; bfJob.doneAt = new Date().toISOString();
+  }
+  return { files: bfJob.filesDone, total: bfJob.files, msgsUploaded: bfJob.msgs, error: bfJob.error };
+}
+
+// 异步启动（供 HTTP / 控制台按钮）：立即返回，进度走 backfillStatus()
+function startBackfill(cfg, api, state, opts) {
+  if (bfJob.running) return { ok: false, error: '已有回传任务在进行中，请等它跑完' };
+  runBackfill(cfg, api, state, opts || {}).catch((e) => { bfJob.error = e.message || String(e); bfJob.running = false; });
+  return { ok: true, startedAt: bfJob.startedAt };
+}
+
 /* ---------- 入口 ---------- */
 
 async function main() {
@@ -649,8 +788,17 @@ async function main() {
     console.log(JSON.stringify({ configOk: !missingConfig(cfg), hookCalls: state.hookCalls, queueLen }, null, 2));
     return;
   }
+  if (sub === 'backfill') {
+    // 全量回传历史：backfill [source] [filter]。source 缺省 = 全部来源；已回传文件自动跳过。
+    const source = process.argv[3] || '';
+    const filter = process.argv[4] || '';
+    if (source && !SOURCES[source]) { console.error('未知来源: ' + source + '（可选: ' + Object.keys(SOURCES).join(' | ') + '）'); process.exit(2); }
+    const r = await runBackfill(cfg, api, state, { source, filter });
+    console.log(JSON.stringify(r));
+    return;
+  }
   if (sub && sub !== 'serve') {
-    console.error('用法: tdai-daemon [serve|push|hook|health]');
+    console.error('用法: tdai-daemon [serve|push|hook|health|backfill [source] [filter]]');
     process.exit(2);
   }
 
@@ -674,7 +822,8 @@ if (require.main === module) main().catch((e) => { log(`fatal: ${e.message}`); p
 module.exports = {
   loadConfig, missingConfig, mkApi, mkCache, mkState, startServer,
   scanAndUpload, flushQueue, enqueue, buildRecall, hasIntent,
+  runBackfill, startBackfill, backfillStatus,
   agentStatus, updateCheck, consolePage, readPublicConfig, writeConfig,
-  parseZCodeLine, parseClaudeLine, sliceMessages, readNewLines,
+  parseZCodeLine, parseClaudeLine, parseRolloutLine, sliceMessages, readNewLines,
   APP_VER, RECALL_PORT, CFG_PATH, DATA_DIR, QUEUE_DIR, LOG_PATH, SCAN_INTERVAL_MS,
 };

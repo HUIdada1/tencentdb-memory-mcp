@@ -10,7 +10,7 @@ const readline = require('readline');
 const core = require(path.join(__dirname, '..', 'core', 'tdai-core.js'));
 
 const SERVER_NAME = 'tdai-memory';
-const SERVER_VER = '0.5.1';   // 与 package.json / daemon APP_VER 同步（发版流水线会校验）
+const SERVER_VER = '0.5.2';   // 与 package.json / daemon APP_VER 同步（发版流水线会校验）
 
 /* ---------- 工具目录（inputSchema 用 JSON Schema） ---------- */
 

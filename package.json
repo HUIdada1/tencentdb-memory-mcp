@@ -1,6 +1,6 @@
 {
   "name": "tencentdb-memory-mcp",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "private": true,
   "description": "TD 记忆守护：MCP server + 后台记忆守护进程（采集上传 + 本地 recall 服务）",
   "bin": {

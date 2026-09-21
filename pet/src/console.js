@@ -668,6 +668,50 @@
     } catch (e) {
       if (box) box.innerHTML = `<div class="empty">加载失败：${esc(e && e.message ? e.message : String(e))}</div>`;
     }
+    // 回传状态兜底展示（有历史任务在跑则继续轮询）
+    if (typeof tdai.backfillStatus === 'function') {
+      try {
+        const st = await tdai.backfillStatus();
+        const s = st && (st.payload || st);
+        if (s) { renderBackfill(s); if (s.running) pollBackfill(); }
+      } catch (_) { }
+    }
+  }
+
+  /* ---------- 历史会话回传（进度展示） ---------- */
+  let bfTimer = null;
+  function renderBackfill(st) {
+    const b = $('#b-backfill');
+    if (!b || !st) return;
+    if (st.running) {
+      b.className = 'banner show ok';
+      b.textContent = `回传中：${st.filesDone}/${st.files} 个文件 · 已上传 ${st.msgs} 条` + (st.current ? ` · 当前 ${st.current}` : '');
+      return true;
+    }
+    if (st.doneAt) {
+      const bad = st.error ? 'warn' : 'ok';
+      b.className = 'banner show ' + bad;
+      b.textContent = `回传完成：${st.filesDone}/${st.total || st.files} 个文件 · 共 ${st.msgs} 条已上传入队` +
+        (st.error ? `（告警：${st.error}）` : '') + '。蒸馏由记忆库自动进行，L1 一般 15–20 分钟内出现。';
+      return false;
+    }
+    if (st.backfilledFiles) {
+      b.className = 'banner show ok';
+      b.textContent = `此前已回传 ${st.backfilledFiles} 个文件，无需重复操作；记忆库会自动蒸馏。`;
+    }
+    return false;
+  }
+  function pollBackfill() {
+    if (bfTimer || typeof tdai.backfillStatus !== 'function') return;
+    bfTimer = setInterval(async () => {
+      try {
+        const r = await tdai.backfillStatus();
+        const st = r && (r.payload || r);
+        if (!st) return;
+        const still = renderBackfill(st);
+        if (!still) { clearInterval(bfTimer); bfTimer = null; }
+      } catch (_) { /* 守护短暂离线时保持轮询 */ }
+    }, 2000);
   }
 
   const actions = {
@@ -681,6 +725,22 @@
       setOut('#mem-out', '加载分层…');
       const r = await tdai.toolCall('memory_layers', {});
       renderMemResult(r);
+    },
+    async 'backfill-start'() {
+      // 历史会话一键回传：任务在守护进程内异步跑，这里只负责启动 + 轮询进度
+      try {
+        if (typeof tdai.backfillStart !== 'function') throw new Error('守护进程或应用版本过旧，请升级后重试');
+        const r = await tdai.backfillStart({});
+        if (r && r.ok === false) {
+          const msg = (r.payload && r.payload.error) || (r.status === 404 ? '守护进程版本过旧（无回传接口），请升级后重试' : r.error || '无法启动回传');
+          banner('b-backfill', 'warn', msg);
+          return;
+        }
+        banner('b-backfill', 'ok', '历史回传已启动：正在解析本地会话文件并分批上传（已回传过的文件自动跳过）…');
+        pollBackfill();
+      } catch (e) {
+        banner('b-backfill', 'err', '回传启动失败：' + (e && e.message ? e.message : e));
+      }
     },
     async 'reload-layers'() { await loadOverview(); },
     async 'sess-refresh'() { await refreshSessions(true); pushLocal('info', '已手动刷新会话列表'); },

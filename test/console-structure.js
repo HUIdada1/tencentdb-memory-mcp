@@ -91,6 +91,12 @@ setTimeout(() => {
   chk('live page 有 sess-list', !!d.querySelector('.page[data-page="live"] #sess-list'));
   chk('home 不再有 sess-list', !d.querySelector('.page[data-page="home"] #sess-list'));
 
+  console.log('=== ⑨ 历史会话回传 ===');
+  chk('memory 页有回传按钮', !!d.querySelector('.page[data-page="memory"] #bf-btn'));
+  chk('memory 页有回传横幅位', !!d.querySelector('.page[data-page="memory"] #b-backfill'));
+  chk('console.js 有 backfill-start 动作', /'backfill-start'\s*\(\)/.test(js));
+  chk('console.js 有进度轮询', js.includes('pollBackfill') && js.includes('renderBackfill'));
+
   // 交互：点击记忆 tab 应触发 memory_layers
   d.querySelector('#tabs button[data-tab="memory"]').dispatchEvent(new w.Event('click', { bubbles: true }));
   setTimeout(() => {

@@ -1,6 +1,6 @@
 {
   "name": "tdai-guard",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "TD 记忆守护 — 控制台应用 + 内置后台守护（采集上传 / 本地 recall 服务）",
   "main": "src/main.js",
   "author": "huihui",
