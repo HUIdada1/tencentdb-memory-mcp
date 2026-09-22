@@ -190,32 +190,48 @@ function load(breakSqlite, opts) {
  * 根因是发布出去的应用打包时用的是 Electron 33（内嵌 Node 20.18.3，无 node:sqlite）。
  * ⚠️ 这个坑特别阴：开发机 `node -v` 是 22.x，很容易让"打包用的 Electron 是 33"滑过去。
  * 本组把三件事钉死：
- *   (a) pet/package.json 的 electron 依赖主版本 ≥ 34；
+ *   (a) pet/package.json 的 electron 依赖主版本 ≥ 35；
  *   (b) 运行时闸门 runtimeGate() 能在 Electron 过老时明确报错（不静默）；
  *   (c) 版本比较必须是**数值**比较（'9.0.0' 与 '22.16.0' 的字符串比较是反的）。
+ *
+ * ⚠️ 门槛是 **35 而不是 34** —— 这是实测纠正过的（别凭直觉改回去）：
+ *   Electron 33 → Node 20.18.3 → 无 node:sqlite
+ *   Electron 34 → Node 20.19.1 → **仍无** node:sqlite（曾误以为 34 就够，实测打脸）
+ *   Electron 35 → Node 22.16.0 → 有 node:sqlite
+ *   验证命令：ELECTRON_RUN_AS_NODE=1 electron.exe -e "require('node:sqlite')"
+ * 教训：Electron 主版本跳了，内嵌 Node 的大版本**不一定会跟着跳**（34 只升了 patch）。
  */
 {
   const fs = require('fs');
   const petPkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'pet', 'package.json'), 'utf8'));
   const dep = (petPkg.devDependencies || {}).electron || '';
   const depMajor = parseInt(String(dep).replace(/^[^\d]*/, '').split('.')[0], 10) || 0;
-  chk('⑤ pet/package.json 的 electron 依赖主版本 ≥34（内嵌 Node 才带 node:sqlite）',
-    depMajor >= 34, dep);
+  chk('⑤ pet/package.json 的 electron 依赖主版本 ≥35（其内嵌 Node 22.16 才带 node:sqlite）',
+    depMajor >= 35, dep);
 
-  // 用受控的 process.versions.electron 驱动 runtimeGate 的四条分支
+  // 用受控的 process.versions.electron 驱动 runtimeGate 的分支
   const { mod: s, release } = load(true, { electron: '33.4.11' });
   const g33 = s.runtimeGate();
   chk('⑤ Electron 33 → 闸门判定 electron-too-old', g33.kind === 'electron-too-old' && g33.ok === false, g33.kind);
   chk('⑤ 过老时的文案点明"内嵌 Node 不含 node:sqlite"与影响面',
     /不含 node:sqlite/.test(g33.message) && /重新用 Electron/.test(g33.message), g33.message);
-  chk('⑤ 过老时给出所需版本号（needed=34）', g33.needed === '34', String(g33.needed));
+  chk('⑤ 过老时给出所需版本号（needed=35）', g33.needed === '35', String(g33.needed));
   release();
 
-  const { mod: s34, release: rel34 } = load(false, { electron: '34.0.0' });
+  // 34 也必须被拦下 —— 这是本次实测纠正的关键边界，加一条专门断言防止回退
+  const { mod: s34, release: rel34 } = load(true, { electron: '34.5.8' });
   const g34 = s34.runtimeGate();
   rel34();
-  chk('⑤ Electron 34 → 闸门放行（ok=true，不再是 electron-too-old）',
-    g34.ok === true && g34.kind === 'ok', g34.kind + '/' + g34.message);
+  chk('⑤ Electron 34 **仍被拦下**（实测其内嵌 Node 20.19.1 无 node:sqlite）',
+    g34.ok === false && g34.kind === 'electron-too-old', g34.kind + ' act=' + g34.actual);
+  chk('⑤ Electron 34 的文案引用实测内嵌版本 20.19.1（不是想当然的 20.18.3）',
+    /20\.19\.1/.test(g34.message), g34.message);
+
+  const { mod: s35, release: rel35 } = load(false, { electron: '35.0.0' });
+  const g35 = s35.runtimeGate();
+  rel35();
+  chk('⑤ Electron 35 → 闸门放行（ok=true，不再是 electron-too-old）',
+    g35.ok === true && g35.kind === 'ok', g35.kind + '/' + g35.message);
 
   // 版本比较必须数值化：字符串比较下 '9.0.0' > '22.16.0' 成立（经典误判）
   chk('⑤ verNum 是数值比较（9.0.0 不高于 22.16.0）',
@@ -225,8 +241,13 @@ function load(breakSqlite, opts) {
     s.verNum('v34.0.0') === s.verNum('34') && s.verNum('v34') === s.verNum('34.0'),
     s.verNum('v34') + '/' + s.verNum('34.0'));
   chk('⑤ 导出的 ELECTRON_MIN 与 pet 依赖门槛同源（避免两处漂移）',
-    s.ELECTRON_MIN === 34 && String(s.ELECTRON_MIN_LABEL) === '34',
+    s.ELECTRON_MIN === 35 && String(s.ELECTRON_MIN_LABEL) === '35',
     s.ELECTRON_MIN + '/' + s.ELECTRON_MIN_LABEL);
+  // 「内嵌 Node 版本表」必须与实测一致（这张表曾因想当然写错，是本次故障的元凶之一）
+  chk('⑤ ELECTRON_EMBEDDED_NODE 表记录实测值（34→20.19.1 而非 20.18.3）',
+    s.ELECTRON_EMBEDDED_NODE && s.ELECTRON_EMBEDDED_NODE[34] === '20.19.1'
+    && s.ELECTRON_EMBEDDED_NODE[35] === '22.16.0',
+    JSON.stringify(s.ELECTRON_EMBEDDED_NODE));
 
   // 纯 Node 形态闸门：本机 Node 22 应放行
   const { mod: sNode, release: relNode } = load(false);

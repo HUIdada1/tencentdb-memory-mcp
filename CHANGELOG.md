@@ -21,32 +21,47 @@
   2.2 万条 message）**既无法在界面展示、也无法被守护采集上传**。
   真机验证：库里最新消息为 17:06，而守护 `lastPush` 停在 14:45，且落后量随时间单调增长 ——
   即「对话在本地正常进行，线上记忆库却停更」。
-  - `pet/package.json`：`electron` 依赖 `^33.2.0` → **`^34.0.0`**（Electron 34 起内嵌 Node
-    含 `node:sqlite`）。**这是根治点**：不重新打包发版，临时措施都只是绕过。
+  - `pet/package.json`：`electron` 依赖 `^33.2.0` → **`^35.0.0`**。**这是根治点**：
+    不重新打包发版，临时措施都只是绕过。
   - `pet/src/sessions.js` 新增 **`runtimeGate()`**：打包形态自检。运行期发现
-    「Electron 主版本 < 34」或「内嵌 Node < 22.16.0」时**明确报错**（返回
+    「Electron 主版本 < 35」或「内嵌 Node < 22.16.0」时**明确报错**（返回
     `kind/ok/actual/needed/message`），而不是继续静默降级。闸门常量
     `ELECTRON_MIN` / `ELECTRON_MIN_LABEL` 一并导出，供 UI 与测试消费。
   - 新增 `verNum()` 版本比较助手，并**强制数值化**：字符串比较下 `'9.0.0' > '22.16.0'`
     成立，是本项目曾踩过的经典误判类型。同时容忍 `v` 前缀与缺段
-    （`'v34'` / `'34.0'` / `'34.0.0'` 等价）。
-  - `ELECTRON_EMBEDDED_NODE` 表记录「Electron 主版本 → 内嵌 Node 版本」，作为单一真源；
-    未来 Electron 若调整内嵌 Node，只需改这一张表。
+    （`'v35'` / `'35.0'` / `'35.0.0'` 等价）。
+  - `ELECTRON_EMBEDDED_NODE` 表记录「Electron 主版本 → 内嵌 Node 版本」，作为单一真源。
+
+- **⚠️ 门槛是 Electron 35，不是 34 —— 一次「想当然」的自我纠正**。
+  本次修复最初按「Electron 34 起内嵌 Node 带 `node:sqlite`」实现，**实测证明是错的**：
+
+  | Electron | 内嵌 Node | `node:sqlite` |
+  |---|---|---|
+  | 33.4.11 | 20.18.3 | ✗ |
+  | **34.5.8** | **20.19.1** | **✗（只升了 patch 版）** |
+  | 35.x | **22.16.0** | **✓** |
+
+  验证方法（**升门槛前必须重跑这条**）：
+  ```
+  ELECTRON_RUN_AS_NODE=1 electron.exe -e "require('node:sqlite')"
+  ```
+  教训：**Electron 主版本号跳了，内嵌 Node 的大版本不一定会跟着跳**。
+  同时修正了 `sessions.js` 里「Electron 主进程同样可用」这句旧注释 ——
+  它暗示"有 Node 就有该模块"，但实际上 Electron 各自编译，内嵌 Node ∈ 20.x 的构建里
+  该模块根本不存在。这类"想当然的注释"正是本次故障的认知根源之一。
 
 ### Added
-- **打包形态闸门测试（`test/sqlite-degrade.test.js` 第 ⑤ 组，新增 11 条断言）**。
+- **打包形态闸门测试（`test/sqlite-degrade.test.js` 第 ⑤ 组，13 条断言）**。
   之所以必须有它：这个坑在开发机上**看不出来** —— `node -v` 是 22.x，很容易让
-  「打包用的 Electron 还是 33」这件事一路滑到用户侧才暴露。本组钉死：
-  ① `pet/package.json` 的 electron 依赖主版本 ≥ 34；
+  「打包用的 Electron 版本偏低」这件事一路滑到用户侧才暴露。本组钉死：
+  ① `pet/package.json` 的 electron 依赖主版本 ≥ 35；
   ② Electron 33 时 `runtimeGate()` 判 `electron-too-old` 且文案点明后果；
-  ③ Electron 34 时放行；
-  ④ `verNum` 确为数值比较（防退回字符串比较）；
-  ⑤ 导出的 `ELECTRON_MIN` 与 pet 依赖同源（防两处漂移）。
-
-- **`gate()` 的判定与文案已在真机取证的基础上成型**：本次修改同时修正了
-  「Electron 33 内嵌 Node 版本」的呈现 —— `runtimeGate()` 的文案固定引用
-  `ELECTRON_EMBEDDED_NODE` 表（20.18.3），不再直接透传 `process.versions.node`，
-  避免在测试替身环境下打出与真实打包形态不符的版本号。
+  ③ **Electron 34 仍被拦下**（专门一条断言，防止有人"按直觉"把门槛改回 34）；
+  ④ 34 的文案引用实测内嵌版本 `20.19.1`（不是想当然的 20.18.3）；
+  ⑤ Electron 35 放行；
+  ⑥ `verNum` 确为数值比较（防退回字符串比较）；
+  ⑦ `ELECTRON_MIN` 与 pet 依赖同源（防两处漂移）；
+  ⑧ `ELECTRON_EMBEDDED_NODE` 表记录的是实测值。
 
 ## [0.5.13] - 2026-09-22
 

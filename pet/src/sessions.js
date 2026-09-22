@@ -25,10 +25,12 @@ const SQLITE_TTL = 3000;       // sqlite 查询节流：3s 内复用上一次结
 
 /* ---------- ZCode SQLite 会话库（权威源） ---------- */
 
-// node:sqlite 是 Node 22.16+ 内置模块（Experimental），Electron 主进程同样可用。
+// node:sqlite 是 Node 22.16+ 的内置模块（Experimental）。
+// ⚠️ 但它**不是"有 Node 就有"** —— Electron 是各自编译的，内嵌 Node ∈ 20.x 的构建里
+//    该模块根本不存在（实测 Electron 33/34 都没有；35 的内嵌 Node 才升到 22.16.0）。
+//    旧注释写"Electron 主进程同样可用"是错的，已按实测改正（2026-09-22）。
 // 拿不到就降级到文件扫描 —— 但**必须把降级事实暴露出去**（sqliteStatus().degraded），
 // 否则用户看到的是"最新会话停在几个月前"的假象，还会以为程序坏了。
-// ⚠️ node:sqlite 在 Node < 22.16 / Electron 未编译该模块时会 require 失败。
 const SQLITE_MIN_NODE = '22.16.0';
 let _sqliteMod;
 function sqliteMod() {
@@ -67,24 +69,26 @@ function verNum(s) {
   return a * 1000 + b;
 }
 
-// Electron 主版本 → 其内嵌 Node 的 Node 版本（仅列到我们已知的门槛区间）。
-// 依据：Electron 33 → Node 20.18.3（无 node:sqlite）；
-//       Electron 34 → Node 20.18.x 上**已编译 node:sqlite**（本项目实测口径，见 CHANGELOG）。
-// 门槛是"内嵌 Node ≥ 22.16.0"，故 34 起为可用下限。若将来 Electron 调整内嵌 Node 版本，
-// 只需改这一张表 —— 它同时被 pet 与测试消费，单一真源。
+// Electron 主版本 → 其内嵌 Node 的 Node 版本。
+// ⚠️⚠️ 全部为**实测值**，不是推算 —— 这张表曾因"想当然"写错，务必先验证再改。
+// 实测记录（`ELECTRON_RUN_AS_NODE=1 electron.exe -e "require('node:sqlite')"`）：
+//   33 → Node 20.18.3  → 无 node:sqlite
+//   34 → Node 20.19.1  → 无 node:sqlite   ← 曾误以为 34 已带，实际没有！
+//   35 → Node 22.16.0  → **有** node:sqlite
+// 门槛是"内嵌 Node ≥ 22.16.0"，而 Electron 34 的内嵌 Node 仍是 20.x（只升了 patch）
+// → **可用下限是 Electron 35，不是 34**。教训：Electron 主版本 ≠ 内嵌 Node 大版本会同步跳。
+// 将来要升门槛，必须先跑上面那条命令实测，再改这张表；它同时被 pet 与测试消费（单一真源）。
 const ELECTRON_EMBEDDED_NODE = {
-  33: '20.18.3',
-  34: '20.18.3',   // 但该构建已编译 node:sqlite
-  35: '22.14.0',
-  36: '22.15.0',
-  37: '22.16.0',
+  33: '20.18.3',   // 无 node:sqlite
+  34: '20.19.1',   // 无 node:sqlite（实测！）
+  35: '22.16.0',   // 有 node:sqlite
 };
-const ELECTRON_MIN = 34;   // 最低可用 Electron 主版本（内嵌 Node 需 ≥22.16.0）
-const ELECTRON_MIN_LABEL = '34';
+const ELECTRON_MIN = 35;   // 最低可用 Electron 主版本（内嵌 Node 需 ≥22.16.0）
+const ELECTRON_MIN_LABEL = '35';
 
 // 打包形态自检：**发布出去的应用**必须跑在够新的 Electron 上。
 // 为什么必须显式检查（真实故障，2026-09-22）：
-//   开发机上 `node -v` 是 22.x，很容易让"打包时 Electron 还是 33"这件事滑过去；
+//   开发机上 `node -v` 是 22.x，很容易让"打包时 Electron 版本偏低"这件事滑过去；
 //   直到用户侧发现「ZCode 会话库来源不可用、线上对话不再上传」才暴露。
 //   electron 依赖在 pet/package.json 里升了，本函数是**运行期的最后一道闸**。
 // 返回 { kind:'ok'|'electron-too-old'|'node-too-old', needed, actual, message }
@@ -513,5 +517,6 @@ module.exports = {
   SQLITE_MIN_NODE,      // node:sqlite 最低 Node 版本（与 daemon 的 ZDB_MIN_NODE 必须一致）
   ELECTRON_MIN,         // 最低可用 Electron 主版本
   ELECTRON_MIN_LABEL,
+  ELECTRON_EMBEDDED_NODE,  // 实测的「Electron 主版本 → 内嵌 Node 版本」表（单一真源）
   SQLITE,
 };
