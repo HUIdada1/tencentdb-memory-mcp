@@ -11,6 +11,81 @@
 
 ## [Unreleased]
 
+## [0.5.13] - 2026-09-22
+
+### Fixed
+- **误导性的 Node 版本提示（用户实测反馈）**。桌面版跑在 Electron 里，用的是 **Electron 内嵌的 Node**
+  （Electron 33 → Node 20.18.3），与用户系统安装的 Node **完全无关**。原提示只写
+  「当前 Node 20.18.3 不支持…请升级 Node 到 ≥22.16.0」，而用户系统明明是 Node 22 ——
+  用户会直接怀疑是识别错误。现在 `sessions.js` 新增 `runtimeInfo()` 区分两者：
+  - Electron 形态：文案点明「应用内置运行时不支持 node:sqlite」+「**与您系统安装的 Node 版本无关**」，
+    修复建议指向**升级应用自身**（Electron 34+），不再让用户白折腾系统 Node。
+  - 纯 Node 形态：保留原有的「升级 Node 到 ≥22.16.0」建议。
+  - `sqliteStatus()` 新增 `runtime` / `isElectron` / `electron` 字段供 UI 与测试消费。
+
+- **ZCode 会话库来源静默失效导致"对话不再自动上传"（P0，真实故障）**。
+  现象：线上记忆库 L0 对话原文停在某个时刻，之后新对话不再上传，而界面显示"实时连接正常"、
+  **零异常提示**。根因：守护进程由 `tdai-hook.cmd` 以
+  `ELECTRON_RUN_AS_NODE=1 TD记忆守护.exe …` 启动，跑在 Electron 内嵌 Node（20.18.3）上，
+  该运行时**没有 `node:sqlite`**；`zdbQuery()` 于是静默 `return []`，
+  `zcode-db` 这个虚拟来源永远列不出会话、游标永不推进。
+  - daemon 新增 **`zdbStatus()`**：报告 `ok/reason/runtime/isElectron/dbPath/message`，
+    并在 **`/health` 响应中暴露 `zdb` 字段**（含 Electron 尾随判定）。
+  - 控制台「守护状态」卡新增 **「ZCode 会话库来源」** 一行：可用 / 无会话库 /
+    不可用（该来源不会被采集），失败原因进 `title` —— 同类静默故障今后一眼可见。
+
+- **Agent 客户端列表同列参差不齐（真 bug）**。`.agent-row` 原用
+  `display:flex` + `justify-content:space-between`，徽章/开关的 x 坐标**跟着名字宽度浮动**；
+  各客户端的副行文案长短不一（有的带 hook 提示、有的空），导致右侧两列逐行错位。
+  改为 `grid-template-columns:minmax(0,1fr) 64px 84px`，徽章 `justify-self:center`、
+  开关 `justify-self:end`；副行统一 `text-overflow:ellipsis` 单行省略，防长路径撑高行高。
+  实测 7 行徽章 x 全等 853、开关 x 全等 930，明细三列全等 54/134/296。
+
+- **Agent 接入页首屏过高、要滚 400px 才看到列表末尾**（720px 窗口实测 1051px 内容）。
+  三处收紧：① 本页卡片留白降一档（`min-height:120px→0`，内边距 18/26→12/18）；
+  ② 「三步接入」改**可折叠**，已接入过时默认收起（首屏从 302px→168px）；
+  ③ 客户端列表与明细区各自设高度上限并内部滚动。
+  页面总高 1051 → **845**，首屏即可看到全部 7 行客户端。
+
+- **冷启动瞬间点 tab 会被强行弹回总览页（竞态）**。启动段 `prefsReady.then()`
+  无条件重跑 `onHomeShown()` + `loadOverview()`，而偏好加载是异步的 ——
+  用户在这期间点了 Agent / 记忆 tab，就会出现「tab 高亮在 Agent、页面却显示总览」，
+  且总览的会话刷新会被多拉一次。现在加 `activeTab() === 'home'` 守卫，
+  只在用户确实还停在总览页时才跑首屏渲染。
+
+### Changed
+- **总览首排重排**（按用户要求）：
+  - 「进行中会话 / 累计请求 / 失败请求」三张卡改为**恒定一行、等宽均分、左右对称**，
+    不再随连接状态在「分半 / 整行」间切换（删掉 `#home-split` 与 `.split`/`.nosplit` 两态，
+    以及 `console.js` 的 `syncHomeSplit()`）。
+  - 卡片高度与内边距收紧（`padding` 16px→11px，`gap` 14px→12px），首排整体更紧凑。
+  - **版本号移到顶栏主题切换按钮左侧**（`#h-ver` 由 hero 体征条迁至 `.bar-ctl`，
+    新增 `.ver-chip` 样式）；hero 体征项右对齐，与左侧状态形成视觉配重。
+  - **删除 hero 体征条里重复的「面板延迟」**——延迟只保留 `#live-sub` 副标题一处。
+
+- **Agent 接入页：接入结果明细重做**（用户反馈「那些文字无用、列表参差不齐」）：
+  - 明细从 `[动作] 目标 — 说明` 的**等宽字体原始拼接**改为**三列网格**
+    （动作徽章 / 名称 / 说明），不再是开发者口径的裸文本。
+  - 动作词改用用户语言：`新增·追加→已开启`、`覆盖→已更新`、`移除→已断开`、
+    `跳过→无需改动`、`失败→失败`；跳过原因也从 `已是本应用接入` /
+    `无 ~/.dsh/profiles 下无 cordis.patch.yml` 这类后端原文翻成
+    「此前已接入」「未初始化」等人话。
+  - **过滤纯噪音的「跳过」行**：未安装的客户端、本来就没接入的，不再逐条列出来
+    （上方状态徽章已表达过），只保留用户真正关心的结果。
+  - 顶部横幅不再把全部明细挤成一行 `xx：a；b；c…`，只报条数。
+
+### Tests
+- `ui.test` 新增 10 项：钉死 Agent 行「必须用三列 grid、不得回退 space-between」、
+  徽章/开关的 `justify-self`、副行省略、明细三列网格渲染、噪音行过滤、
+  说明折叠及其 CSS。含反向断言（旧的 `[${x.action}] ${x.target}` 拼接写法不得复活）。
+
+- `sqlite-degrade` 新增 ②b 组（8 断言）：钉死 Electron / 纯 Node 两种形态的文案分流，
+  并反向保护纯 Node 形态仍保留原建议。
+- `clients-consistency` 新增 ⑪ 组（9 断言）：`zdbStatus` 导出与字段、`/health` 暴露 `zdb`、
+  daemon 与 pet 的最低 Node 版本常量一致。此前 `zcode-db` 上传通路**零测试覆盖**，正是漏检原因。
+- 同步更新 `renderer-dom` / `preview-verify` / `console-behavior` / `guard-off` 中
+  依赖旧版式的断言（改为断言"恒为 3 张卡、一行、无版式切换类"）。
+
 ## [0.5.12] - 2026-09-22
 
 ### Added

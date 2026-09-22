@@ -309,6 +309,52 @@ const REG_JS_BARE = strip(REG_JS);
     panel.API_PREFIX);
 }
 
+/* ---------- ⑪ ZCode 会话库来源：降级必须可见（真实故障，2026-09-22） ----------
+ * 故障现象：线上记忆库的 L0 对话原文停在某个时刻，之后新对话**不再自动上传**，
+ *   而控制台左上角照样显示"实时连接正常"、没有任何异常提示 —— 完全静默。
+ * 根因：桌面版守护进程跑在 Electron 内嵌 Node 里（tdai-hook.cmd 用
+ *   `ELECTRON_RUN_AS_NODE=1 TD记忆守护.exe …`），Electron 33 → 内嵌 Node 20.18.3
+ *   → **没有 node:sqlite**。zcode-db 这个虚拟来源的 zdbQuery() 静默 return []，
+ *   于是也永远列不出会话、游标永不推进。
+ *   ⚠️ 与用户系统装的 Node 版本**无关**（用户系统是 Node 22）—— 这正是最迷惑的地方。
+ * 本组钉死：该来源的可用性必须能被 /health 读到，UI 才能把失败摆到台面上。
+ */
+{
+  const dstr = fs.readFileSync(path.join(ROOT, 'daemon', 'tdai-daemon.js'), 'utf8');
+  const dmod = (() => { try { return require(path.join(ROOT, 'daemon', 'tdai-daemon.js')); } catch (_) { return null; } })();
+  chk('⑪ daemon 导出 zdbStatus（供 /health 与测试消费）',
+    !!(dmod && typeof dmod.zdbStatus === 'function'), typeof (dmod && dmod.zdbStatus));
+  if (dmod && typeof dmod.zdbStatus === 'function') {
+    const z = dmod.zdbStatus();
+    chk('⑪ zdbStatus 返回 ok/reason/runtime 三要素',
+      typeof z.ok === 'boolean' && typeof z.reason === 'string' && typeof z.runtime === 'string',
+      JSON.stringify(z).slice(0, 120));
+    chk('⑪ zdbStatus 报告运行时标签（区分 Electron 内嵌 Node 与系统 Node）',
+      /^(Node|Electron) /.test(z.runtime), z.runtime);
+    chk('⑪ zdbStatus 带 isElectron 标记', typeof z.isElectron === 'boolean', String(z.isElectron));
+    chk('⑪ zdbStatus 报告会话库路径（便于自查）',
+      typeof z.dbPath === 'string' && /db\.sqlite$/.test(z.dbPath), String(z.dbPath));
+  }
+  // 内联副本一致性：最低 Node 版本常量必须与 pet/src/sessions.js 相同
+  const sessSrc = fs.readFileSync(path.join(ROOT, 'pet', 'src', 'sessions.js'), 'utf8');
+  const minDaemon = (dstr.match(/ZDB_MIN_NODE\s*=\s*'([^']+)'/) || [])[1];
+  const minPet = (sessSrc.match(/SQLITE_MIN_NODE\s*=\s*'([^']+)'/) || [])[1];
+  chk('⑪ daemon 与 pet 的最低 Node 版本常量一致',
+    minDaemon && minPet && minDaemon === minPet, `daemon=${minDaemon} pet=${minPet}`);
+  // /health 必须把 zdb 暴露出去 —— 否则界面拿不到失败原因，又是静默。
+  // ⚠️ 这里不能用"jsonRes(...) 到 zdb 之间不超过 N 字符"这种跨度正则：
+  //    /health 的 jsonRes 块是多行对象字面量，跨行匹配要靠 [\s\S]，
+  //    而"限制跨度"的懒惰量词在改过字段顺序后会静默 false（假红）。
+  //    改成两个独立断言：① 该块内出现 zdb 字段；② zdb 的值确实是 zdbStatus() 调用。
+  const dBare = strip(dstr);
+  chk('⑪ /health 响应里带上 zdb 字段',
+    /zdb:\s*zdbStatus\(\)/.test(dBare), '未在 /health 中暴露');
+  chk('⑪ zdb 字段紧邻 uploadSources（确认属于 /health 的响应体）',
+    /uploadSources,\s*zdb:\s*zdbStatus\(\)/.test(dBare) || /zdb:\s*zdbStatus\(\),/.test(dBare), '');
+  chk('⑪ 守护采集循环对 zcode-db 是"虚拟来源"特判（不是按文件读）',
+    /def\.virtual/.test(dBare) && /ZDB_CURSOR_PREFIX/.test(dBare), '');
+}
+
 console.log('\n---------- 客户端清单一致性验证：通过 ' + ok.length + ' / 失败 ' + bad.length + ' ----------');
 ok.forEach((x) => console.log('  ✓ ' + x));
 if (bad.length) { bad.forEach((x) => console.log('  ✗ ' + x)); process.exit(1); }

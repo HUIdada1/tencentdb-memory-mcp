@@ -36,6 +36,8 @@ const CLIENTS = [
     // ZCode 的 MCP 条目位置：mcp.servers.tdai（不是顶层 mcpServers）
     pointer: '/mcp/servers/tdai',
     // hook 的展示名沿用历史标签（UI 文案与既有测试都按它断言，别顺手改）
+    // scope 只表示"写在哪一层配置"（用户级 vs 项目级），**与 hook 的触发时机无关**：
+    // 这里写的是 ZCode 的全局配置文件，但 hook 类型仍是 UserPromptSubmit（每次提问前触发）。
     hook: { file: (h) => path.join(h, '.zcode', 'cli', 'config.json'), scope: 'global', label: 'ZCode hook' },
   },
   {

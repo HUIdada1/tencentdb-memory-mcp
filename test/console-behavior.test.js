@@ -59,9 +59,13 @@ const wait = (ms) => new Promise((r) => setTimeout(r, ms));
     // 「连接状态」指标卡已删除：连接状态唯一可见处是右上角 pill + hero 的 live-text，
     // 这里断言 hero 文案确实承载了状态，避免删卡后"状态无处可看"。
     chk('A hero 状态文案为「实时连接正常」', b.d.querySelector('#live-text').textContent.trim() === '实时连接正常', b.d.querySelector('#live-text').textContent.trim());
-    // 首排两态：已连接 → 分半（hero 与指标卡同排）
-    const split = b.d.querySelector('#home-split');
-    chk('A 已连接时首排为分半版式', split.classList.contains('split') && !split.classList.contains('nosplit'), split.className);
+    // 首排版式（2026-09-22 用户要求）：三张指标卡**恒定一行等宽对称**，
+    // 不再随连接状态在「分半 / 整行」间切换 —— 故这里只断言容器存在 + 卡片数恒为 3。
+    chk('A 首排容器存在（hero 与指标卡各自整行）',
+      !!b.d.querySelector('#home-top .hero') && !!b.d.querySelector('#home-top .stat-row'), '');
+    chk('A 三张指标卡恒为 3 张（不随连接状态增减）',
+      b.d.querySelectorAll('#home-top .stat-row .stat').length === 3,
+      String(b.d.querySelectorAll('#home-top .stat-row .stat').length));
   }
 
   // ---- 场景 B：面板不可达（panelOk:false）→ pill 应为「连接失败」且点亮 err ----
@@ -74,9 +78,13 @@ const wait = (ms) => new Promise((r) => setTimeout(r, ms));
     chk('B 不可达时 pill 文案为「连接失败」', b.d.querySelector('#health-text').textContent.trim() === '连接失败', b.d.querySelector('#health-text').textContent.trim());
     chk('B 不可达时 pill 有 err 类', b.d.querySelector('#health-pill').classList.contains('err'), b.d.querySelector('#health-pill').className);
     chk('B hero 状态文案为「面板连接已中断」', b.d.querySelector('#live-text').textContent.trim() === '面板连接已中断', b.d.querySelector('#live-text').textContent.trim());
-    // 断开 → 首排退回整行版式（hero 只剩状态文案，分半会空出一大片）
-    const split = b.d.querySelector('#home-split');
-    chk('B 不可达时首排退回整行版式', split.classList.contains('nosplit') && !split.classList.contains('split'), split.className);
+    // ⚠️ 断开时**也不能**退化成 2+1 两行：三张卡必须仍在同一行、左右对称。
+    //    早先这里断言 .nosplit（按状态切版式），正是用户投诉「不对称」的来源。
+    chk('B 断开时三张指标卡仍为 3 张（不换行、不缩减）',
+      b.d.querySelectorAll('#home-top .stat-row .stat').length === 3,
+      String(b.d.querySelectorAll('#home-top .stat-row .stat').length));
+    chk('B 版式类不再按连接状态切换（.split/.nosplit 已移除）',
+      !b.d.querySelector('.home-top.split') && !b.d.querySelector('.home-top.nosplit'), '');
   }
 
   // ---- 场景 C：未配置面板 → pill 应为「未配置」 ----

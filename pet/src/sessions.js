@@ -37,24 +37,57 @@ function sqliteMod() {
   return _sqliteMod;
 }
 
+/* ---------- 运行时识别（决定提示文案，别再误导用户去升级系统 Node） ----------
+ * ⚠️ 血泪教训（2026-09-22 用户实测反馈）：
+ *   桌面版跑在 Electron 里，用的是 **Electron 内嵌的 Node**，与用户系统装的 Node 无关。
+ *   Electron 33 → 内嵌 Node 20.18.3 → 没有 node:sqlite。
+ *   用户机器上明明装着 Node 22，看到"当前 Node 20.18.3 不支持…请升级 Node 到 ≥22.16.0"
+ *   直接懵了（"我此刻电脑是 node22，是识别有错误吗？"）。
+ *   **提示里的版本号必须说清是哪一层**，并且修法要指向应用自身，而不是让用户去折腾系统 Node。
+ * 返回 { kind, node, electron, isElectron, label }
+ */
+function runtimeInfo() {
+  const v = process.versions || {};
+  const electron = v.electron || '';
+  return {
+    node: v.node || '',
+    electron,
+    isElectron: !!electron,
+    label: electron ? `Electron ${electron}（内嵌 Node ${v.node || '未知'}）` : `Node ${v.node || '未知'}`,
+  };
+}
+
 // 降级原因：分「模块缺失」「库文件缺失」「查询失败」三种 —— 用户能据此自助修复。
 // kind: 'ok' | 'no-module' | 'no-db' | 'query-error'
 function sqliteStatus() {
   const mod = sqliteMod();
-  const nodeVer = (process.versions && process.versions.node) || '';
+  const rt = runtimeInfo();
+  const nodeVer = rt.node;
   if (!mod) {
+    // Electron 形态：内嵌 Node 是**应用自带的**，用户升系统 Node 一点用都没有。
+    // 必须换成"等应用升级"的口径，否则用户会白折腾（甚至怀疑是误报）。
+    const message = rt.isElectron
+      ? `应用内置运行时不支持 node:sqlite：${rt.label}，需 Node ≥${SQLITE_MIN_NODE}。`
+        + '（这与您系统安装的 Node 版本无关，您系统的 Node 无需改动）'
+        + '正在进行的会话只统计归档文件，可能看不到最近的对话。'
+      : `当前运行时 Node ${nodeVer || '未知'} 不支持内置 node:sqlite（需 ≥${SQLITE_MIN_NODE}），`
+        + '正在进行中的会话只统计归档文件，可能看不到最近的对话。';
+    const hint = rt.isElectron
+      ? '这是应用自身依赖的运行时版本偏低，需升级「TD 记忆守护」到采用 Electron 34+ 的版本；'
+        + '守护进程与本机采集不受影响（它们只看归档文件与 ZCode 会话日志）。'
+      : `升级 Node 到 ≥${SQLITE_MIN_NODE}，或从源码用更高版本重新运行应用。`;
     return {
       kind: 'no-module', ok: false, degraded: true,
-      node: nodeVer, minNode: SQLITE_MIN_NODE, path: SQLITE,
-      message: `当前 Node ${nodeVer || '未知'} 不支持内置 node:sqlite（需 ≥${SQLITE_MIN_NODE}），`
-        + '正在进行中的会话只统计归档文件，可能看不到最近的对话。',
-      hint: `升级 Node 到 ≥${SQLITE_MIN_NODE}，或从源码用更高版本重新运行应用。`,
+      node: nodeVer, electron: rt.electron, runtime: rt.label,
+      isElectron: rt.isElectron, minNode: SQLITE_MIN_NODE, path: SQLITE,
+      message, hint,
     };
   }
   if (!fs.existsSync(SQLITE)) {
     return {
       kind: 'no-db', ok: true, degraded: false,
-      node: nodeVer, path: SQLITE,
+      node: nodeVer, electron: rt.electron, runtime: rt.label,
+      isElectron: rt.isElectron, path: SQLITE,
       message: '', hint: '',
     };
   }
@@ -62,12 +95,17 @@ function sqliteStatus() {
   if (err) {
     return {
       kind: 'query-error', ok: false, degraded: true,
-      node: nodeVer, path: SQLITE, minNode: SQLITE_MIN_NODE,
+      node: nodeVer, electron: rt.electron, runtime: rt.label,
+      isElectron: rt.isElectron, path: SQLITE, minNode: SQLITE_MIN_NODE,
       message: `读取 ZCode 会话库失败：${err}`,
       hint: '若 ZCode 正在写入，稍后会自动重试；持续失败请确认该文件未被其它程序独占。',
     };
   }
-  return { kind: 'ok', ok: true, degraded: false, node: nodeVer, path: SQLITE, message: '', hint: '' };
+  return {
+    kind: 'ok', ok: true, degraded: false,
+    node: nodeVer, electron: rt.electron, runtime: rt.label,
+    isElectron: rt.isElectron, path: SQLITE, message: '', hint: '',
+  };
 }
 
 let _sqliteCache = { at: 0, rows: null, error: null };
@@ -402,5 +440,6 @@ module.exports = {
   scanSessions, cursorStats, zcodeFiles, claudeFiles, scanOne,
   sqliteSessions,       // sqlite 权威源（守护进程上传侧也要用它）
   sqliteStatus,         // 降级状态（UI 警告用）：kind/degraded/message/hint
+  runtimeInfo,          // 运行时识别（Electron 内嵌 Node vs 系统 Node），文案据此分流
   SQLITE,
 };

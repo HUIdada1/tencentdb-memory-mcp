@@ -23,7 +23,7 @@ const QUEUE_DIR = path.join(DATA_DIR, 'queue');
 const LOG_PATH = path.join(DATA_DIR, 'daemon.log');
 
 const RECALL_PORT = Number(process.env.TDAI_DAEMON_PORT) || 8100;
-const APP_VER = '0.5.12';         // 与 package.json 同步；SEA exe 的版本号
+const APP_VER = '0.5.13';         // 与 package.json 同步；SEA exe 的版本号
 const REPO_API = 'https://api.github.com/repos/HUIdada1/tencentdb-memory-mcp/releases/latest';
 const RECALL_TIMEOUT_MS = 800;   // hook 链路硬超时：超时返回空，绝不阻塞对话
 const SCAN_INTERVAL_MS = 2 * 60 * 1000;  // 采集循环 2 分钟
@@ -358,6 +358,7 @@ function rolloutSources() {
  */
 const ZCODE_DB = path.join(os.homedir(), '.zcode', 'cli', 'db', 'db.sqlite');
 const ZDB_CURSOR_PREFIX = 'sqlite://zcode-db/';
+const ZDB_MIN_NODE = '22.16.0';
 
 let _zdbMod;
 function zdbMod() {
@@ -365,6 +366,39 @@ function zdbMod() {
   try { _zdbMod = require('node:sqlite'); } catch (_) { _zdbMod = null; }
   return _zdbMod;
 }
+
+/* 运行时识别：桌面版把守护作为子进程跑在 Electron 内嵌 Node 里
+ * （tdai-hook.cmd 用 `ELECTRON_RUN_AS_NODE=1 TD记忆守护.exe …`），
+ * 那个 Node 的版本由 Electron 决定，**与用户系统装的 Node 无关**。
+ * Electron 33 → 内嵌 Node 20.18.3 → 没有 node:sqlite。
+ * ⚠️ 2026-09-22 真实故障：用户系统是 Node 22，但守护跑在 Electron 里，
+ *   zdbQuery 静默 return []，导致 zcode-db 来源"永不推进"，
+ *   线上 L0 对话就停在最后一次成功上传的时间，且**界面上一点异常都看不到**。
+ *   所以降级状态必须能被 /health 与后台状态暴露出去（zdbStatus）。
+ */
+function zdbStatus() {
+  const v = process.versions || {};
+  const isElectron = !!v.electron;
+  const label = isElectron
+    ? `Electron ${v.electron}（内嵌 Node ${v.node || '未知'}）`
+    : `Node ${v.node || '未知'}`;
+  if (!zdbMod()) {
+    return {
+      ok: false, reason: 'no-module', runtime: label, isElectron,
+      node: v.node || '', electron: v.electron || '', minNode: ZDB_MIN_NODE,
+      dbPath: ZCODE_DB,
+      message: isElectron
+        ? `守护运行在 ${label}，该运行时不含 node:sqlite（需 Node ≥${ZDB_MIN_NODE}），`
+          + 'ZCode 会话库来源无法采集。注意：这与您系统安装的 Node 版本无关。'
+        : `守护运行时为 ${label}，不含 node:sqlite（需 ≥${ZDB_MIN_NODE}），ZCode 会话库来源无法采集。`,
+    };
+  }
+  if (!zdbAvailable()) {
+    return { ok: false, reason: 'no-db', runtime: label, isElectron, dbPath: ZCODE_DB, message: '' };
+  }
+  return { ok: true, reason: 'ok', runtime: label, isElectron, dbPath: ZCODE_DB, message: '' };
+}
+
 function zdbAvailable() {
   if (!zdbMod()) return false;
   try { return fs.statSync(ZCODE_DB).isFile(); } catch (_) { return false; }
@@ -1131,10 +1165,14 @@ function startServer(cfg, api, cache, state) {
           || Object.assign({}, (cfg.upload && cfg.upload.enabledSources) || {});
         // nextScanAt：优先 state（采集循环每轮回填），退回持久化值；都没有则按"现在 + 一个周期"估算
         const nextScanAt = state.nextScanAt || loadStatus().nextScanAt || '';
+        // zdb：ZCode 会话库来源（虚拟来源）的可用性。
+        // ⚠️ 必须暴露：守护跑在 Electron 内嵌 Node（< 22.16）时该来源**永远采不到**，
+        //   早先静默 return []，用户只看到"线上对话停在某时刻"，界面上零线索。
         jsonRes(res, 200, {
           local: true, nas, auth, configOk: !missingConfig(cfg), version: APP_VER,
           hookCalls: state.hookCalls, lastPush: state.lastPush, queueLen,
           uptimeSince: state.startedAt, nextScanAt, uploadSources,
+          zdb: zdbStatus(),
         });
         return;
       }
@@ -1466,9 +1504,9 @@ module.exports = {
   runBackfill, startBackfill, backfillStatus, ensureUserId,
   agentStatus, updateCheck, consolePage, readPublicConfig, writeConfig,
   parseZCodeLine, parseClaudeLine, parseRolloutLine, sliceMessages, readNewLines,
-  zcodeDbSources, zdbSessionMessages, zdbMsgCount, zdbAvailable,
+  zcodeDbSources, zdbSessionMessages, zdbMsgCount, zdbAvailable, zdbStatus,
   agentInventory, targetsMatchDir,
-  SOURCES, ZDB_CURSOR_PREFIX, ZCODE_DB,
+  SOURCES, ZDB_CURSOR_PREFIX, ZCODE_DB, ZDB_MIN_NODE,
   APP_VER, RECALL_PORT, CFG_PATH, DATA_DIR, QUEUE_DIR, LOG_PATH, SCAN_INTERVAL_MS,
   // 面板响应判定的内联副本：导出仅为让 test/clients-consistency.test.js 能逐字段
   // 与 core/panel-codes.js 比对（防"改了 core 忘了 daemon"的漂移）。

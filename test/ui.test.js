@@ -73,6 +73,35 @@ check('顶栏 Agent 接入 tab 与处理链完整',
 check('顶栏 Agent 页仍会在进入时加载状态',
   /agent:\s*\(\)\s*=>\s*\{[^}]*loadAgents\(\)/.test(js));
 
+/* ---------- Agent 页：列对齐 + 明细渲染 + 说明折叠（本期修复） ----------
+ * 这三条钉的是"同列必须对齐"的回归 —— 早先用 flex+space-between，
+ * 徽章/开关的 x 坐标跟着名字宽度浮动，各客户端 detail 长短不一时整列参差不齐。 */
+check('Agent 行用三列网格（不再靠 space-between 对齐）',
+  /\.agent-row\{[^}]*display:grid[^}]*grid-template-columns/.test(css.replace(/\s+/g, ' ')) &&
+  !/\.agent-row\{[^}]*justify-content:space-between/.test(css.replace(/\s+/g, ' ')));
+check('徽章与开关在网格里各自定位（左中 / 右端）',
+  /\.agent-badge\{[^}]*justify-self:center/.test(css.replace(/\s+/g, ' ')) &&
+  /\.agent-toggle\{[^}]*justify-self:end/.test(css.replace(/\s+/g, ' ')));
+check('名字副行单行省略（防长路径撑高行高、破坏基线）',
+  /\.agent-row \.ar-name span\{[^}]*text-overflow:ellipsis/.test(css.replace(/\s+/g, ' ')));
+check('接入明细用三列网格渲染（替代原始拼接文本）',
+  js.includes('renderAgentResults') &&
+  /\.ar-res\{[^}]*display:grid[^}]*grid-template-columns/.test(css.replace(/\s+/g, ' ')) &&
+  // 旧写法：`[${x.action}] ${x.target} — ${x.detail}` 直接塞进 log.textContent
+  !/\$\{x\.action\}\] \$\{x\.target\}/.test(js));
+check('明细不再把开发者路径原样摊给用户（/mcp/servers/tdai 已不出现在明细渲染里）',
+  !/textContent = results\.map/.test(js) && js.includes('skipReason'));
+check('纯噪音的「跳过」行被过滤（未安装 / 本来就没接入）',
+  /SKIP_NOISE/.test(js) && /renderAgentResults[\s\S]{0,400}SKIP_NOISE\.test/.test(js));
+check('「三步接入」可折叠，且已接入时默认收起',
+  /id="ag-guide"/.test(html) && /id="ag-steps"/.test(html) &&
+  html.includes('data-act="agent-guide"') &&
+  /'agent-guide'/.test(js) && /function setGuide\(/.test(js) &&
+  /S\.guideOpen == null\) setGuide\(installed === 0\)/.test(js));
+check('折叠状态有对应 CSS（收起时隐藏步骤并收紧标题间距）',
+  /\.steps\.hide\{display:none\}/.test(css.replace(/\s+/g, '')) &&
+  /#ag-guide\.collapsed h3/.test(css));
+
 /* ---------- 问号提示 ---------- */
 const qCount = matchAll(html, /<span class="q">\?<span class="tip">/g).length;
 const connFields = ['set-url', 'set-key', 'set-team', 'set-agent', 'set-task', 'set-block'];

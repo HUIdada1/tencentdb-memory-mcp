@@ -34,6 +34,7 @@
     <button data-tab="settings">设置</button>
   </nav>
   <div class="bar-ctl">
+    <span class="ver-chip" id="h-ver" title="守护内核版本">—</span>
     <button class="icon-btn" id="btn-theme" title="切换主题">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
     </button>
@@ -49,12 +50,10 @@
   <!-- ====== 总览（实时监控台） ====== -->
   <section data-page="home" class="page active">
 
-    <!-- ① 连接体征条（半宽）+ 右侧三张关键指标卡 —— 同一排
-         布局：.home-top 外层仍是一个 .row，可被 #home-split 切成 .split / .nosplit 两态：
-           连接 → hero 与 stat-row 各占半宽，四张卡并排两行
-           未连接 → 还原为 hero 整行 + stat-row 整行，指标卡铺满一行
-         指标卡与 hero 同排，故不再各自带 .row 的下外边距（由 .home-top 统一给） -->
-    <div class="row home-top" id="home-split">
+    <!-- ① 连接体征条（整行，体征项右对齐）+ 三张关键指标卡（整行等宽对称）
+         版式：hero 与 stat-row 各占整行；三张卡由 CSS 的 flex-wrap:nowrap + flex:1 1 0
+         严格均分整行宽度（左右对称），**不随连接状态变化**。 -->
+    <div class="row home-top" id="home-top">
       <div class="hero glass">
         <div class="live">
           <span id="live-badge" class="live-badge"><i></i></span>
@@ -64,14 +63,12 @@
           </div>
         </div>
         <div class="hero-kv">
-          <div><label>面板延迟</label><b id="h-latency">—</b></div>
           <div><label>守护探活</label><b id="h-beat">—</b></div>
           <div><label>运行时长</label><b id="h-uptime">—</b></div>
-          <div><label>版本</label><b id="h-ver">—</b></div>
         </div>
       </div>
 
-      <!-- ② 关键指标卡（「累计请求」与「失败请求」相邻，样式完全一致） -->
+      <!-- ② 关键指标卡（三张等宽一行，左右对称） -->
       <div class="row stat-row">
         <div class="stat glass"><i></i><div><b id="s-sess">—</b><span>进行中会话</span></div></div>
         <div class="stat glass" id="c-reqs"><i></i><div><b id="s-reqs">—</b><span>累计请求</span></div></div>
@@ -164,6 +161,7 @@
           <div class="kv"><span>进程模式</span><b id="d-mode">—</b></div>
           <div class="kv"><span>守护启动于</span><b id="d-since">—</b></div>
           <div class="kv"><span>采集上传</span><b id="d-upload">—</b></div>
+          <div class="kv"><span>ZCode 会话库来源</span><b id="d-zdb">—</b></div>
           <div class="kv"><span>最近上传</span><b id="d-lastpush">—</b></div>
           <div class="kv"><span>待传队列</span><b id="d-queue">—</b></div>
           <div class="kv"><span>hook 调用</span><b id="d-hooks">—</b></div>
@@ -271,9 +269,12 @@
       <button class="mini" data-act="agent-refresh">刷新状态</button>
     </div>
 
-    <div class="card glass">
-      <h3>三步接入</h3>
-      <div class="steps">
+    <div class="card glass" id="ag-guide">
+      <h3>接入操作
+        <span class="hd-note" id="ag-guide-note">首次使用可展开看三步说明</span>
+        <button class="mini hd-toggle" data-act="agent-guide" aria-expanded="true">收起说明</button>
+      </h3>
+      <div class="steps" id="ag-steps">
         <div class="step">
           <span class="no">1</span>
           <div>
@@ -303,13 +304,13 @@
         <button class="btn-ghost" data-act="agent-open-console">打开网页控制台</button>
       </div>
       <div class="banner" id="b-agent"></div>
-      <div class="ag-tip">接入目标是本程序自身，无需安装 Node，也不依赖源码目录。未安装的客户端会自动跳过。每个客户端可独立开关。</div>
+      <div class="ag-tip">接入目标是本程序自身，无需安装 Node，也不依赖源码目录。未安装的客户端会自动跳过，每个客户端可独立开关。</div>
     </div>
 
     <div class="card glass">
       <h3>客户端接入状态 <span class="hd-note">独立开关 · 点击即接入 / 断开</span></h3>
       <div class="status-list" id="agent-list"><div class="empty">检测中…</div></div>
-      <div class="out" id="agent-log" style="display:none"></div>
+      <div id="agent-log" style="display:none"></div>
     </div>
   </section>
 

@@ -21,7 +21,8 @@ const chk = (n, c, e) => (c ? ok : bad).push(n + (e ? ' → ' + e : ''));
 //    时才 require）。补丁若在 require() 返回后立刻还原，就拦不住那次惰性 require ——
 //    测试会假通过"降级"断言却实际跑在正常路径上。故这里返回 release()，
 //    由调用方在**用完模块之后**再还原。
-function load(breakSqlite) {
+function load(breakSqlite, opts) {
+  const o = opts || {};
   delete require.cache[require.resolve(SESSIONS)];
   const orig = Module._load;
   if (breakSqlite) {
@@ -30,8 +31,28 @@ function load(breakSqlite) {
       return orig.apply(this, arguments);
     };
   }
+  // 模拟 Electron 形态：注入 process.versions.electron（sessions.js 据此分流文案）
+  const savedElectron = process.versions.electron;
+  if (o.electron) {
+    Object.defineProperty(process.versions, 'electron', {
+      value: o.electron, configurable: true, writable: true,
+    });
+  }
   const mod = require(SESSIONS);
-  return { mod, release() { Module._load = orig; } };
+  return {
+    mod,
+    release() {
+      Module._load = orig;
+      if (o.electron) {
+        try { delete process.versions.electron; } catch (_) { }
+        if (savedElectron) {
+          Object.defineProperty(process.versions, 'electron', {
+            value: savedElectron, configurable: true, writable: true,
+          });
+        }
+      }
+    },
+  };
 }
 
 /* ---------- ① 正常路径：模块可用时不报降级 ---------- */
@@ -79,6 +100,40 @@ function load(breakSqlite) {
   chk('② 降级后仍返回文件来源结果（不整体失败）', r.ok === true && r.files >= 0,
     'ok=' + r.ok + ' files=' + r.files);
   chk('② 降级后 sessions 仍是数组', Array.isArray(r.sessions));
+}
+
+/* ---------- ②b 运行时识别：Electron 内嵌 Node ≠ 用户系统 Node ----------
+ * 真实用户反馈（2026-09-22）：
+ *   桌面版提示「当前 Node 20.18.3 不支持内置 node:sqlite（需 ≥22.16.0）…升级 Node」，
+ *   但用户机器上装的是 Node 22 —— 直接懵了（"是识别有错误吗？"）。
+ *   根因：桌面版跑在 Electron 里，用的是 **Electron 内嵌的 Node**（Electron 33 → Node 20.18.3），
+ *   与用户系统 Node 完全无关。旧文案把两者混为一谈，且给了完全无效的修复建议。
+ * 本组钉死：Electron 形态下文案必须（a）注明是应用内置运行时、（b）明说与系统 Node 无关、
+ * （c）修复建议指向升级应用自身，而不是让用户去升系统 Node。
+ */
+{
+  const { mod: s, release } = load(true, { electron: '33.4.11' });
+  const st = s.sqliteStatus();
+  release();
+  chk('②b Electron 形态仍判为降级', st.degraded === true && st.kind === 'no-module', st.kind);
+  chk('②b 报告 isElectron 与运行时标签',
+    st.isElectron === true && /Electron 33\.4\.11/.test(st.runtime || ''), st.runtime);
+  chk('②b 文案点明是「应用内置运行时」（不再让用户以为自己 Node 有问题）',
+    /应用内置运行时不支持/.test(st.message || ''), st.message);
+  chk('②b 文案明说与系统安装的 Node 版本无关',
+    /与您系统安装的 Node 版本无关/.test(st.message || ''), st.message);
+  chk('②b 修复建议指向升级应用自身（而非升级系统 Node）',
+    /升级「TD 记忆守护」/.test(st.hint || ''), st.hint);
+  chk('②b 修复建议不再出现"升级 Node 到 ≥"这种误导话术',
+    !/升级 Node 到/.test(st.hint || ''), st.hint);
+  // 反向保护：非 Electron（纯 Node）形态仍须保留原有的"升级 Node"建议，别改坏
+  const n2 = load(true);
+  const st2 = n2.mod.sqliteStatus();
+  n2.release();
+  chk('②b 纯 Node 形态保留"升级 Node"建议（两种形态文案分流）',
+    /升级 Node 到 ≥22\.16\.0/.test(st2.hint || ''), st2.hint);
+  chk('②b 纯 Node 形态不带 Electron 标签',
+    st2.isElectron === false && /^Node /.test(st2.runtime || ''), st2.runtime);
 }
 
 /* ---------- ③ 渲染层确实消费了 warnings ---------- */

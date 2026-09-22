@@ -229,18 +229,19 @@ t('HTML：全文档没有重复 id', () => {
   assert.strictEqual(dup.length, 0, '重复 id：' + dup.join(', '));
 });
 
-t('HTML：总览首排容器齐全（hero 体征条 + 指标卡同排）', () => {
+t('HTML：总览首排容器齐全（hero 体征条 + 指标卡整行）', () => {
   const b = boot();
-  // 「记忆库面板」卡、延迟波形（#spark*）已删除：面板地址并入 hero 副标题，
-  // 延迟只保留 #h-latency 单个最新值。
-  ['#live-badge', '#live-text', '#live-sub', '#h-latency', '#h-uptime',
-    '#home-split', '.home-top .hero', '.home-top .stat-row',
+  // 「记忆库面板」卡、延迟波形（#spark*）已删除：面板地址与延迟并入 hero 副标题。
+  // ⚠️ hero 体征条里的「面板延迟」也已在 2026-09-22 删除（与副标题重复），
+  //    故这里不再断言 #h-latency —— 它已整体移除，只保留 renderLiveSub 一处。
+  ['#live-badge', '#live-text', '#live-sub', '#h-uptime', '#h-beat',
+    '#home-top', '.home-top .hero', '.home-top .stat-row',
     '#s-sess', '#s-reqs', '#s-err',
     '#sess-list', '#sess-count',
     '#up-speed', '#up-total', '#up-peak', '#up-task-name', '#up-task-bar', '#up-bars',
     '#down-speed', '#down-total', '#down-peak', '#down-task-name', '#down-task-bar', '#down-bars',
     '#log-list', '#log-count', '#log-pause', '#log-clear',
-    '#d-mode', '#d-since', '#d-hooks', '#d-port', '#d-files'].forEach((sel) => {
+    '#d-mode', '#d-since', '#d-hooks', '#d-port', '#d-files', '#d-zdb'].forEach((sel) => {
       assert.strictEqual(b.has(sel), true, '缺少总览元素 ' + sel);
     });
 });
@@ -363,8 +364,9 @@ t('渲染：hero 副标题是实时链路读数，且没有延迟波形残留', 
   assert.match(sub, /panel\.example|未配置面板/, '副标题应含面板地址，实际 ' + sub);
   assert.match(sub, /面板延迟 \d+ms/, '副标题应含真实延迟，实际 ' + sub);
   assert.match(sub, /链路 .+\/s↑ .+\/s↓/, '副标题应含上下行速率，实际 ' + sub);
-  // #h-latency 仍是单个最新值（延迟的唯一保留处）
-  assert.match(b.text('#h-latency'), /^\d+ ms$/, '#h-latency 应为单个延迟值，实际 ' + b.text('#h-latency'));
+  // ⚠️ 面板延迟**只保留副标题这一处**（hero 体征条里的重复项已删除）。
+  //    断言"整份 DOM 里只有一个可见的延迟读数"才是这条测试真正的意图。
+  assert.strictEqual(b.has('#h-latency'), false, 'hero 里的重复延迟读数 #h-latency 应已删除');
   // 延迟波形已删除，DOM 与 JS 都不该再有残留
   assert.strictEqual(b.doc.querySelector('#spark-line'), null, '延迟波形 DOM 应已删除');
   assert.ok(!JS.includes('drawSpark') && !JS.includes('latencyHist'), 'console.js 不应再有 drawSpark / latencyHist');

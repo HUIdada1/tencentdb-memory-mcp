@@ -88,9 +88,11 @@ function boot(o) {
     // 「连接状态」指标卡已删除；状态改由 hero 的 live-text 承载，这里改断言它
     chk('① 停止后 hero 状态文案为「面板连接已中断」（不再谎报在线）', b.txt('#live-text') === '面板连接已中断', b.txt('#live-text'));
     chk('① 停止后副标题带「采集已停止」', /采集已停止/.test(b.txt('#live-sub')), b.txt('#live-sub'));
-    // 首排退回整行版式：停止后 hero 只剩一行文案，分半会空出一大片
-    const split = b.d.querySelector('#home-split');
-    chk('① 停止后首排退回整行版式', split.classList.contains('nosplit') && !split.classList.contains('split'), split.className);
+    // 首排：三张指标卡恒为一行等宽 —— 停止/运行都不改变卡片数量与排布
+    // （早先这里断言「退回整行版式」，版式随状态切换正是用户投诉不对称的来源）
+    chk('① 停止后三张指标卡仍为 3 张（版式与连接状态解耦）',
+      b.d.querySelectorAll('#home-top .stat-row .stat').length === 3,
+      String(b.d.querySelectorAll('#home-top .stat-row .stat').length));
     const pill = b.d.querySelector('#health-pill');
     chk('① 停止后 pill 用 off 灰态（不是 wait 检测中）', pill.classList.contains('off') && !pill.classList.contains('wait'), pill.className);
     chk('① 停止后倒计时不显示「即将采集…」', b.txt('#d-nextscan') === '—', b.txt('#d-nextscan'));
@@ -107,7 +109,11 @@ function boot(o) {
     chk('② 守护运行 + 新鲜延迟 → 仍显示「已连接」（回归保护）', b.txt('#health-text') === '已连接', b.txt('#health-text'));
     chk('② 且 hero 状态文案为「实时连接正常」', b.txt('#live-text') === '实时连接正常', b.txt('#live-text'));
     chk('② 且副标题是真实时链路读数（含延迟与上下行速率）', /面板延迟 88ms · 链路 .+↑ .+↓/.test(b.txt('#live-sub')), b.txt('#live-sub'));
-    chk('② 已连接时首排为分半版式', b.d.querySelector('#home-split').classList.contains('split'), b.d.querySelector('#home-split').className);
+    // 延迟只在副标题出现一次；hero 体征条里的重复项已删除
+    chk('② 运行中三张指标卡同样恒为 3 张（与停止态一致）',
+      b.d.querySelectorAll('#home-top .stat-row .stat').length === 3,
+      String(b.d.querySelectorAll('#home-top .stat-row .stat').length));
+    chk('② hero 体征条已无重复的面板延迟读数', b.d.querySelector('#h-latency') === null, '');
   }
 
   /* ---------- ③ 陈旧延迟 + 探活失败：不能继续举着"已连接" ---------- */

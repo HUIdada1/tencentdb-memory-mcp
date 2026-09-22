@@ -34,7 +34,8 @@ setTimeout(() => {
 
   const checks = [
     ['连接状态有文案', txt('#live-text') !== '<缺失>' && txt('#live-text').length > 0],
-    ['延迟已填充', /ms/.test(txt('#h-latency'))],
+    // 面板延迟只在副标题出现一次（hero 体征条里的重复项已删除）
+    ['hero 无重复的延迟读数', txt('#h-latency') === '<缺失>'],
     // 副标题是唯一的实时链路读数（面板地址 / 延迟 / 上下行速率）
     ['副标题含实时链路读数', /面板延迟 .+ · 链路 .+↑ .+↓/.test(txt('#live-sub')), txt('#live-sub')],
     // 已删除的重复展示：延迟波形 / 面板卡 / 三张重复指标卡
@@ -43,7 +44,16 @@ setTimeout(() => {
     ['无重复的上下行速度卡', txt('#s-up') === '<缺失>' && txt('#s-down') === '<缺失>'],
     ['无重复的连接状态卡', txt('#s-status') === '<缺失>'],
     ['指标卡只剩 3 张', n('.home-top .stat-row .stat') === 3, String(n('.home-top .stat-row .stat'))],
-    ['首排与指标卡同排（已分半）', (d.querySelector('#home-split') || {}).className && d.querySelector('#home-split').classList.contains('split')],
+    // 三张卡恒定一行等宽：版式类 .split/.nosplit 已整体移除（不再随连接状态切换）
+    ['三张指标卡恒在一行且无版式切换类',
+      !d.querySelector('.home-top.split') && !d.querySelector('.home-top.nosplit')],
+    ['卡片数恒为 3（一张不落）', n('.home-top .stat-row .stat') === 3, String(n('.home-top .stat-row .stat'))],
+    ['版本号在顶栏主题按钮左侧', (() => {
+      const v = d.querySelector('#h-ver'); const t = d.querySelector('#btn-theme');
+      if (!v || !t || !v.textContent.trim()) return false;
+      // DOCUMENT_POSITION_FOLLOWING：t 在 v 之后 → v 在前（左侧）
+      return !!(v.compareDocumentPosition(t) & 4);
+    })(), txt('#h-ver')],
     ['请求数已填充', /^\d+$/.test(txt('#s-reqs'))],
     ['会话列表有行', n('#sess-list .sess-row') >= 3],
     ['会话摘要已渲染', d.querySelector('#sess-list').textContent.includes('审查完成')],

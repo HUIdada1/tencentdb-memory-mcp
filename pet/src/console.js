@@ -9,7 +9,7 @@
 
   // 延迟历史采样已移除：延迟波形（最近 60s）整块删除，不再需要逐拍累积的采样数组。
   // 延迟只以「面板延迟」单个最新值呈现（hero 体征条 + 副标题），不留历史副本。
-  const S = { snap: null, appInfo: null, sessTimer: null, lastLogSeq: 0, logPaused: false, logClearSeq: 0, scanAnchor: 0, scanInterval: 120, guardEnabled: true, stoppedExternal: false };
+  const S = { snap: null, appInfo: null, sessTimer: null, lastLogSeq: 0, logPaused: false, logClearSeq: 0, scanAnchor: 0, scanInterval: 120, guardEnabled: true, stoppedExternal: false, guideOpen: null };
 
   /* ---------- 数值格式化 ---------- */
   function fmtBytes(n) {
@@ -295,23 +295,15 @@
       }
     }
     setHealthPill(state, text, detail);
-    // pill 的定位交给 setHealthPill；首排「同排/分行」由这里统一收口，
-    // 保证任何一个 pill 状态变化都会同步版式（含停止后立刻回退整行）。
-    syncHomeSplit();
   }
 
-  /* ---------- 首排布局：hero 与指标卡「同排 / 分行」两态 ----------
-   * 已连接（或尚在检测中）时首排分半：左 hero、右三张指标卡；
-   * 未连接 / 守护已停止时退回整行版式 —— 此时 hero 只剩状态文案，
-   * 与卡片各占半宽会空出一大片，反而比整行更难看。
+  /* ---------- 首排布局 ----------
+   * 三张指标卡（进行中会话 / 累计请求 / 失败请求）**恒定一行等宽**，
+   * 由 CSS 的 .home-top>.stat-row{flex-wrap:nowrap} 保证，不再随连接状态切换。
+   * 早先这里有 syncHomeSplit()，按 HEALTH.connected 在 .split/.nosplit 间切，
+   * 未连接时三张卡被挤成 2+1 两行、左右不对称 —— 用户明确要求取消该行为。
+   * hero 的宽窄也不再由状态决定（恒为整行），故此处无需任何版式逻辑。
    */
-  function syncHomeSplit() {
-    const box = $('#home-split');
-    if (!box) return;
-    const split = HEALTH.connected !== false && !daemonStopped();
-    box.classList.toggle('split', split);
-    box.classList.toggle('nosplit', !split);
-  }
 
   /* ---------- 顶部体征条副标题 = 唯一的实时链路读数 ----------
    * 用户要求「总览页面中最顶部卡片」的数据实时刷新。
@@ -626,6 +618,18 @@
         else { up.textContent = '—'; setCls(up, ''); }
       }
       const lp = $('#d-lastpush'); if (lp) lp.textContent = p.lastPush ? fmtAgo(Date.parse(p.lastPush)) : '尚未上传';
+      // ZCode 会话库来源可用性：守护跑在 Electron 内嵌 Node（<22.16）时该来源永远采不到，
+      // 表现为「最近上传」停在某个时刻、之后再不动。必须显式报出来，
+      // 否则用户只能看到"对话没上传"却没有任何线索（真实故障，2026-09-22）。
+      const zb = $('#d-zdb');
+      if (zb) {
+        const z = p.zdb;
+        if (!z) { zb.textContent = '—'; setCls(zb, ''); }
+        else if (z.ok) { zb.textContent = '可用'; setCls(zb, 'ok'); }
+        else if (z.reason === 'no-db') { zb.textContent = '无会话库'; setCls(zb, ''); }
+        else { zb.textContent = '不可用（该来源不会被采集）'; setCls(zb, 'err'); }
+        zb.title = (z && z.message) || '';
+      }
       const q = p.queueLen || 0;
       const qe = $('#d-queue'); if (qe) { qe.textContent = q + ' 项'; setCls(qe, q > 0 ? 'warn' : 'ok'); }
       const he = $('#d-hooks'); if (he) he.textContent = String(p.hookCalls != null ? p.hookCalls : 0);
@@ -701,12 +705,12 @@
       const up = $('#h-uptime'); if (up) up.textContent = fmtUptime(snap.uptime);
     }
 
-    // 延迟过期（metrics.latencyStale）时不显示，避免"幽灵延迟"
+    // 延迟过期（metrics.latencyStale）时不显示，避免"幽灵延迟"。
+    // ⚠️ 面板延迟只在 hero 副标题（renderLiveSub）里展示一次 ——
+    //    hero 体征条里的重复项已删除（用户要求「面板延迟重复了留下一个即可」）。
     const latFresh = m.latency > 0 && m.latencyStale !== true;
-    const hl = $('#h-latency'); if (hl) hl.textContent = latFresh ? m.latency + ' ms' : '—';
 
     // 连接状态 pill 必须跟着心跳一起更新（它就是权威状态源）。
-    // 顺带同步首排版式：连上/断开会让 hero 与指标卡在「同排」和「分行」间切换。
     refreshHealthPill();
 
     renderStats(m, snap);
@@ -1551,6 +1555,9 @@
       await refreshDaemon(true);
     },
     async 'agent-refresh'() { await loadAgents(); await refreshAgentCore(); },
+    // 「三步接入」折叠：教程只对首次接入有用，接入完成后收起可让首屏直接看到客户端列表。
+    // 状态存 S.guideOpen（用户手动切换过就尊重用户选择，不再自动收起）。
+    'agent-guide'() { setGuide(!S.guideOpen); },
     async 'agent-copy-cmd'() {
       const info = S.appInfo || {};
       const cmd = `"${info.exePath || 'TD记忆守护.exe'}" --register-agents`;
@@ -1643,6 +1650,52 @@
      ============================================================ */
   const STATUS_LABEL = { installed: '已接入', missing: '未接入', absent: '未安装' };
 
+  // 接入结果的「动作」徽章文案。写入/移除/跳过/失败各有固定语义，
+  // 未知动作原样显示（新增动作时不至于变成空白）。
+  const ACTION_LABEL = {
+    '新增': '已开启', '追加': '已开启', '覆盖': '已更新', '新建': '已创建',
+    '移除': '已断开', '跳过': '无需改动', '失败': '失败',
+  };
+  // 跳过原因 → 用户能看懂的一句话（后端返回的是面向开发者/日志的原文）
+  function skipReason(detail) {
+    const d = String(detail || '');
+    if (/未安装/.test(d)) return '未安装该客户端';
+    if (/已存在|已是本应用接入|已注册|已在|已写入|已注入|patch 已存在/.test(d)) return '此前已接入';
+    if (/无 3 个|无 .* 目录/.test(d)) return '未安装对应客户端';
+    if (/无 tdai|配置文件不存在|无 .* 条目/.test(d)) return '本来就没接入';
+    if (/无 cordis\.patch/.test(d)) return '未初始化';
+    return d || '无需处理';
+  }
+  // 接入结果明细：动作徽章 + 名称 + 说明 的三列网格。
+  // 早先是 `[动作] 目标 — 说明` 的原始拼接（等宽字体、开发者口径的 `/mcp/servers/tdai`
+  // 这种路径直接摊给用户），既看不懂也和上方列表对不齐。
+  //
+  // 「跳过」行的处理：只有**用户会关心**的跳过才显示（例如"此前已接入"）；
+  // 纯噪音的（未安装的客户端、本来就没接入）直接不展示 —— 这类信息
+  // 上方列表的状态徽章已经表达过了，逐条列出来只会淹没真正的写入动作。
+  const SKIP_NOISE = /未安装|无 .* 目录|无 tdai|配置文件不存在|无 .* 条目/;
+  function renderAgentResults(results) {
+    const log = $('#agent-log');
+    if (!log) return;
+    const rows = (results || []).filter(Boolean).filter((r) => {
+      if (String(r.action) !== '跳过') return true;
+      return !SKIP_NOISE.test(String(r.detail || ''));
+    });
+    if (!rows.length) { log.style.display = 'none'; log.innerHTML = ''; return; }
+    log.style.display = 'block';
+    log.innerHTML = rows.map((r) => {
+      const act = String(r.action || '');
+      const cls = act === '失败' ? 'err' : (act === '跳过' ? 'skip' : 'ok');
+      const label = ACTION_LABEL[act] || act;
+      const detail = act === '跳过' ? skipReason(r.detail) : String(r.detail || '');
+      return `<div class="ar-res">
+        <span class="arres-act ${cls}">${esc(label)}</span>
+        <span class="arres-name" title="${esc(r.target || '')}">${esc(r.target || '')}</span>
+        <span class="arres-desc" title="${esc(detail)}">${esc(detail)}</span>
+      </div>`;
+    }).join('');
+  }
+
   // 开关切换：接入 / 断开单个客户端
   async function toggleAgent(key, enable) {
     const b = $('#b-agent');
@@ -1651,10 +1704,10 @@
       const r = await tdai.agentsToggle(key, enable);
       if (r && r.ok) {
         if (r.items) renderAgentItems(r.items);
-        const results = (r.results || []).map((x) => `[${x.action}] ${x.target} — ${x.detail}`).join('\n');
-        if (b) { b.className = 'banner show ok'; b.textContent = (enable ? '已接入 ' : '已断开 ') + key + (results ? '：' + results.replace(/\n/g, '；') : ''); }
-        const log = $('#agent-log');
-        if (log && results) { log.style.display = 'block'; log.textContent = results; }
+        renderAgentResults(r.results);
+        // 顶部横幅只报结论，不再把每条明细挤进一行（长到不可读）
+        const n = (r.results || []).length;
+        if (b) { b.className = 'banner show ok'; b.textContent = (enable ? '已接入 ' : '已断开 ') + key + (n ? `（${n} 项）` : '') + '。'; }
       } else {
         if (b) { b.className = 'banner show err'; b.textContent = (enable ? '接入 ' : '断开 ') + key + ' 失败：' + ((r && r.error) || '未知错误'); }
       }
@@ -1680,7 +1733,7 @@
           <span>${esc(it.detail || '')}${oldTip}</span>
         </div>
         <span class="agent-badge ${esc(it.status || '')}">${esc(STATUS_LABEL[it.status] || it.status)}</span>
-        <span class="agent-toggle ${on ? 'on' : ''} ${absent ? 'disabled' : ''}" title="${absent ? '未安装该客户端' : (on ? '点击断开' : '点击接入')}">
+        <span class="agent-toggle ${on ? 'on' : ''} ${absent ? 'disabled' : ''}" title="${absent ? '未安装该客户端' : (on ? '点击断开' : '点击接入')}" role="switch" aria-checked="${on ? 'true' : 'false'}" aria-disabled="${absent ? 'true' : 'false'}">
           <span class="sw"></span>${on ? '已接入' : (absent ? '未安装' : '未接入')}
         </span>
       </div>`;
@@ -1696,6 +1749,23 @@
     });
   }
 
+  // 「三步接入」折叠状态。S.guideOpen 为 null 表示"还没打算过"（让 loadAgents
+  // 按是否已接入决定默认值）；用户点过一次后就固定下来，不再被自动改写。
+  function setGuide(open) {
+    S.guideOpen = !!open;
+    const steps = $('#ag-steps');
+    const card = $('#ag-guide');
+    const btn = $('[data-act="agent-guide"]');
+    const note = $('#ag-guide-note');
+    if (steps) steps.classList.toggle('hide', !open);
+    if (card) card.classList.toggle('collapsed', !open);
+    if (note) note.textContent = open ? '首次接入按这三步走' : '已可一键接入，说明已收起';
+    if (btn) {
+      btn.textContent = open ? '收起说明' : '展开说明';
+      btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    }
+  }
+
   async function loadAgents() {
     let items = [];
     try { items = await tdai.agentsStatus(); } catch (_) { items = []; }
@@ -1703,6 +1773,9 @@
     const installed = (items || []).filter((x) => x.status === 'installed').length;
     const total = (items || []).length;
     const ac = $('#ag-clients'); if (ac) ac.textContent = `${installed} / ${total}`;
+    // 首屏默认：已经接入过就收起教程（用户来这页是看状态，不是看说明）；
+    // 一个都没接入（或者是新装的）则展开，因为这时说明才是有用的。
+    if (S.guideOpen == null) setGuide(installed === 0);
     const b = $('#b-agent');
     if (b && items && items.length) {
       const missing = items.filter((x) => x.status === 'missing').length;
@@ -1734,8 +1807,7 @@
     try {
       const { results, items } = await tdai.agentsRegister();
       if (items) renderAgentItems(items);
-      const log = $('#agent-log');
-      if (log && results) { log.style.display = 'block'; log.textContent = results.map((r) => `[${r.action}] ${r.target} — ${r.detail}`).join('\n'); }
+      renderAgentResults(results);
       const done = (results || []).filter((r) => ['新增', '追加', '覆盖'].includes(r.action)).length;
       const failed = (results || []).filter((r) => r.action === '失败').length;
       const b = $('#b-agent');
@@ -1905,8 +1977,19 @@
    * 守护卡片走了一遍"运行中/超时"的逻辑（顶部「守护探活」被写成"超时"且不再纠正，
    * 「运行时长」也开始走秒），看起来就像守护还在跑。
    * 现在把首屏渲染挂到偏好就绪之后，从第一帧起就是正确的停止态。
+   *
+   * ⚠️ 并且**不能无条件重跑 onHomeShown()**：偏好加载是异步的，用户完全可能在
+   * 它完成之前就点了 Agent / 记忆 等 tab（冷启动时很容易命中）。
+   * 若这里不管当前页照跑总览初始化，就会出现"tab 高亮在 Agent、页面却显示总览"
+   * —— 而 onHomeShown() 还会顺手把 home 页的会话刷新重新拉起来。
+   * 所以：只有当用户**确实还停在总览页**时才跑首屏渲染。
    */
+  const activeTab = () => {
+    const b = $('#tabs button.active');
+    return (b && b.dataset.tab) || 'home';
+  };
   prefsReady.catch(() => { }).then(() => {
+    if (activeTab() !== 'home') return;   // 用户已切走，首屏总览渲染让位
     onHomeShown();
     loadOverview();
   });
