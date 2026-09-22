@@ -52,8 +52,26 @@ const subTabs = uniq(matchAll(html, /data-sub="([\w-]+)"[^>]*class="active"|data
 const subPanels = uniq(matchAll(html, /data-sub="([\w-]+)"[^>]*>\s*$/gm).map((m) => m[1]));
 const subButtonNames = uniq(matchAll(html.match(/<div class="subtabs"[\s\S]*?<\/div>/)[0], /data-sub="([\w-]+)"/g).map((m) => m[1]));
 const subPanelNames = uniq(matchAll(html, /<div class="subpanel[^"]*" data-sub="([\w-]+)"/g).map((m) => m[1]));
-check('设置分类 tab：' + subButtonNames.join(' / '), subButtonNames.length === 4);
+check('设置分类 tab：' + subButtonNames.join(' / '), subButtonNames.join(',') === 'conn,update,general');
 check('每个分类都有对应子面板', subButtonNames.every((s) => subPanelNames.includes(s)) && subPanelNames.length === subButtonNames.length);
+// 设置里不再有重复的「Agent 接入」子面板 —— 它只作为顶栏独立 tab 存在
+check('设置内已无 agents 子面板（避免与顶栏 tab 重复）',
+  !subButtonNames.includes('agents') && !subPanelNames.includes('agents'));
+check('设置内无 agents 面板的残留节点',
+  !/id="agents-(list|log|register|reload)"|id="b-agents"|id="open-web-console"/.test(html));
+// 检查"活代码"而不是注释：先剥掉 // 行注释与 /* */ 块注释，
+// 否则解释性注释里提到旧 id 会误报（我就在注释里写了历史说明）。
+const jsCode = js.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+check('设置内无 agents 面板的残留绑定',
+  !/#agents-(list|log|register|reload)|'#open-web-console'/.test(jsCode));
+// 顶栏 Agent 接入功能必须完整保留（不能因为删除设置项而受影响）
+check('顶栏 Agent 接入 tab 与处理链完整',
+  /data-tab="agent"/.test(html) && /data-page="agent"/.test(html) &&
+  /id="agent-register"/.test(html) && /id="agent-list"/.test(html) && /id="b-agent"/.test(html) &&
+  /agent-refresh/.test(js) && /agent-copy-cmd/.test(js) && /agent-open-console/.test(js) &&
+  /function loadAgents\(/.test(js) && /renderAgentItems\(/.test(js));
+check('顶栏 Agent 页仍会在进入时加载状态',
+  /agent:\s*\(\)\s*=>\s*\{[^}]*loadAgents\(\)/.test(js));
 
 /* ---------- 问号提示 ---------- */
 const qCount = matchAll(html, /<span class="q">\?<span class="tip">/g).length;

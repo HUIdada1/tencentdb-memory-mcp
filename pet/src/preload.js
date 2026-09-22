@@ -20,6 +20,7 @@ contextBridge.exposeInMainWorld('tdai', {
   guardSet: (enabled) => ipcRenderer.invoke('guard-set', enabled),
   backfillStart: (opts) => ipcRenderer.invoke('backfill-start', opts),
   backfillStatus: () => ipcRenderer.invoke('backfill-status'),
+  backfillInventory: () => ipcRenderer.invoke('backfill-inventory'),
 
   // Agent 接入
   agentsStatus: () => ipcRenderer.invoke('agents-status'),

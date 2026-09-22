@@ -92,13 +92,15 @@
     });
   });
 
-  /* ---------- 设置内二级 tab（分类） ---------- */
+  /* ---------- 设置内二级 tab（分类） ----------
+   * 注意：Agent 接入不在设置里 —— 它是顶栏的独立 tab（data-page="agent"）。
+   * 这里曾有一份重复的"Agent 接入"子面板，已删除，避免两套入口维护两份状态。
+   */
   function switchSub(name) {
     $$('#subtabs button').forEach((x) => x.classList.toggle('active', x.dataset.sub === name));
     $$('.subpanel').forEach((p) => p.classList.toggle('active', p.dataset.sub === name));
     const sb = $('#tabs button[data-tab="settings"]');
     if (sb) sb.dataset.lastSub = name;
-    if (name === 'agents') loadAgents();
     if (name === 'update') loadUpdate();
   }
   $$('#subtabs button').forEach((b) => b.addEventListener('click', () => switchSub(b.dataset.sub)));
@@ -781,6 +783,20 @@
   }
 
   // 记忆页允许出现多条结果，用可读列表渲染（纯文本 JSON 太长且不好看）
+  //
+  // 分层计数的真实形态（memory_layers 不传 layer 时）：
+  //   { block_id, counts: { L0_messages: 816, L1: 392, L2: 12, L3: 1 }, total: 1221 }
+  // 早先只认 d.layers / d.L1 —— 这个形态一层都匹配不上，于是整块掉进"原始返回"
+  // 分支把 JSON 原样打出来（用户看到的正是这个）。现在显式认 counts。
+  const LAYER_META = {
+    L0_messages: { name: 'L0 · 对话原文', note: '原始对话消息，采集上传的原文层' },
+    L0: { name: 'L0 · 对话原文', note: '原始对话消息，采集上传的原文层' },
+    L1: { name: 'L1 · 事实记忆', note: '从对话里抽取的事实与偏好' },
+    L2: { name: 'L2 · 场景记忆', note: '跨会话归纳的场景认知' },
+    L3: { name: 'L3 · 人设记忆', note: '长期稳定的用户画像' },
+  };
+  const LAYER_ORDER = ['L0_messages', 'L0', 'L1', 'L2', 'L3'];
+
   function renderMemResult(r) {
     const box = $('#mem-out');
     if (!box) return;
@@ -805,7 +821,37 @@
       return;
     }
 
-    // ② 分层结构（memory_layers 的典型返回，常见形态 {layers:[{name,count}]} 或 {L1:..}）
+    // ② 分层计数（memory_layers 不传 layer 的返回：{ block_id, counts, total }）
+    const counts = d && d.counts;
+    if (counts && typeof counts === 'object') {
+      const total = Number(d.total != null ? d.total : Object.values(counts).reduce((a, b) => a + (Number(b) || 0), 0));
+      const seen = new Set();
+      const rows = [];
+      for (const k of LAYER_ORDER) {
+        if (!(k in counts) || seen.has(k)) continue;
+        seen.add(k);
+        rows.push({ key: k, n: Number(counts[k]) || 0, meta: LAYER_META[k] || { name: k, note: '' } });
+      }
+      // counts 里还有没枚举到的键：一并列出，别静默丢数据
+      for (const k of Object.keys(counts)) {
+        if (seen.has(k)) continue;
+        rows.push({ key: k, n: Number(counts[k]) || 0, meta: { name: k, note: '' } });
+      }
+      const maxN = Math.max(1, ...rows.map((x) => x.n));
+      box.innerHTML = `
+        <div class="mem-head">记忆分层结构 · 共 ${total} 条${d.block_id ? ` · 记忆块 ${esc(String(d.block_id))}` : ''}</div>
+        <div class="mem-layers">${rows.map((x) => `
+          <div class="mem-lrow">
+            <div class="mem-lname"><b>${esc(x.meta.name)}</b>${x.meta.note ? `<span>${esc(x.meta.note)}</span>` : ''}</div>
+            <div class="mem-lbar"><i style="width:${Math.round((x.n / maxN) * 100)}%"></i></div>
+            <div class="mem-ln">${x.n.toLocaleString('zh-CN')} 条</div>
+          </div>`).join('')}
+        </div>
+        <div class="mem-hint">L0 为对话原文（最大头），L1→L3 为记忆库自动蒸馏出的分层记忆，逐级递减属正常。</div>`;
+      return;
+    }
+
+    // ③ 分层结构（{layers:[{name,count}]} 或 {L1:{count}} 形态）
     const layers = (d && (d.layers || d.levels)) || null;
     const layerItems = [];
     if (Array.isArray(layers)) {
@@ -832,9 +878,9 @@
       return;
     }
 
-    // ③ 其它形态：退回原始 JSON（保证一定能看到数据，而不是空白）
+    // ④ 其它形态：退回原始 JSON（保证一定能看到数据，而不是空白）
     const raw = JSON.stringify(d === undefined ? r.data : d, null, 2);
-    box.innerHTML = raw
+    box.innerHTML = raw && raw !== '{}'
       ? `<div class="mem-head">原始返回</div><pre class="mem-raw">${esc(raw.slice(0, 8000))}</pre>`
       : '<div class="empty">返回为空（该记忆库暂无数据）</div>';
   }
@@ -901,6 +947,224 @@
     }, 2000);
   }
 
+  /* ---------- 历史会话回传：弹窗（按 agent 选择 / 全部上传） ----------
+   * 「一键上传本地记忆」不再直接开跑，而是先打开弹窗让用户看清有哪些内容、
+   * 可以只传某个 agent，也可以一键全传。选中的 agent key 走 targets 参数。
+   */
+  const UP = { inv: null, sel: new Set(), busy: false, timer: null };
+
+  const IC_CHK = '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 12.5l5 5L19.5 7"/></svg>';
+
+  const SRC_LABEL = {
+    'zcode': 'ZCode 会话库', 'zcode-db': 'ZCode 会话库',
+    'zcode-rollout': 'ZCode Rollout', 'claude-code': 'Claude Code',
+  };
+
+  function upEl(id) { return document.getElementById(id); }
+
+  function openUpModal() {
+    const m = upEl('upm-modal');
+    if (!m) return;
+    m.hidden = false;
+    UP.sel = new Set();
+    loadInventory();
+  }
+  function closeUpModal() {
+    const m = upEl('upm-modal');
+    if (m) m.hidden = true;
+  }
+
+  // 文件名过长会撑破行：目录取尾两段显示
+  function shortDir(p) {
+    const s = String(p || '').replace(/[\\/]+$/, '');
+    const parts = s.split(/[\\/]/).filter(Boolean);
+    if (parts.length <= 2) return s;
+    return '…/' + parts.slice(-2).join('/');
+  }
+
+  async function loadInventory() {
+    const list = upEl('upm-list');
+    const lead = upEl('upm-lead');
+    if (list) list.innerHTML = '<div class="empty">正在扫描本地会话…</div>';
+    if (lead) lead.textContent = '正在读取本地可上传内容…';
+    if (typeof tdai.backfillInventory !== 'function') {
+      if (list) list.innerHTML = '<div class="empty">应用版本过旧，请升级后重试</div>';
+      return;
+    }
+    let inv = null;
+    try { inv = await tdai.backfillInventory(); } catch (e) { inv = { ok: false, error: (e && e.message) || String(e) }; }
+    if (!inv || !inv.ok) {
+      if (list) list.innerHTML = `<div class="empty">读取失败：${esc((inv && inv.error) || '未知错误')}</div>`;
+      if (lead) lead.textContent = '';
+      return;
+    }
+    UP.inv = inv;
+    renderInventory();
+  }
+
+  function renderInventory() {
+    const inv = UP.inv || { items: [], total: {} };
+    const items = inv.items || [];
+    const list = upEl('upm-list');
+    const lead = upEl('upm-lead');
+    const t = inv.total || {};
+    if (lead) {
+      lead.innerHTML = `本地共扫描到 <b>${t.groups || 0}</b> 个 agent / 项目、` +
+        `<b>${t.items || 0}</b> 个会话、约 <b>${(t.msgs || 0).toLocaleString('zh-CN')}</b> 条消息。` +
+        `其中 <b>${t.pending || 0}</b> 个尚未上传。勾选后可只上传指定 agent。`;
+    }
+    if (!items.length) {
+      if (list) list.innerHTML = '<div class="empty">未扫描到可上传的会话内容</div>';
+      updateUpFooter();
+      return;
+    }
+    if (list) {
+      list.innerHTML = items.map((g) => {
+        const on = UP.sel.has(g.key);
+        const done = g.pending === 0;
+        return `<div class="up-row${on ? ' on' : ''}" data-key="${esc(g.key)}" title="${esc(g.dir || g.name)}">
+          <span class="up-ck">${IC_CHK}</span>
+          <div class="up-info">
+            <b>${esc(g.name)}</b>
+            <span>${esc(SRC_LABEL[g.source] || g.source)} · ${esc(shortDir(g.dir))}</span>
+          </div>
+          <div class="up-stat">
+            <span class="up-cnt">${g.items} 个会话 · 约 ${(g.msgs || 0).toLocaleString('zh-CN')} 条</span>
+            <span class="up-tag ${done ? '' : 'pend'}">${done ? '已上传' : '待上传 ' + g.pending}</span>
+          </div>
+        </div>`;
+      }).join('');
+      list.querySelectorAll('.up-row').forEach((row) => {
+        row.addEventListener('click', () => {
+          const k = row.dataset.key;
+          if (UP.sel.has(k)) UP.sel.delete(k); else UP.sel.add(k);
+          row.classList.toggle('on', UP.sel.has(k));
+          updateUpFooter();
+        });
+      });
+    }
+    updateUpFooter();
+  }
+
+  function selStats() {
+    const items = (UP.inv && UP.inv.items) || [];
+    let sess = 0, pend = 0;
+    for (const g of items) {
+      if (!UP.sel.has(g.key)) continue;
+      sess += g.items || 0;
+      pend += g.pending || 0;
+    }
+    return { groups: UP.sel.size, sess, pend };
+  }
+
+  function updateUpFooter() {
+    const note = upEl('upm-ft-note');
+    const qn = upEl('upm-quick-note');
+    const items = (UP.inv && UP.inv.items) || [];
+    const pendingItems = items.filter((g) => (g.pending || 0) > 0).length;
+    if (qn) qn.textContent = pendingItems ? `未上传的 agent ${pendingItems} 个` : '全部已上传过';
+    if (!note) return;
+    if (!UP.sel.size) { note.textContent = '未选择时「上传选中项」不可用；点「上传全部记忆」可一键全传。'; return; }
+    const s = selStats();
+    note.textContent = `已选 ${s.groups} 个 agent · ${s.sess} 个会话 · 其中待上传 ${s.pend} 个（已上传的会自动跳过）`;
+  }
+
+  function setSelAll(mode) {
+    const items = (UP.inv && UP.inv.items) || [];
+    UP.sel = new Set();
+    if (mode === 'all') items.forEach((g) => UP.sel.add(g.key));
+    else if (mode === 'pending') items.forEach((g) => { if ((g.pending || 0) > 0) UP.sel.add(g.key); });
+    renderInventory();
+  }
+
+  function setProgress(show, pct, text) {
+    const box = upEl('upm-progress');
+    const fill = upEl('upm-pfill');
+    const txt = upEl('upm-ptext');
+    if (box) box.hidden = !show;
+    if (fill && pct != null) fill.style.width = Math.max(0, Math.min(100, pct)) + '%';
+    if (txt && text != null) txt.textContent = text;
+  }
+
+  // 启动回传：targets 为空数组 = 全部
+  async function startUpload(targets, label) {
+    if (UP.busy) return;
+    if (typeof tdai.backfillStart !== 'function') { pushLocal('err', '应用版本过旧，请升级后重试'); return; }
+    UP.busy = true;
+    const btnGo = upEl('upm-go'), btnAll = upEl('upm-all');
+    if (btnGo) btnGo.disabled = true;
+    if (btnAll) btnAll.disabled = true;
+    setProgress(true, 3, `正在启动${label}…`);
+    try {
+      const r = await tdai.backfillStart({ targets: targets || [] });
+      if (r && r.ok === false) {
+        const msg = (r.payload && r.payload.error) || r.error || '无法启动回传';
+        setProgress(true, 100, '启动失败：' + msg);
+        pushLocal('warn', '回传启动失败：' + msg);
+        return;
+      }
+      const extra = (r && r.local) ? '（已切换为本应用进程内回传）' : '';
+      setProgress(true, 5, `回传已启动${extra}：正在解析本地会话并分批上传（已传过的自动跳过）…`);
+      pushLocal('ok', `${label}已启动，正在上传…`);
+      pollUpBackfill();
+    } catch (e) {
+      setProgress(true, 100, '启动异常：' + ((e && e.message) || e));
+    } finally {
+      UP.busy = false;
+      if (btnGo) btnGo.disabled = false;
+      if (btnAll) btnAll.disabled = false;
+    }
+  }
+
+  function pollUpBackfill() {
+    if (UP.timer || typeof tdai.backfillStatus !== 'function') return;
+    UP.timer = setInterval(async () => {
+      let st = null;
+      try {
+        const r = await tdai.backfillStatus();
+        st = r && (r.payload || r);
+      } catch (_) { return; }
+      if (!st) return;
+      const done = st.filesDone || 0, total = st.files || st.total || 0;
+      const pct = total ? Math.round((done / total) * 100) : 5;
+      const msg = st.running
+        ? `回传中：${done}/${total} · 已上传 ${st.msgs || 0} 条` + (st.current ? ` · 当前 ${st.current}` : '')
+        : (st.doneAt
+          ? `回传完成：${done}/${st.total || total} · 共 ${st.msgs || 0} 条` + (st.error ? `（告警：${st.error}）` : '')
+          : '等待中…');
+      setProgress(true, st.running ? Math.max(5, pct) : 100, msg);
+      // 同时刷新面板里的横幅，切页也能看到
+      renderBackfill(st);
+      if (!st.running) {
+        clearInterval(UP.timer); UP.timer = null;
+        pushLocal(st.error ? 'warn' : 'ok', msg);
+        loadInventory();      // 完成后重算"待上传"，让状态即时归零
+      }
+    }, 1500);
+  }
+
+  // 弹窗事件绑定
+  (function bindUpModal() {
+    const mask = upEl('upm-modal');
+    if (!mask) return;
+    const x = upEl('upm-close'), cancel = upEl('upm-cancel');
+    if (x) x.addEventListener('click', closeUpModal);
+    if (cancel) cancel.addEventListener('click', closeUpModal);
+    // 点遮罩空白处关闭（点弹窗内部不关）
+    mask.addEventListener('click', (e) => { if (e.target === mask) closeUpModal(); });
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !mask.hidden) closeUpModal(); });
+    const sa = upEl('upm-sel-all'), sn = upEl('upm-sel-none'), sp = upEl('upm-sel-pending');
+    if (sa) sa.addEventListener('click', () => setSelAll('all'));
+    if (sn) sn.addEventListener('click', () => setSelAll('none'));
+    if (sp) sp.addEventListener('click', () => setSelAll('pending'));
+    const go = upEl('upm-go'), all = upEl('upm-all');
+    if (go) go.addEventListener('click', () => {
+      if (!UP.sel.size) { setProgress(true, 0, '请先勾选要上传的 agent（或点「上传全部记忆」）'); return; }
+      startUpload(Array.from(UP.sel), `已选 ${UP.sel.size} 个 agent 的回传`);
+    });
+    if (all) all.addEventListener('click', () => startUpload([], '全部记忆的回传'));
+  })();
+
   const actions = {
     async 'memory-search'() {
       const q = $('#mem-q').value.trim(); if (!q) return;
@@ -913,26 +1177,9 @@
       const r = await tdai.toolCall('memory_layers', {});
       renderMemResult(r);
     },
+    // 「一键上传本地记忆」/「回传历史会话」：打开弹窗，由用户选择范围
     async 'backfill-start'() {
-      // 历史会话一键回传：任务在守护进程（或本应用进程，老守护无接口时自动降级）内异步跑，
-      // 这里只负责启动 + 轮询进度
-      try {
-        if (typeof tdai.backfillStart !== 'function') throw new Error('应用版本过旧，请升级后重试');
-        const r = await tdai.backfillStart({});
-        if (r && r.ok === false) {
-          const msg = (r.payload && r.payload.error) || r.error || '无法启动回传';
-          banner('b-backfill', 'warn', msg);
-          return;
-        }
-        if (r && r.local) {
-          banner('b-backfill', 'ok', '检测到旧版外部守护（无回传接口），已自动切换为本应用进程内回传：正在解析本地会话文件并分批上传…');
-        } else {
-          banner('b-backfill', 'ok', '历史回传已启动：正在解析本地会话文件并分批上传（已回传过的文件自动跳过）…');
-        }
-        pollBackfill();
-      } catch (e) {
-        banner('b-backfill', 'err', '回传启动失败：' + (e && e.message ? e.message : e));
-      }
+      openUpModal();
     },
     async 'reload-layers'() { await loadOverview(); },
     async 'sess-refresh'() { await refreshSessions(true); pushLocal('info', '已手动刷新会话列表'); },
@@ -975,7 +1222,6 @@
       link.textContent = url;
       link.addEventListener('click', (e) => { e.preventDefault(); tdai.openExternal(url); });
     }
-    $$('.port-inline').forEach((el) => { el.textContent = String(info.port); });
     const dp = $('#d-port'); if (dp) dp.textContent = `127.0.0.1:${info.port}`;
     const ap = $('#ag-port'); if (ap) ap.textContent = `127.0.0.1:${info.port}`;
   });
@@ -1213,37 +1459,9 @@
   on('#up-download', 'click', () => tdai.updateDownload());
   on('#up-install', 'click', () => tdai.updateInstall());
   on('#up-open-releases', 'click', () => tdai.updateOpenReleases());
-  on('#open-web-console', 'click', () => {
-    const port = (S.appInfo && S.appInfo.port) || 8100;
-    tdai.openExternal(`http://127.0.0.1:${port}/`);
-  });
-  // 设置页里原有的 Agent 接入面板（与独立页共用同一套数据）
-  on('#agents-register', 'click', async function () {
-    const btn = this; btn.disabled = true; btn.textContent = '接入中…';
-    try {
-      const { results, items } = await tdai.agentsRegister();
-      const list = $('#agents-list');
-      if (list && items) {
-        list.innerHTML = items.map((it) => `<div class="li">
-          <div class="li-name">${esc(it.name)}${it.detail ? `<span class="li-detail">${esc(it.detail)}</span>` : ''}</div>
-          <span class="badge ${esc(it.status)}">${esc(STATUS_LABEL[it.status] || it.status)}</span>
-        </div>`).join('');
-      }
-      const log = $('#agents-log');
-      if (log && results) { log.style.display = 'block'; log.textContent = results.map((r) => `[${r.action}] ${r.target} — ${r.detail}`).join('\n'); }
-      banner('b-agents', 'ok', `接入完成：${(results || []).length} 项结果已写入。`);
-    } catch (e) {
-      banner('b-agents', 'err', '接入失败：' + (e && e.message ? e.message : e));
-    } finally { btn.disabled = false; btn.textContent = '一键接入'; }
-  });
-  on('#agents-reload', 'click', async () => {
-    const items = await tdai.agentsStatus();
-    const list = $('#agents-list');
-    if (list) list.innerHTML = items.map((it) => `<div class="li">
-      <div class="li-name">${esc(it.name)}${it.detail ? `<span class="li-detail">${esc(it.detail)}</span>` : ''}</div>
-      <span class="badge ${esc(it.status)}">${esc(STATUS_LABEL[it.status] || it.status)}</span>
-    </div>`).join('');
-  });
+  // 注：设置页曾有一套重复的 "Agent 接入" 面板（#agents-register / #agents-reload /
+  // #open-web-console），已移除。Agent 接入统一走顶栏 tab：
+  //   #agent-register / #agent-refresh / #agent-copy-cmd / #agent-open-console
 
   /* ============================================================
      波纹反馈（原型 v3 同款）：把点击点坐标写进 --rx / --ry，

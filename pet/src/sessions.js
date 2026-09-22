@@ -2,9 +2,16 @@
 // 职责：直接读各 Agent 的会话文件，产出「进行中的会话」列表给总览页实时展示。
 // 与守护进程的采集游标相互独立：这里只读元信息（轮次/末次时间/摘要），不做上传。
 //
-// 文件布局（与 daemon/tdai-daemon.js 的 SOURCES 口径严格一致，不要凭猜测改）：
-//   ZCode CLI  : ~/.zcode/cli/agents/<sess>/<agent>/transcript.jsonl
-//   Claude Code: ~/.claude/projects/<proj>/<sid>.jsonl
+// 数据来源（按"是否还在被写入"排序，越靠前越新）：
+//   ZCode 会话库 : ~/.zcode/cli/db/db.sqlite   ← 权威源，zcode 会在聊完后异步归档写入
+//   ZCode CLI    : ~/.zcode/cli/agents/<sess>/<agent>/transcript.jsonl  （实时落盘，聊完归档进 sqlite）
+//   Claude Code  : ~/.claude/projects/<proj>/<sid>.jsonl
+//
+// ⚠️ 历史教训（2026-09-22 修复）：
+//   zcode 旧版把会话写在 agents/*/transcript.jsonl，新版改成了 sqlite 数据库。
+//   只扫文件目录会看到"最新会话停在几个月前"的假象 —— 用户每天都在用，
+//   但文件目录里的最新文件是 8 月 28 日的归档残留。
+//   实时会话页的"最近交互"必须认 sqlite，文件目录只作为兜底。
 'use strict';
 const fs = require('fs');
 const path = require('path');
@@ -13,6 +20,131 @@ const os = require('os');
 const HOME = os.homedir();
 const NOTE_MAX = 46;           // 摘要截断长度
 const TAIL_BYTES = 96 * 1024;  // 每个文件最多回读的字节数
+const SQLITE = path.join(HOME, '.zcode', 'cli', 'db', 'db.sqlite');
+const SQLITE_TTL = 3000;       // sqlite 查询节流：3s 内复用上一次结果（扫描是 4s 一轮）
+
+/* ---------- ZCode SQLite 会话库（权威源） ---------- */
+
+// node:sqlite 是 Node 22 内置模块（Experimental），Electron 主进程同样可用。
+// 拿不到就安静降级到文件扫描 —— 绝不因为 sqlite 不可用而让整个列表空白。
+let _sqliteMod;
+function sqliteMod() {
+  if (_sqliteMod !== undefined) return _sqliteMod;
+  try { _sqliteMod = require('node:sqlite'); } catch (_) { _sqliteMod = null; }
+  return _sqliteMod;
+}
+
+let _sqliteCache = { at: 0, rows: null, error: null };
+
+// 读 session 表：拿会话元信息 + 末次消息时间 + 轮次 + 末条摘要。
+// 一次 SQL 拿全，避免 N+1（426 个会话逐个查会明显卡顿）。
+function readSqliteSessions() {
+  const now = Date.now();
+  if (_sqliteCache.rows && now - _sqliteCache.at < SQLITE_TTL) return _sqliteCache.rows;
+  const mod = sqliteMod();
+  if (!mod) { _sqliteCache = { at: now, rows: [], error: 'node:sqlite 不可用' }; return []; }
+  let db;
+  try {
+    // readOnly + 不设 WAL：这是别人正在写的库，只读打开最安全
+    db = new mod.DatabaseSync(SQLITE, { readOnly: true });
+    const sql = `
+      SELECT s.id AS sid,
+             s.title AS title,
+             s.directory AS dir,
+             COALESCE(s.time_updated, s.time_created) AS upd,
+             (SELECT COUNT(*) FROM message m WHERE m.session_id = s.id) AS msgs,
+             (SELECT COUNT(*) FROM message m WHERE m.session_id = s.id
+                AND json_extract(m.data, '$.role') = 'user') AS turns,
+             (SELECT m.time_created FROM message m WHERE m.session_id = s.id
+                ORDER BY m.time_created DESC LIMIT 1) AS last_ms,
+             (SELECT substr(p.data, 1, 800) FROM part p
+                WHERE p.session_id = s.id AND json_extract(p.data, '$.type') = 'text'
+                ORDER BY p.time_created DESC LIMIT 1) AS last_part
+      FROM session s
+      ORDER BY upd DESC
+      LIMIT 200`;
+    const rows = db.prepare(sql).all();
+    _sqliteCache = { at: now, rows: rows || [], error: null };
+  } catch (e) {
+    _sqliteCache = { at: now, rows: [], error: (e && e.message) || String(e) };
+  } finally {
+    try { if (db) db.close(); } catch (_) { }
+  }
+  return _sqliteCache.rows;
+}
+
+// part.data 是 JSON 包裹：{"type":"text","text":"..."} / {"type":"reasoning","text":"..."}
+// 模型只回工具调用时没有 text 字段，此时返回空串（上层会显示 "—"）
+function textFromPart(raw) {
+  if (!raw) return '';
+  let j;
+  try { j = JSON.parse(raw); } catch (_) { return String(raw); }
+  if (!j || typeof j !== 'object') return String(j || '');
+  const t = j.text != null ? j.text : (j.content != null ? j.content : '');
+  if (typeof t === 'string') return t;
+  // content 可能是分片数组（[{type:'text',text:'..'}]）
+  if (Array.isArray(t)) {
+    return t.filter((c) => c && c.type === 'text' && c.text).map((c) => c.text).join('\n');
+  }
+  return '';
+}
+
+// sqlite 摘要常以 markdown 或"二次转义"的 JSON 片段开头，统一清成人话。
+// 有些 part 里存的 text 本身就是一段 JSON 字符串（{"type":"text","text":"..."}），
+// 解一层后还剩 `"text\":\"...` 这类残渣 —— 这里反复剥离，并用 \" 还原引号。
+function cleanNote(s) {
+  let t = String(s || '').trim();
+  for (let i = 0; i < 3; i++) {
+    // {"type":"text","text":"  /  "text\":\"  —— 两种转义形态都吃掉
+    const before = t;
+    t = t.replace(/^\s*\{\s*"[a-zA-Z_]+"\s*:\s*"[a-zA-Z_]+"\s*,\s*"[a-zA-Z_]+"\s*:\s*"?/, '');
+    t = t.replace(/^\s*"?[a-zA-Z_]+\\?"\s*:\s*\\?"?/, '');
+    if (t === before) break;
+  }
+  t = t.replace(/\\"/g, '"').replace(/\\n/g, ' ')
+       .replace(/[#*`>]+/g, '').replace(/\s+/g, ' ')
+       .replace(/^[\s"\\:]+/, '').trim();
+  return t;
+}
+
+// 会话标题：zcode 会自动起标题；没有就用工作目录名兜底
+function titleOf(row) {
+  const t = String((row && row.title) || '').trim();
+  if (t) return t;
+  const d = String((row && row.dir) || '').replace(/[\\/]+$/, '');
+  const base = d.split(/[\\/]/).pop();
+  return base || '未命名会话';
+}
+
+// sqlite 摘要优先用最后一条"纯文本"part（跳过 reasoning / tool 调用），渲染前清洗 markdown
+function noteFromRow(r) {
+  return cleanNote(textFromPart(r.last_part)).slice(0, NOTE_MAX);
+}
+
+// sqlite → 统一的会话行（与 scanOne 的输出结构对齐）
+function sqliteSessions() {
+  const rows = readSqliteSessions();
+  const out = [];
+  for (const r of rows) {
+    const lastTs = Number(r.last_ms) || Number(r.upd) || 0;
+    const turns = Number(r.turns) || 0;
+    if (!lastTs) continue;
+    out.push({
+      id: `zcode-db:${String(r.sid || '')}`,
+      source: 'zcode',
+      label: titleOf(r),
+      file: r.dir ? String(r.dir) : SQLITE,
+      turns: turns || 1,
+      msgCount: Number(r.msgs) || 0,
+      lastTs,
+      lastRole: 'assistant',
+      lastNote: noteFromRow(r),
+      size: Number(r.msgs) || 0,
+      fromDb: true,
+    });
+  }
+  return out;
+}
 
 /* ---------- 来源枚举 ---------- */
 
@@ -175,19 +307,37 @@ function scanOne(entry) {
 }
 
 // 扫描全部会话，返回按最近交互倒序的列表
+//
+// 合并策略（去重后取时间更新的一条）：
+//   ① sqlite 会话库 = 权威源（覆盖 100% 历史，zcode 归档后仍在这里）
+//   ② agents/*/transcript.jsonl = 实时落盘文件（正在对话时先写文件、聊完归档进 sqlite）
+//   同一个 sessionId 在两边都出现时，取 lastTs 更大的那份元信息。
 function scanSessions(opts) {
   const o = opts || {};
   const limit = Math.max(1, Math.min(Number(o.limit) || 40, 500));
+
+  const byKey = new Map();   // sessionKey -> 会话行
+  const rank = (s) => (s.fromDb ? 1e15 : 0) + (Number(s.lastTs) || 0);  // 时间相同时优先 sqlite
+
+  for (const s of sqliteSessions()) {
+    byKey.set(String(s.id).replace(/^zcode-db:/, ''), s);
+  }
+
   const all = zcodeFiles().concat(claudeFiles());
-  const out = [];
   const alive = new Set();
   for (const e of all) {
     alive.add(e.file);
     const r = scanOne(e);
-    if (r) out.push(r);
+    if (!r) continue;
+    // 文件来源的 id 形如 "zcode:sess_xxx:agent_yyy" —— 用 sessionId 去重，
+    // 因为 sqlite 里的 sessionId 与文件目录名同源（都是 sess_xxx）
+    const key = e.source === 'zcode' ? String(e.session || r.id) : String(r.id);
+    const prev = byKey.get(key);
+    if (!prev || rank(r) > rank(prev)) byKey.set(key, r);
   }
-  // 缓存不能无限涨：清掉本轮不再存在的文件（会话被删除/归档）
   for (const k of Array.from(scanCache.keys())) if (!alive.has(k)) scanCache.delete(k);
+
+  const out = Array.from(byKey.values());
   out.sort((a, b) => b.lastTs - a.lastTs);
   return { ok: true, files: all.length, total: out.length, sessions: out.slice(0, limit) };
 }
@@ -208,4 +358,8 @@ function cursorStats() {
   return { ok: true, count: Object.keys(raw || {}).length, bySource, seeded, pending, path: p };
 }
 
-module.exports = { scanSessions, cursorStats, zcodeFiles, claudeFiles, scanOne };
+module.exports = {
+  scanSessions, cursorStats, zcodeFiles, claudeFiles, scanOne,
+  sqliteSessions,       // sqlite 权威源（守护进程上传侧也要用它）
+  SQLITE,
+};

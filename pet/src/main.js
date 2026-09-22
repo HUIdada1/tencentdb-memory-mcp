@@ -585,6 +585,19 @@ ipcMain.handle('backfill-status', async () => {
   }
   return r;
 });
+// 可上传清单：弹窗用它列出「按 agent 分组」的本地内容
+// 守护进程有 /api/backfill/inventory 就用它的（口径与真正回传时一致）；
+// 老守护没有该接口（404）时用主进程内的同一份实现兜底 —— 结果结构完全相同。
+ipcMain.handle('backfill-inventory', async () => {
+  const r = await daemonHttp('GET', '/api/backfill/inventory');
+  if (r && r.status === 200 && r.payload && r.payload.ok) return r.payload;
+  try {
+    if (typeof dm.agentInventory !== 'function') return { ok: false, error: '当前版本不支持清单查询，请更新应用' };
+    return dm.agentInventory(dm.loadConfig());
+  } catch (e) {
+    return { ok: false, error: (e && e.message) || String(e) };
+  }
+});
 
 ipcMain.handle('agents-status', () => register.status({ home: HOME, exePath: process.execPath }));
 ipcMain.handle('agents-register', () => {

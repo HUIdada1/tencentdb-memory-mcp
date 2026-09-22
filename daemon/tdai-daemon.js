@@ -23,7 +23,7 @@ const QUEUE_DIR = path.join(DATA_DIR, 'queue');
 const LOG_PATH = path.join(DATA_DIR, 'daemon.log');
 
 const RECALL_PORT = Number(process.env.TDAI_DAEMON_PORT) || 8100;
-const APP_VER = '0.5.6';         // 与 package.json 同步；SEA exe 的版本号
+const APP_VER = '0.5.7';         // 与 package.json 同步；SEA exe 的版本号
 const REPO_API = 'https://api.github.com/repos/HUIdada1/tencentdb-memory-mcp/releases/latest';
 const RECALL_TIMEOUT_MS = 800;   // hook 链路硬超时：超时返回空，绝不阻塞对话
 const SCAN_INTERVAL_MS = 2 * 60 * 1000;  // 采集循环 2 分钟
@@ -59,9 +59,14 @@ function loadConfig() {
   );
   cfg.panelUrl = String(cfg.panelUrl || '').replace(/\/+$/, '');
   cfg.upload = Object.assign(
-    { enabledSources: { zcode: true, 'claude-code': true }, createAgentIfMissing: true },
+    { enabledSources: { zcode: true, 'zcode-db': true, 'claude-code': true }, createAgentIfMissing: true },
     disk.upload || {}, process.env.TDAI_UPLOAD_SOURCES ? JSON.parse(process.env.TDAI_UPLOAD_SOURCES) : {}
   );
+  // 老配置文件里没有 zcode-db 这一项：缺省补上，否则升级后新来源静默不采。
+  // 用户显式写 false 的尊重其选择。
+  if (cfg.upload.enabledSources && cfg.upload.enabledSources['zcode-db'] === undefined) {
+    cfg.upload.enabledSources['zcode-db'] = true;
+  }
   return cfg;
 }
 
@@ -245,11 +250,113 @@ function rolloutSources() {
   return names.filter((n) => /^model-io-sess_.*\.jsonl$/.test(n)).map((n) => path.join(root, n));
 }
 
+/* ---------- ZCode 会话库（SQLite，权威源） ----------
+ * ⚠️ 2026-09-22 新增。zcode 新版把会话历史写进 ~/.zcode/cli/db/db.sqlite
+ * （session / message / part 三张表）；agents 下的 transcript.jsonl 只是归档残留，
+ * rollout 下的 model-io jsonl 是模型 IO 调试流。只扫这两个目录会漏掉全部近期会话。
+ *
+ * 本来源是"虚拟来源"：没有真实文件，游标键取 sqlite://zcode-db/<sessionId>，
+ * 值里记 msgCount 作为水位 —— 会话追加消息时 msgCount 变大，即可增量补齐。
+ */
+const ZCODE_DB = path.join(os.homedir(), '.zcode', 'cli', 'db', 'db.sqlite');
+const ZDB_CURSOR_PREFIX = 'sqlite://zcode-db/';
+
+let _zdbMod;
+function zdbMod() {
+  if (_zdbMod !== undefined) return _zdbMod;
+  try { _zdbMod = require('node:sqlite'); } catch (_) { _zdbMod = null; }
+  return _zdbMod;
+}
+function zdbAvailable() {
+  if (!zdbMod()) return false;
+  try { return fs.statSync(ZCODE_DB).isFile(); } catch (_) { return false; }
+}
+
+// 只读打开 + 查询；任何异常都返回 []（采集静默失败，不炸守护）
+// 注意：必须写成 const mod = zdbMod(); new mod.DatabaseSync(...) ——
+// 直接 new zdbMod().DatabaseSync(...) 的优先级会踩坑，且异常信息拿不到。
+function zdbQuery(sql, params) {
+  const mod = zdbMod();
+  if (!mod || !zdbAvailable()) return [];
+  let db;
+  try {
+    db = new mod.DatabaseSync(ZCODE_DB, { readOnly: true });
+    const st = db.prepare(sql);
+    const args = params || [];
+    return args.length ? st.all(...args) : st.all();
+  } catch (e) {
+    logOnce('zdb-query', `zcode-db query failed: ${(e && e.message) || e}`);
+    return [];
+  } finally {
+    try { if (db) db.close(); } catch (_) { }
+  }
+}
+
+// 同一条错误只记一次，避免 4s 一轮扫描把日志刷爆
+const _logOnceSeen = new Set();
+function logOnce(key, msg) {
+  if (_logOnceSeen.has(key)) return;
+  _logOnceSeen.add(key);
+  log(msg);
+}
+
+// 列出「会话」作为虚拟文件（游标键 = sqlite://zcode-db/<sessionId>）
+function zcodeDbSources() {
+  if (!zdbAvailable()) return [];
+  return zdbQuery('SELECT id FROM session ORDER BY time_created ASC LIMIT 5000').map((r) => ZDB_CURSOR_PREFIX + r.id);
+}
+
+// 把一个会话的对话消息按时间序取出：只认 user / assistant 的 text part。
+// 过滤掉 metadata.source = 'todo_reminder' 这类系统注入（visibility: model-only），
+// 它们不是用户真实输入，传上去是噪音。
+function zdbSessionMessages(sid) {
+  const rows = zdbQuery(`
+    SELECT m.time_created AS ts,
+           json_extract(m.data, '$.role') AS role,
+           p.data AS part
+      FROM message m
+      JOIN part p ON p.message_id = m.id
+     WHERE m.session_id = ?
+       AND json_extract(m.data, '$.role') IN ('user','assistant')
+       AND json_extract(p.data, '$.type') = 'text'
+       AND COALESCE(json_extract(m.data, '$.metadata.visibility'), '') <> 'model-only'
+     GROUP BY p.id
+     ORDER BY m.time_created ASC, p.time_created ASC`, [sid]);
+
+  const out = [];
+  for (const r of rows) {
+    let text = '';
+    try {
+      const j = JSON.parse(r.part || '');
+      text = String((j && j.text) || '').trim();
+    } catch (_) { continue; }
+    if (!text) continue;
+    // 与其它来源口径一致：系统提醒类内容跳过
+    if (text.startsWith('<system-reminder>') || text.startsWith('<task-notification>')) continue;
+    const role = r.role === 'assistant' ? 'assistant' : 'user';
+    out.push({ role, content: text, ts: new Date(Number(r.ts) || Date.now()).toISOString() });
+  }
+  return out;
+}
+
+// 会话总消息数（游标水位）
+function zdbMsgCount(sid) {
+  const r = zdbQuery('SELECT COUNT(*) AS c FROM message WHERE session_id = ?', [sid]);
+  return (r[0] && Number(r[0].c)) || 0;
+}
+
 const SOURCES = {
   'zcode': { list: zcodeSources, parse: parseZCodeLine },
   'zcode-rollout': { list: rolloutSources, parse: parseRolloutLine },
   'claude-code': { list: claudeSources, parse: parseClaudeLine },
+  // 虚拟来源：不走"读文件行"通路，由 scanAndUpload / runBackfill 特判处理
+  'zcode-db': { list: zcodeDbSources, parse: null, virtual: true },
 };
+
+// 虚拟来源（sqlite）的会话 id 解析
+function zdbSidOf(key) {
+  return String(key || '').replace(ZDB_CURSOR_PREFIX, '');
+}
 
 /* ---------- 增量游标 ---------- */
 
@@ -374,6 +481,35 @@ async function scanAndUpload(cfg, api, state) {
     let files;
     try { files = def.list(); } catch (_) { continue; }
 
+    // 虚拟来源（zcode-db）：没有文件，游标键是 sessionId，水位是消息条数
+    if (def.virtual) {
+      for (const key of files) {
+        const sid = zdbSidOf(key);
+        const cur = cursors[key];
+        let cnt = 0;
+        try { cnt = zdbMsgCount(sid); } catch (_) { continue; }
+        if (!cur) { cursors[key] = { size: cnt, source, seeded: true }; continue; }
+        if (cnt <= (cur.size || 0)) continue;          // 无新增
+        let msgs = [];
+        try { msgs = zdbSessionMessages(sid); } catch (_) { continue; }
+        // 只补发"新增的那部分"：水位之前的已经传过
+        const fresh = msgs.slice(Math.max(0, cur.size || 0));
+        cursors[key] = { size: cnt, source, seeded: true };
+        if (!fresh.length) continue;
+        const payload = {
+          team_id: cfg.teamId,
+          agent_id: cfg.agentId,
+          session_id: `${source}-${sid}`.slice(0, 120),
+          messages: sliceMessages(fresh),
+          _source: source,
+        };
+        const r = await uploadBatch(cfg, api, payload, state);
+        if (r === true) { pushed++; state.lastPush = new Date().toISOString(); saveStatus({ lastPush: state.lastPush }); }
+        else if (r === false) enqueue(cfg, payload);
+      }
+      continue;
+    }
+
     for (const file of files) {
       const cur = cursors[file];
       let size;
@@ -409,6 +545,96 @@ async function scanAndUpload(cfg, api, state) {
   saveCursors(cursors);
   if (pushed) log(`scan: pushed ${pushed} session batches`);
   return { pushed };
+}
+
+/* ---------- 可上传清单（供控制台"手动选择上传"弹窗） ----------
+ * 把三个来源的内容按「agent」归组，每组给出：名称、来源、条目数、消息数、最近时间。
+ * 供弹窗列出可勾选项；勾选后把选中的 agent id 传回 /api/backfill 的 targets。
+ */
+function agentInventory(cfg) {
+  const cursors = loadCursors();
+  const backfilled = loadBackfilled();
+  const groups = new Map();   // key -> group
+
+  const put = (key, patch) => {
+    const g = groups.get(key) || {
+      key, name: '', source: patch.source, items: 0, msgs: 0,
+      lastTs: 0, backfilledItems: 0, cursorItems: 0,
+    };
+    Object.assign(g, patch);
+    groups.set(key, g);
+  };
+
+  // ① sqlite 会话库：按 zcode 工作目录（= 项目）归组，这才是用户心里的"agent"
+  if (zdbAvailable()) {
+    const rows = zdbQuery(`
+      SELECT s.id AS sid, s.title AS title, s.directory AS dir,
+             COALESCE(s.time_updated, s.time_created) AS upd,
+             (SELECT COUNT(*) FROM message m WHERE m.session_id = s.id) AS msgs
+        FROM session s ORDER BY upd DESC`);
+    for (const r of rows) {
+      const dir = String(r.dir || '').replace(/[\\/]+$/, '');
+      const name = dir.split(/[\\/]/).pop() || '未命名';
+      const key = 'zcode:' + (dir || name);
+      const g = groups.get(key) || {
+        key, name, source: 'zcode', items: 0, msgs: 0, lastTs: 0,
+        backfilledItems: 0, cursorItems: 0, dir,
+      };
+      g.items++;
+      g.msgs += Number(r.msgs) || 0;
+      g.lastTs = Math.max(g.lastTs, Number(r.upd) || 0);
+      if (backfilled[ZDB_CURSOR_PREFIX + r.sid]) g.backfilledItems++;
+      if (cursors[ZDB_CURSOR_PREFIX + r.sid]) g.cursorItems++;
+      groups.set(key, g);
+    }
+  }
+
+  // ② 文件来源：按"来源 + 会话目录"归组
+  for (const [src, def] of Object.entries(SOURCES)) {
+    if (def.virtual) continue;
+    let files = [];
+    try { files = def.list(); } catch (_) { continue; }
+    for (const f of files) {
+      const dir = path.dirname(f);
+      const key = src + ':' + dir;
+      const g = groups.get(key) || {
+        key, name: path.basename(dir) || src, source: src, items: 0, msgs: 0,
+        lastTs: 0, backfilledItems: 0, cursorItems: 0, dir,
+      };
+      g.items++;
+      let st = null; try { st = fs.statSync(f); } catch (_) { }
+      if (st) {
+        g.msgs += Math.max(1, Math.round(st.size / 3072));
+        g.lastTs = Math.max(g.lastTs, st.mtimeMs);
+      }
+      if (backfilled[f]) g.backfilledItems++;
+      if (cursors[f]) g.cursorItems++;
+      groups.set(key, g);
+    }
+  }
+
+  const items = Array.from(groups.values())
+    .filter((g) => g.items > 0)
+    .sort((a, b) => b.lastTs - a.lastTs)
+    .map((g) => ({
+      key: g.key, name: g.name, source: g.source, dir: g.dir || '',
+      items: g.items, msgs: g.msgs, lastTs: g.lastTs,
+      pending: Math.max(0, g.items - g.backfilledItems),
+      backfilledItems: g.backfilledItems,
+    }));
+
+  return {
+    ok: true,
+    items,
+    total: {
+      groups: items.length,
+      items: items.reduce((n, g) => n + g.items, 0),
+      pending: items.reduce((n, g) => n + g.pending, 0),
+      msgs: items.reduce((n, g) => n + g.msgs, 0),
+    },
+    sources: Object.keys(SOURCES),
+    backfilledFiles: Object.keys(backfilled).length,
+  };
 }
 
 /* ---------- 本地缓存固定块（persona + skill 目录） ---------- */
@@ -702,6 +928,13 @@ function startServer(cfg, api, cache, state) {
         res.end(JSON.stringify({ pushed: r.pushed, queueFlushed: q }));
         return;
       }
+      // 可上传清单：控制台"一键上传本地记忆"弹窗用它列出可选 agent
+      if (u.pathname === '/api/backfill/inventory') {
+        let inv;
+        try { inv = agentInventory(cfg); } catch (e) { inv = { ok: false, error: (e && e.message) || String(e) }; }
+        jsonRes(res, inv.ok ? 200 : 500, inv);
+        return;
+      }
       if (u.pathname === '/api/backfill' && req.method === 'POST') {
         const rb = await readBody(req, res);
         if (!rb.ok) return;
@@ -712,7 +945,11 @@ function startServer(cfg, api, cache, state) {
         // 这里显式再包一层 catch，任何同步抛出都不至于让响应悬空。
         let r;
         try {
-          r = startBackfill(cfg, api, state, { source: opts.source || '', filter: opts.filter || '' });
+          r = startBackfill(cfg, api, state, {
+            source: opts.source || '',
+            filter: opts.filter || '',
+            targets: Array.isArray(opts.targets) ? opts.targets : [],
+          });
         } catch (e) {
           r = { ok: false, error: (e && e.message) || String(e) };
         }
@@ -779,7 +1016,7 @@ async function runHook() {
 
 const BACKFILL_PATH = path.join(DATA_DIR, 'backfill.json');
 const STATUS_PATH = path.join(DATA_DIR, 'status.json');
-const bfJob = { running: false, startedAt: '', source: '', filter: '', files: 0, filesDone: 0, msgs: 0, current: '', error: '', doneAt: '' };
+const bfJob = { running: false, startedAt: '', source: '', filter: '', targets: [], files: 0, filesDone: 0, msgs: 0, current: '', error: '', doneAt: '' };
 
 // 跨重启保留的运行状态：最近上传时间 + 下轮采集时刻。
 // 守护重启/升级后，控制台"最近上传"不能又变回"尚未上传"、"下次采集"不能归零。
@@ -805,10 +1042,37 @@ function backfillStatus() {
   return Object.assign({}, bfJob, { backfilledFiles: Object.keys(loadBackfilled()).length });
 }
 
-async function runBackfill(cfg, api, state, { source = '', filter = '' } = {}) {
+// targets 来自控制台弹窗勾选的 agent key，形如 "zcode:AgentHub" / "claude-code:<dir>"。
+// key 空数组 = 不限制（= 全部上传）。
+//
+// 统一语义：target = "<来源>:<目录>"。命中规则 = 目录完全相同，或互为子路径。
+// 这样既支持"整个项目目录"，也支持"某个子目录"，不会因为路径分隔符差异而漏配。
+function normDir(p) {
+  return String(p || '').replace(/[\\/]+$/, '').replace(/\\/g, '/').toLowerCase();
+}
+function targetsMatchDir(targets, src, dir) {
+  if (!targets || !targets.length) return true;
+  const d = normDir(dir);
+  for (const t of targets) {
+    const s = String(t);
+    const i = s.indexOf(':');
+    const tSrc = i < 0 ? '' : s.slice(0, i);
+    const tVal = i < 0 ? s : s.slice(i + 1);
+    if (tSrc && tSrc !== src) continue;
+    if (!tVal) return true;                    // 只写了来源：整源放行
+    const v = normDir(tVal);
+    if (!d) continue;
+    if (d === v || d.startsWith(v + '/') || v.startsWith(d + '/')) return true;
+  }
+  return false;
+}
+
+async function runBackfill(cfg, api, state, { source = '', filter = '', targets = [] } = {}) {
   const backfilled = loadBackfilled();
+  const targetList = Array.isArray(targets) ? targets.filter(Boolean) : [];
   const sources = source ? [source] : Object.keys(SOURCES);
-  bfJob.running = true; bfJob.startedAt = new Date().toISOString(); bfJob.source = source || 'all'; bfJob.filter = filter;
+  bfJob.running = true; bfJob.startedAt = new Date().toISOString();
+  bfJob.source = source || 'all'; bfJob.filter = filter; bfJob.targets = targetList;
   bfJob.files = 0; bfJob.filesDone = 0; bfJob.msgs = 0; bfJob.current = ''; bfJob.error = ''; bfJob.doneAt = '';
   try {
     for (const src of sources) {
@@ -817,8 +1081,50 @@ async function runBackfill(cfg, api, state, { source = '', filter = '' } = {}) {
       let files = [];
       try { files = def.list().filter((f) => !filter || f.includes(filter)); } catch (_) { }
       bfJob.files += files.length;
+
+      // 虚拟来源（zcode-db）：按 sessionId 取全量消息，一次性回传
+      if (def.virtual) {
+        // 目标筛选需要工作目录，这里一次性把 session -> directory 映射取出来
+        let dirOf = {};
+        if (targetList.length) {
+          for (const r of zdbQuery('SELECT id, directory FROM session')) dirOf[r.id] = String(r.directory || '');
+        }
+        for (const key of files) {
+          if (bfJob.error) break;
+          if (backfilled[key]) { bfJob.filesDone++; continue; }
+          const sid = zdbSidOf(key);
+          // 勾选过滤：目标是 "zcode:<工作目录>"，与 session.directory 比对
+          if (targetList.length && !targetsMatchDir(targetList, src, dirOf[sid] || '')) { bfJob.filesDone++; continue; }
+          bfJob.current = sid;
+          let msgs = [];
+          try { msgs = zdbSessionMessages(sid); } catch (_) { continue; }
+          if (msgs.length) {
+            for (let i = 0; i < msgs.length; i += 50) {
+              const payload = {
+                team_id: cfg.teamId,
+                agent_id: cfg.agentId,
+                session_id: `backfill-${src}-${sid}`.slice(0, 120),
+                messages: sliceMessages(msgs.slice(i, i + 50)),
+                _source: src,
+              };
+              const r = await uploadBatch(cfg, api, payload, state);
+              if (r === 'skip') { bfJob.error = `${sid} 上传被拒绝（4xx），放弃该会话`; break; }
+              bfJob.msgs += payload.messages.length;
+            }
+          }
+          if (!bfJob.error) {
+            backfilled[key] = { msgs: msgs.length, at: new Date().toISOString() };
+            saveBackfilled(backfilled);
+            bfJob.filesDone++;
+          }
+          log(`backfill[db]: ${sid} → ${msgs.length} msgs`);
+        }
+        continue;
+      }
+
       for (const file of files) {
         if (bfJob.error) break;
+        if (targetList.length && !targetsMatchDir(targetList, src, path.dirname(file))) { bfJob.filesDone++; continue; }
         if (backfilled[file]) { bfJob.filesDone++; continue; } // 已回传过：跳过
         bfJob.current = path.basename(file);
         let text = '';
@@ -929,5 +1235,8 @@ module.exports = {
   runBackfill, startBackfill, backfillStatus, ensureUserId,
   agentStatus, updateCheck, consolePage, readPublicConfig, writeConfig,
   parseZCodeLine, parseClaudeLine, parseRolloutLine, sliceMessages, readNewLines,
+  zcodeDbSources, zdbSessionMessages, zdbMsgCount, zdbAvailable,
+  agentInventory, targetsMatchDir,
+  SOURCES, ZDB_CURSOR_PREFIX, ZCODE_DB,
   APP_VER, RECALL_PORT, CFG_PATH, DATA_DIR, QUEUE_DIR, LOG_PATH, SCAN_INTERVAL_MS,
 };

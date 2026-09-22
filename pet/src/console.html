@@ -320,7 +320,6 @@
   <section data-page="settings" class="page">
     <div class="subtabs" id="subtabs">
       <button data-sub="conn" class="active">记忆库连接</button>
-      <button data-sub="agents">Agent 接入</button>
       <button data-sub="update">更新</button>
       <button data-sub="general">通用</button>
     </div>
@@ -357,30 +356,6 @@
         </div>
         <div class="banner" id="b-conn"></div>
         <div class="hint">保存即写入 <code>~/.zcode/tdai-mcp.json</code>（原文件备份为 .bak）。后台守护、MCP 工具、hook 注入共用这一份配置，改完立即生效。</div>
-      </div>
-    </div>
-
-    <!-- Agent 接入 -->
-    <div class="subpanel" data-sub="agents">
-      <div class="card glass">
-        <h3>第一次使用：Agent 怎么连？</h3>
-        <div class="guide">
-          <b>装一次就永久生效</b>，之后每次对话都不用手动指定任何东西：
-          <ol>
-            <li><b>后台自动（推荐，无需额外配置）</b>：本应用已内置后台守护——运行期间自动采集各 Agent 的会话增量上传到记忆库，并在本机 <code>127.0.0.1:<span class="port-inline">8100</span></code> 提供记忆检索服务。关闭窗口后仍在托盘后台运行，配合「开机自启」即全程无感。</li>
-            <li><b>MCP 接入（让 Agent 主动检索）</b>：点「一键接入」，把 <code>tdai</code> 记忆工具写进本机已安装客户端（ZCode CLI / Claude Code / Cursor / Codex）的配置，并追加全局指令文件。之后每个新会话自动携带记忆工具，模型需要时自主调用。</li>
-            <li><b>Claude Code hook</b>：一键接入会同时注入 <code>UserPromptSubmit</code> hook——每次提问前自动检索相关记忆并注入上下文，不依赖模型主动调用。首次使用时 Claude Code 会提示「信任」，点一次即可。</li>
-          </ol>
-          <div class="hint">接入目标是本程序自身（不需要安装 Node，也不需要源码目录）。未安装的客户端会自动跳过。</div>
-        </div>
-        <div class="srow-actions">
-          <button class="btn-primary" id="agents-register">一键接入</button>
-          <button class="btn-ghost" id="agents-reload">刷新状态</button>
-          <button class="btn-ghost" id="open-web-console">打开网页控制台</button>
-        </div>
-        <div class="banner" id="b-agents"></div>
-        <div class="status-list" id="agents-list"><div class="empty">检测中…</div></div>
-        <div class="out" id="agents-log" style="display:none"></div>
       </div>
     </div>
 
@@ -439,6 +414,46 @@
     </div>
   </section>
 </main>
+
+<!-- ====== 上传本地记忆弹窗（总览 / 记忆页共用） ====== -->
+<div id="upm-modal" class="modal-mask" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="upm-title">
+    <div class="modal-hd">
+      <h3 id="upm-title">上传本地记忆</h3>
+      <button class="icon-btn modal-x" id="upm-close" title="关闭" aria-label="关闭">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </div>
+
+    <div class="modal-bd">
+      <div class="up-lead" id="upm-lead">正在读取本地可上传内容…</div>
+
+      <!-- 快捷操作 -->
+      <div class="up-quick">
+        <button class="mini" id="upm-sel-all">全选</button>
+        <button class="mini" id="upm-sel-none">全不选</button>
+        <button class="mini" id="upm-sel-pending">仅选未上传</button>
+        <span class="up-quick-note" id="upm-quick-note"></span>
+      </div>
+
+      <!-- agent 列表 -->
+      <div class="up-list" id="upm-list"><div class="empty">加载中…</div></div>
+
+      <!-- 回传进度 -->
+      <div class="up-progress" id="upm-progress" hidden>
+        <div class="up-pbar"><i id="upm-pfill"></i></div>
+        <div class="up-ptext" id="upm-ptext"></div>
+      </div>
+    </div>
+
+    <div class="modal-ft">
+      <span class="up-ft-note" id="upm-ft-note"></span>
+      <button class="btn-ghost" id="upm-cancel">取消</button>
+      <button class="btn-primary" id="upm-all">上传全部记忆</button>
+      <button class="btn-primary" id="upm-go">上传选中项</button>
+    </div>
+  </div>
+</div>
 
 <script src="console.js"></script>
 </body>
