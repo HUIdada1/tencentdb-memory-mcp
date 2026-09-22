@@ -776,6 +776,8 @@
      记忆页（本期可用功能页之一）
      ============================================================ */
   function setOut(sel, txt) { const el = $(sel); if (el) el.textContent = txt; }
+  // 需要富文本（如 .empty 占位块）时用这个 —— setOut 走 textContent，会把标签当字面量显示
+  function setOutHtml(sel, html) { const el = $(sel); if (el) el.innerHTML = html; }
   function pretty(r) {
     if (!r) return '(空)';
     if (!r.ok) return `✕ ${r.error}\n${r.hint || ''}`;
@@ -797,27 +799,123 @@
   };
   const LAYER_ORDER = ['L0_messages', 'L0', 'L1', 'L2', 'L3'];
 
-  function renderMemResult(r) {
+  /* ---------- 分页状态 ----------
+   * 两种模式的分页方式不同，这是面板能力决定的（已实测）：
+   *   layers：/chat-memory/layer 支持真 offset，返回 {items,total,limit,offset} → 服务端分页
+   *   search：/chat-memory/search 是 top-K 相似度查询，面板**忽略 offset**
+   *           （传 offset=3 返回的仍是第一条），total 只等于返回条数 → 只能客户端分页
+   * 所以这里统一存一份"当前页数据"，只是取数方式不同。
+   */
+  const MEM_PER_PAGE = 10;
+  const MEM = {
+    mode: 'search',        // 'search' | 'layers'
+    page: 1,
+    perPage: MEM_PER_PAGE,
+    total: 0,              // 服务端(分层)或客户端(检索)已知总数
+    items: [],             // 当前页要渲染的条目
+    query: '',             // 最近一次检索词（翻页时复用）
+    layer: '',             // 分层模式当前层：'' = 概览，L0~L3 = 明细
+    serverPaged: false,    // 该模式是否走服务端分页
+    loadedAt: 0,
+  };
+
+  // 时间格式化：面板给的是 ISO UTC（如 2026-09-21T17:37:15.404Z），
+  // 直接打出来又长又难读，统一转成本地 "YYYY-MM-DD HH:mm"。
+  function fmtTime(v) {
+    if (!v) return '';
+    const d = new Date(v);
+    if (isNaN(d.getTime())) return String(v);
+    const p = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+  }
+
+  // 正文取值：面板字段是 body；其余候选是为了容忍别的形态（别删，之前就是漏了 body 才打 JSON）
+  function itemBody(it) {
+    const v = it.body ?? it.content ?? it.text ?? it.memory ?? it.value;
+    if (v == null) return '';
+    return typeof v === 'string' ? v : JSON.stringify(v);
+  }
+  // 标题：L1~L3 常见 work_task / work_method 之类；L0 的 title 就是 role，别当标题重复显示
+  function itemTitle(it) {
+    const t = it.title;
+    if (!t) return '';
+    if (it.role && String(t) === String(it.role)) return '';
+    return String(t);
+  }
+  // 单条卡片：标题 + 正文 + 标签 + 分值 + 时间
+  function itemCard(it) {
+    const body = itemBody(it);
+    const title = itemTitle(it);
+    // role 色标：user(蓝) / assistant(紫) / 其它灰
+    const role = it.role ? String(it.role) : '';
+    const roleCls = role === 'user' ? 'is-user' : (role === 'assistant' ? 'is-asst' : '');
+    const score = (it.score != null && !isNaN(Number(it.score)))
+      ? Number(it.score) : null;
+    const tags = Array.isArray(it.tags) ? it.tags.filter(Boolean) : [];
+    const refs = Array.isArray(it.refs) ? it.refs.length : 0;
+
+    return `<div class="mem-item">
+      <div class="mem-itop">
+        ${role ? `<span class="mem-role ${roleCls}">${esc(role)}</span>` : ''}
+        ${title ? `<span class="mem-title">${esc(title)}</span>` : ''}
+        ${score != null ? `<span class="mem-score" title="匹配分值">${score.toFixed(2)}</span>` : ''}
+      </div>
+      <div class="mem-txt">${esc(body)}</div>
+      <div class="mem-meta">
+        ${it.created_at ? `<span class="mem-time">${esc(fmtTime(it.created_at))}</span>` : ''}
+        ${refs ? `<span class="mem-refs">${refs} 引用</span>` : ''}
+        ${tags.map((t) => `<span class="mem-tag">${esc(String(t))}</span>`).join('')}
+      </div>
+    </div>`;
+  }
+
+  // 分页控件（底部居中）：只有一页时不占位
+  function renderPager() {
+    const box = $('#mem-pager');
+    if (!box) return;
+    const totalPages = Math.max(1, Math.ceil(MEM.total / MEM.perPage));
+    if (totalPages <= 1) { box.innerHTML = ''; box.classList.remove('show'); return; }
+    const cur = Math.min(Math.max(MEM.page, 1), totalPages);
+    box.classList.add('show');
+    box.innerHTML = `
+      <button class="pg-btn" data-pg="first" ${cur <= 1 ? 'disabled' : ''} title="首页">«</button>
+      <button class="pg-btn" data-pg="prev" ${cur <= 1 ? 'disabled' : ''}>上一页</button>
+      <span class="pg-info"><b>${cur}</b> / ${totalPages}<em>共 ${MEM.total.toLocaleString('zh-CN')} 条</em></span>
+      <button class="pg-btn" data-pg="next" ${cur >= totalPages ? 'disabled' : ''}>下一页</button>
+      <button class="pg-btn" data-pg="last" ${cur >= totalPages ? 'disabled' : ''} title="末页">»</button>`;
+  }
+
+  function renderMemResult(r, opts) {
     const box = $('#mem-out');
     if (!box) return;
+    const when = opts && opts.loadedAt;
+    const stamp = when ? `<span class="mem-stamp">刷新于 ${new Date(when).toLocaleTimeString('zh-CN', { hour12: false })}</span>` : '';
     if (!r || !r.ok) {
       box.innerHTML = `<div class="empty">检索失败：${esc((r && (r.error || r.hint)) || '未知错误')}</div>`;
+      renderPager();
       return;
     }
     const d = r.data && (r.data.data || r.data);
 
-    // ① 记忆条目列表（memory_search 的典型返回）
-    const list = (d && (d.list || d.results || d.items || d.memories)) || (Array.isArray(d) ? d : null);
+    // ① 记忆条目列表（memory_search / memory_layers 传 layer 的典型返回）
+    //    形态：{ items:[{id,role,title,body,tags,refs,score,created_at}], total }
+    const list = (d && (d.items || d.list || d.results || d.memories)) || (Array.isArray(d) ? d : null);
     if (list && list.length) {
-      box.innerHTML = `<div class="mem-head">共 ${list.length} 条</div>` + list.map((it) => {
-        const txt = it.content || it.text || it.memory || it.value || JSON.stringify(it);
-        const score = (it.score != null) ? `<span class="mem-score">${Number(it.score).toFixed(2)}</span>` : '';
-        const meta = it.updated_at || it.created_at || it.source || '';
-        return `<div class="mem-item">
-          <div class="mem-txt">${esc(txt)}</div>
-          <div class="mem-meta">${score}${meta ? `<span>${esc(String(meta))}</span>` : ''}</div>
-        </div>`;
-      }).join('');
+      const isLayerDetail = !!(d && d.layer);
+      const head = [
+        isLayerDetail ? `记忆层 ${esc(String(d.layer))}` : '检索结果',
+        `本页 ${list.length} 条`,
+        MEM.total > list.length ? `共 ${MEM.total.toLocaleString('zh-CN')} 条` : '',
+      ].filter(Boolean).join(' · ');
+      box.innerHTML = `<div class="mem-head">${head}${stamp}</div>` + list.map(itemCard).join('');
+      renderPager();
+      return;
+    }
+
+    // ①' 命中但该页为空（翻过头 / 该层无数据）
+    if (list && !list.length) {
+      box.innerHTML = `<div class="empty">这一页没有内容${MEM.total ? `（共 ${MEM.total} 条）` : ''}</div>`;
+      renderPager();
       return;
     }
 
@@ -838,16 +936,20 @@
         rows.push({ key: k, n: Number(counts[k]) || 0, meta: { name: k, note: '' } });
       }
       const maxN = Math.max(1, ...rows.map((x) => x.n));
+      // 分层行可点击 → 下钻到该层明细（服务端分页）
       box.innerHTML = `
-        <div class="mem-head">记忆分层结构 · 共 ${total} 条${d.block_id ? ` · 记忆块 ${esc(String(d.block_id))}` : ''}</div>
+        <div class="mem-head">记忆分层结构 · 共 ${total} 条${d.block_id ? ` · 记忆块 ${esc(String(d.block_id))}` : ''}${stamp}</div>
         <div class="mem-layers">${rows.map((x) => `
-          <div class="mem-lrow">
+          <div class="mem-lrow" data-layer="${esc(x.key.replace(/_messages$/, ''))}" role="button" tabindex="0">
             <div class="mem-lname"><b>${esc(x.meta.name)}</b>${x.meta.note ? `<span>${esc(x.meta.note)}</span>` : ''}</div>
             <div class="mem-lbar"><i style="width:${Math.round((x.n / maxN) * 100)}%"></i></div>
             <div class="mem-ln">${x.n.toLocaleString('zh-CN')} 条</div>
           </div>`).join('')}
         </div>
-        <div class="mem-hint">L0 为对话原文（最大头），L1→L3 为记忆库自动蒸馏出的分层记忆，逐级递减属正常。</div>`;
+        <div class="mem-hint">L0 为对话原文（最大头），L1→L3 为记忆库自动蒸馏出的分层记忆，逐级递减属正常。点任意一层可查看该层明细。</div>`;
+      // 概览页没有分页
+      MEM.total = 0;
+      renderPager();
       return;
     }
 
@@ -870,37 +972,177 @@
       }
     }
     if (layerItems.length) {
-      box.innerHTML = `<div class="mem-head">记忆分层结构 · 共 ${layerItems.length} 层</div>` + layerItems.map((it) => `
+      box.innerHTML = `<div class="mem-head">记忆分层结构 · 共 ${layerItems.length} 层${stamp}</div>` + layerItems.map((it) => `
         <div class="mem-item">
           <div class="mem-lv"><b>${esc(String(it.name))}</b><span>${esc(String(it.count))} 条</span></div>
           ${it.note ? `<div class="mem-meta"><span>${esc(String(it.note))}</span></div>` : ''}
         </div>`).join('');
+      MEM.total = 0;
+      renderPager();
       return;
     }
 
     // ④ 其它形态：退回原始 JSON（保证一定能看到数据，而不是空白）
     const raw = JSON.stringify(d === undefined ? r.data : d, null, 2);
     box.innerHTML = raw && raw !== '{}'
-      ? `<div class="mem-head">原始返回</div><pre class="mem-raw">${esc(raw.slice(0, 8000))}</pre>`
+      ? `<div class="mem-head">原始返回${stamp}</div><pre class="mem-raw">${esc(raw.slice(0, 8000))}</pre>`
       : '<div class="empty">返回为空（该记忆库暂无数据）</div>';
+    MEM.total = 0;
+    renderPager();
   }
 
-  // 进入记忆页即自动加载一次分层结构，避免"页面空白"
+  // 进入记忆页即自动加载一次，避免"页面空白"
   let memLoaded = false;
+
+  // 统一的「加载」入口：按钮点击、切模式、翻页都走这里。
+  //
+  // 为什么要单独抽一层（2026-09-22 修 bug）：
+  // 旧实现里点击按钮直接 await tdai.toolCall()，有两个问题：
+  //   ① 面板不可达 / 守护是老版本时 toolCall 会 reject，异常把 #mem-out 永久钉在
+  //      "加载分层…" 上，用户看到的就是"点了没反应"；
+  //   ② 进入页面时已经自动渲染过同一份数据，点击后内容完全一样又没有任何提示，
+  //      即使成功了也像是"没反应"。
+  // 现在：加"载入中"态 → try/catch 兜底 → 渲染后写明刷新时间，让每次点击都可见。
+  function memLayersBusy(busy, btn) {
+    if (btn) { btn.disabled = !!busy; btn.classList.toggle('busy', !!busy); }
+    $$('[data-act="memory-layers"]').forEach((b) => { b.disabled = !!busy; });
+  }
+
+  // 统一调用包一层：异常收敛成 {ok:false}，绝不让 reject 逃逸出去钉住界面
+  async function memCall(tool, args) {
+    try {
+      return await tdai.toolCall(tool, args);
+    } catch (e) {
+      return { ok: false, error: (e && e.message) || String(e), hint: '面板不可达或本地服务未就绪' };
+    }
+  }
+
+  function memLoading(text) {
+    const box = $('#mem-out');
+    if (!box) return;
+    const hasContent = box.querySelector('.mem-layers, .mem-item, .mem-lrow');
+    if (!hasContent) box.innerHTML = `<div class="empty">${esc(text)}</div>`;
+  }
+
+  function memFail(r) {
+    const box = $('#mem-out');
+    if (!box) return;
+    const why = (r && (r.error || r.hint)) || '';
+    box.innerHTML = `<div class="empty">尚未取到记忆数据${why ? '：' + esc(why) : '（请先在「设置 → 记忆库连接」完成配置）'}</div>`;
+    MEM.total = 0;
+    renderPager();
+  }
+
+  // 分层模式：
+  //   无 layer → 拉四层计数概览（概览不分页）
+  //   有 layer → 拉该层明细，走**服务端分页**（面板返回真实 total，认 limit/offset）
+  async function loadMemLayers(opts) {
+    const o = opts || {};
+    const btn = o.btn || null;
+    if (o.mark) memLayersBusy(true, btn);
+    memLoading(MEM.layer ? '正在加载该层记忆…' : '正在加载记忆分层…');
+    let r;
+    if (MEM.layer) {
+      const offset = (MEM.page - 1) * MEM.perPage;
+      r = await memCall('memory_layers', { layer: MEM.layer, limit: MEM.perPage, offset });
+      MEM.serverPaged = true;
+    } else {
+      r = await memCall('memory_layers', {});
+      MEM.serverPaged = false;
+      MEM.total = 0;
+    }
+    if (o.mark) memLayersBusy(false);
+    if (r && r.ok) {
+      const d = r.data && (r.data.data || r.data);
+      // 服务端分页时用返回的 total / offset 回写状态，保证页码与实际数据一致
+      if (MEM.serverPaged && d) {
+        MEM.total = Number(d.total) || 0;
+        if (d.offset != null) MEM.page = Math.floor(Number(d.offset) / MEM.perPage) + 1;
+      }
+      renderMemResult(r, { loadedAt: Date.now() });
+    } else {
+      memFail(r);
+    }
+    return r;
+  }
+
+  // 检索模式：面板对 search **不支持 offset**（实测传 offset 无效），
+  // 所以一次拉满（面板上限 20）后客户端分页。
+  async function loadMemSearch(opts) {
+    const o = opts || {};
+    const btn = o.btn || null;
+    if (o.mark) memLayersBusy(true, btn);
+    memLoading('检索中…');
+    const args = { query: MEM.query, top_k: 20 };
+    if (MEM.layer) args.layer = MEM.layer;   // 全部层时让面板用默认（L0）
+    const r = await memCall('memory_search', args);
+    if (o.mark) memLayersBusy(false);
+    if (r && r.ok) {
+      const d = r.data && (r.data.data || r.data);
+      const all = (d && (d.items || d.list || d.results || d.memories)) || (Array.isArray(d) ? d : []);
+      MEM.serverPaged = false;
+      MEM.items = all;
+      MEM.total = all.length;
+      MEM.page = 1;
+      // 客户端切片后交给同一个渲染器（它只认识"当前页 items"）
+      const pageItems = all.slice(0, MEM.perPage);
+      renderMemResult({ ok: true, data: Object.assign({}, d, { items: pageItems }), hint: r.hint }, { loadedAt: Date.now() });
+    } else {
+      memFail(r);
+    }
+    return r;
+  }
+
+  // 翻页 / 刷新当前模式。检索模式翻页不重新请求（已在内存里），分层模式才重新取数。
+  async function memGoPage(page, opts) {
+    const totalPages = Math.max(1, Math.ceil(MEM.total / MEM.perPage));
+    const target = Math.min(Math.max(page, 1), totalPages);
+    if (target === MEM.page && !(opts && opts.force)) return;
+    MEM.page = target;
+    if (MEM.mode === 'layers') {
+      await loadMemLayers(opts);
+    } else if (MEM.serverPaged) {
+      await loadMemLayers(opts);
+    } else {
+      // 检索：本地切片渲染，不重新打面板
+      const all = MEM.items || [];
+      const pageItems = all.slice((MEM.page - 1) * MEM.perPage, MEM.page * MEM.perPage);
+      renderMemResult({ ok: true, data: { items: pageItems } }, { loadedAt: MEM.loadedAt || Date.now() });
+    }
+    const box = $('#mem-out');
+    if (box) box.scrollTop = 0;   // 翻页后回到顶部，否则停在上一页的滚动位置
+  }
+
+  // 模式/层 切换
+  function setMemMode(mode, opts) {
+    const o = opts || {};
+    const prev = MEM.mode;
+    MEM.mode = mode === 'layers' ? 'layers' : 'search';
+    MEM.page = 1;
+    // 切换模式时把"层"重置为全部层：
+    // 两个模式共用同一个选择器，若不重置，从 L1 明细切到检索会静默把 layer=L1 带过去，
+    // 用户以为在搜全库、实际只在搜 L1（这是实跑测试抓到的真实问题）。
+    if (prev !== MEM.mode && !o.keepLayer) MEM.layer = '';
+    $$('[data-memmode]').forEach((b) => b.classList.toggle('active', b.dataset.memmode === MEM.mode));
+    const q = $('#mem-q'), lsel = $('#mem-layer'), sbtn = $('[data-act="memory-search"]'), lbtn = $('[data-act="memory-layers"]');
+    const isLayers = MEM.mode === 'layers';
+    if (q) q.classList.toggle('hide', isLayers);
+    if (sbtn) sbtn.classList.toggle('hide', isLayers);
+    if (lbtn) lbtn.classList.toggle('hide', !isLayers);
+    if (lsel) { lsel.classList.toggle('hide', false); lsel.value = MEM.layer; }
+    if (!o.silent) {
+      if (isLayers) loadMemLayers({ mark: true, btn: lbtn });
+      else if (MEM.query) loadMemSearch({ mark: true, btn: sbtn });
+      else memLoading('输入关键词后回车检索。');
+    }
+  }
+
   async function onMemoryShown() {
     if (memLoaded) return;
     memLoaded = true;
-    const box = $('#mem-out');
-    if (box) box.innerHTML = '<div class="empty">正在加载记忆分层…</div>';
     try {
-      const r = await tdai.toolCall('memory_layers', {});
-      if (r && r.ok) renderMemResult(r);
-      else if (box) {
-        box.innerHTML = `<div class="empty">尚未取到记忆数据${r && (r.error || r.hint) ? '：' + esc(r.error || r.hint) : '（请先在「设置 → 记忆库连接」完成配置）'}</div>`;
-      }
-    } catch (e) {
-      if (box) box.innerHTML = `<div class="empty">加载失败：${esc(e && e.message ? e.message : String(e))}</div>`;
-    }
+      await loadMemLayers();
+    } catch (_) { /* 内部已兜底，这里只防极端情况 */ }
     // 回传状态兜底展示（有历史任务在跑则继续轮询）
     if (typeof tdai.backfillStatus === 'function') {
       try {
@@ -1166,16 +1408,21 @@
   })();
 
   const actions = {
-    async 'memory-search'() {
-      const q = $('#mem-q').value.trim(); if (!q) return;
-      setOut('#mem-out', '检索中…');
-      const r = await tdai.toolCall('memory_search', { query: q, top_k: Number($('#mem-topk').value) });
-      renderMemResult(r);
+    async 'memory-search'(btn) {
+      const q = $('#mem-q');
+      const v = q ? q.value.trim() : '';
+      if (!v) { pushLocal('warn', '请先输入检索关键词'); if (q) q.focus(); return; }
+      MEM.query = v;
+      MEM.page = 1;
+      MEM.loadedAt = Date.now();
+      await loadMemSearch({ mark: true, btn });
     },
-    async 'memory-layers'() {
-      setOut('#mem-out', '加载分层…');
-      const r = await tdai.toolCall('memory_layers', {});
-      renderMemResult(r);
+    // 「刷新」：
+    //   检索模式 → 重跑当前检索词
+    //   分层模式 → 概览时刷新计数；已下钻某层时刷新该层当前页
+    async 'memory-layers'(btn) {
+      if (MEM.mode === 'search') { await actions['memory-search'](btn); return; }
+      await loadMemLayers({ mark: true, btn });
     },
     // 「一键上传本地记忆」/「回传历史会话」：打开弹窗，由用户选择范围
     async 'backfill-start'() {
@@ -1200,12 +1447,58 @@
   };
   document.addEventListener('click', (e) => {
     const t = e.target.closest ? e.target.closest('[data-act]') : null;
-    if (t) { const act = t.dataset.act; if (actions[act]) actions[act](); }
+    // 把触发按钮作为第二个参数传进去：动作需要按钮载入态 / 禁用时用得上。
+    // 顺手挡住重复点击（连点按钮不会叠加请求）。
+    if (t) {
+      const act = t.dataset.act;
+      if (actions[act]) {
+        if (t.disabled) return;
+        try { actions[act](t); } catch (err) { pushLocal('err', `操作失败：${(err && err.message) || err}`); }
+      }
+    }
   });
 
   // 记忆页：回车即检索
   const memQ = $('#mem-q');
   if (memQ) memQ.addEventListener('keydown', (e) => { if (e.key === 'Enter') actions['memory-search'](); });
+
+  /* 记忆页：模式切换 / 层选择 / 翻页 / 分层下钻
+   * 这几组用各自的事件目标，避免和全局 [data-act] 分发器互相干扰。 */
+  document.addEventListener('click', (e) => {
+    const el = e.target.closest ? e.target.closest('[data-memmode],[data-pg],[data-layer]') : null;
+    if (!el) return;
+
+    // 搜索 / 分层 分段切换
+    if (el.dataset.memmode) { setMemMode(el.dataset.memmode); return; }
+
+    // 翻页
+    if (el.dataset.pg) {
+      const totalPages = Math.max(1, Math.ceil(MEM.total / MEM.perPage));
+      const map = { first: 1, prev: MEM.page - 1, next: MEM.page + 1, last: totalPages };
+      memGoPage(map[el.dataset.pg]);
+      return;
+    }
+
+    // 分层下钻：点某一行 → 进入该层明细（服务端分页）
+    if (el.dataset.layer) {
+      MEM.layer = el.dataset.layer;
+      MEM.page = 1;
+      // 点分层行本身就意味着要看分层明细，顺带把模式切过去（否则按钮/输入框状态对不上）
+      if (MEM.mode !== 'layers') setMemMode('layers', { silent: true, keepLayer: true });
+      const lsel = $('#mem-layer');
+      if (lsel) lsel.value = MEM.layer;
+      loadMemLayers({ mark: true });
+    }
+  });
+
+  // 层选择器：'' = 全部层（回概览）
+  const memLayerSel = $('#mem-layer');
+  if (memLayerSel) memLayerSel.addEventListener('change', () => {
+    MEM.layer = memLayerSel.value || '';
+    MEM.page = 1;
+    if (MEM.mode === 'layers') loadMemLayers({ mark: true });
+    else if (MEM.query) loadMemSearch({ mark: true });
+  });
 
   /* ============================================================
      应用信息

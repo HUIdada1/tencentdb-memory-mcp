@@ -24,12 +24,38 @@ w.tdai = {
     calls.push({ tool, args });
     // 分层计数：用真实面板返回形态（{block_id, counts, total}），
     // 保证测试覆盖的正是"曾经被当成原始 JSON 打出来"的那条分支
-    if (tool === 'memory_layers') return Promise.resolve({
-      ok: true,
-      data: { block_id: 'chat_memory-team-zn0elw0289-agt-zoav7zxdz0', counts: { L0_messages: 816, L1: 392, L2: 12, L3: 1 }, total: 1221 },
-      hint: 'L0=对话原文，L1~L3=抽取记忆',
-    });
-    if (tool === 'memory_search') return Promise.resolve({ ok: true, data: { list: [{ content: '排涝站数据库设计要点', score: 0.93 }] } });
+    if (tool === 'memory_layers') {
+      // 传 layer → 该层明细，真实面板返回 {layer, items, total, limit, offset}（支持服务端分页）
+      if (args && args.layer) {
+        const off = Number(args.offset) || 0;
+        const lim = Number(args.limit) || 10;
+        const all = [
+          // L1 明细真实字段：title/body/created_at，注意**没有 score**
+          { id: 'm_' + off + '_1', title: 'work_task', body: '第 ' + (off + 1) + ' 条：Xiaomi MiMo 接入用量统计调研当前进展，待确认 message 表 data 字段。', tags: [], refs: [], created_at: '2026-09-22T02:27:52.416Z' },
+          { id: 'm_' + off + '_2', title: 'work_method', body: '第 ' + (off + 2) + ' 条：解析 app.asar 文件树定位主进程 bundle，反查 SESSION_DIR 定义。', tags: ['调研'], refs: ['r1'], created_at: '2026-09-22T02:27:52.411Z' },
+        ];
+        return Promise.resolve({
+          ok: true,
+          data: { layer: args.layer, items: all.slice(0, Math.max(0, lim - off + off)), total: 405, limit: lim, offset: off },
+          hint: 'L0=对话原文，L1~L3=抽取记忆',
+        });
+      }
+      return Promise.resolve({
+        ok: true,
+        data: { block_id: 'chat_memory-team-zn0elw0289-agt-zoav7zxdz0', counts: { L0_messages: 816, L1: 392, L2: 12, L3: 1 }, total: 1221 },
+        hint: 'L0=对话原文，L1~L3=抽取记忆',
+      });
+    }
+    // 检索：真实返回 {items:[{id,role,title,body,tags,refs,score,created_at}], total}
+    // 造 17 条以便验证"每页 10 条 → 2 页"的客户端分页
+    if (tool === 'memory_search') {
+      const items = Array.from({ length: 17 }, (_, i) => ({
+        id: 'msg-' + i, role: i % 2 ? 'assistant' : 'user', title: i % 2 ? 'assistant' : 'user',
+        body: '第 ' + (i + 1) + ' 条检索结果正文（排涝站数据库设计要点）。',
+        tags: [i % 2 ? 'assistant' : 'user'], refs: [], score: 0.85 - i * 0.01, created_at: '2026-09-21T17:37:15.404Z',
+      }));
+      return Promise.resolve({ ok: true, data: { items, total: items.length } });
+    }
     return Promise.resolve({ ok: true, data: { skill_count: 3, memory_count: 99 } });
   },
   metricsGet: () => Promise.resolve(snap),
@@ -144,37 +170,121 @@ setTimeout(() => {
     chk('显示总条数 1221', T('#mem-out').includes('1221'), T('#mem-out').slice(0, 60));
     chk('显示各层计数', T('#mem-out').includes('816') && T('#mem-out').includes('392'));
     chk('有分层行 DOM', N('#mem-out .mem-lrow') === 4, N('#mem-out .mem-lrow') + ' 行');
+    chk('分层行可下钻（带 data-layer）', N('#mem-out .mem-lrow[data-layer]') === 4, N('#mem-out .mem-lrow[data-layer]') + ' 行');
+    // 概览不分页
+    chk('概览不分页（pager 隐藏）', !d.querySelector('#mem-pager').classList.contains('show'));
 
-    // 交互：点「一键上传本地记忆」→ 弹窗打开并列出 agent
-    const bfBtn = d.querySelector('.page[data-page="home"] [data-act="backfill-start"]');
-    if (bfBtn) bfBtn.dispatchEvent(new w.Event('click', { bubbles: true }));
+    /* ===== ⑫ 记忆卡片结构化 + 分页（本期新增）===== */
+    console.log('=== ⑫ 记忆筛选卡片结构化 + 分页 ===');
+
+    // 静态结构：旧的 5/10/20 选择器必须已移除，固定每页 10 条
+    chk('已移除 5/10/20 条数选择器', !d.querySelector('#mem-topk'));
+    chk('常量每页 10 条', js.includes('MEM_PER_PAGE = 10'));
+
+    // 下钻 L1 明细（服务端分页）
+    const l1row = Array.from(d.querySelectorAll('.mem-lrow')).find((e) => e.dataset.layer === 'L1');
+    if (l1row) l1row.dispatchEvent(new w.Event('click', { bubbles: true }));
     setTimeout(() => {
-      chk('点击后弹窗显示', !modal.hasAttribute('hidden'));
-      chk('弹窗已列出 agent 行', N('#upm-list .up-row') >= 2, N('#upm-list .up-row') + ' 行');
-      chk('agent 行展示名称与待上传标记', T('#upm-list').includes('AgentHub') && T('#upm-list').includes('待上传'), T('#upm-list').slice(0, 50));
-      chk('弹窗未自行启动回传（等用户确认）', calls.filter((c) => c.tool === 'backfillStart').length === 0);
+      const outTxt = T('#mem-out');
+      chk('明细卡片渲染出标题', outTxt.includes('work_task'), outTxt.slice(0, 60));
+      chk('明细卡片正文是摘要而非原始 JSON', !outTxt.includes('"id"') && !outTxt.includes('"body"'), outTxt.slice(0, 60));
+      chk('明细卡片时间已格式化（YYYY-MM-DD HH:mm）', /\d{4}-\d{2}-\d{2} \d{2}:\d{2}/.test(outTxt));
+      chk('明细卡片渲染标签胶囊', N('#mem-out .mem-tag') >= 1, N('#mem-out .mem-tag') + ' 个');
+      chk('无 score 的行不渲染分值', N('#mem-out .mem-score') === 0, N('#mem-out .mem-score') + ' 个');
 
-      // 交互：全选后点「上传选中项」→ 带 targets 启动
-      const sa = d.querySelector('#upm-sel-all');
-      if (sa) sa.dispatchEvent(new w.Event('click', { bubbles: true }));
-      const go = d.querySelector('#upm-go');
-      if (go) go.dispatchEvent(new w.Event('click', { bubbles: true }));
+      // 服务端分页：total=405 → 41 页，控件显示且请求带 limit/offset
+      const layerCall = calls.filter((c) => c.tool === 'memory_layers' && c.args && c.args.layer).pop();
+      chk('分层明细请求带 limit=10 offset=0', !!layerCall && layerCall.args.limit === 10 && layerCall.args.offset === 0,
+        layerCall ? JSON.stringify(layerCall.args) : '无请求');
+      chk('分页控件显示', d.querySelector('#mem-pager').classList.contains('show'));
+      chk('分页信息显示 1/41 与总数 405', T('.pg-info').includes('41') && T('.pg-info').includes('405'), T('.pg-info'));
+
+      // 翻页 → offset 应变成 10
+      const nextBtn = d.querySelector('[data-pg="next"]');
+      if (nextBtn) nextBtn.dispatchEvent(new w.Event('click', { bubbles: true }));
       setTimeout(() => {
-        const started = calls.filter((c) => c.tool === 'backfillStart');
-        chk('全选后上传会带 targets 启动', started.length >= 1 && Array.isArray(started[0].args && started[0].args.targets) && started[0].args.targets.length === 2,
-          started.length ? JSON.stringify((started[0].args || {}).targets) : '未启动');
+        const c2 = calls.filter((c) => c.tool === 'memory_layers' && c.args && c.args.layer).pop();
+        chk('翻页后请求 offset=10（服务端分页生效）', !!c2 && c2.args.offset === 10, c2 ? JSON.stringify(c2.args) : '无请求');
+        chk('翻页后页码变为 2', T('.pg-info').includes('2'), T('.pg-info'));
 
-        d.querySelector('#tabs button[data-tab="live"]').dispatchEvent(new w.Event('click', { bubbles: true }));
+        /* ===== ⑬ 搜索 / 分层模式切换 + 客户端分页 ===== */
+        console.log('=== ⑬ 搜索/分层切换 + 检索客户端分页 ===');
+        chk('有模式切换控件', N('[data-memmode]') === 2, N('[data-memmode]') + ' 个');
+        chk('有层选择器', !!d.querySelector('#mem-layer'));
+
+        const sTab = d.querySelector('[data-memmode="search"]');
+        if (sTab) sTab.dispatchEvent(new w.Event('click', { bubbles: true }));
         setTimeout(() => {
-          chk('live page 被激活', d.querySelector('.page[data-page="live"]').classList.contains('active'));
-          chk('总览页失去激活', !d.querySelector('.page[data-page="home"]').classList.contains('active'));
+          chk('切到检索模式：tab 高亮', d.querySelector('[data-memmode="search"]').classList.contains('active'));
+          chk('检索模式：隐藏关键词输入框的类被移除', !d.querySelector('#mem-q').classList.contains('hide'));
 
-          console.log('\n---------- 通过 ' + ok.length + ' / 失败 ' + bad.length + ' ----------');
-          ok.forEach((x) => console.log('  ✓ ' + x));
-          if (bad.length) { console.log(''); bad.forEach((x) => console.log('  ✗ ' + x)); }
-          process.exit(bad.length ? 1 : 0);
+          // 无输入 → 不应请求
+          const beforeCnt = calls.filter((c) => c.tool === 'memory_search').length;
+          const sBtn = d.querySelector('[data-act="memory-search"]');
+          if (sBtn) sBtn.dispatchEvent(new w.Event('click', { bubbles: true }));
+          setTimeout(() => {
+            chk('空关键词不发起检索', calls.filter((c) => c.tool === 'memory_search').length === beforeCnt);
+
+            // 输入关键词并检索：17 条 → 客户端分页为 2 页，每页 10
+            d.querySelector('#mem-q').value = '记忆';
+            if (sBtn) sBtn.dispatchEvent(new w.Event('click', { bubbles: true }));
+            setTimeout(() => {
+              chk('检索结果每页固定 10 条', N('#mem-out .mem-item') === 10, N('#mem-out .mem-item') + ' 条');
+              chk('检索结果渲染分值', N('#mem-out .mem-score') === 10, N('#mem-out .mem-score') + ' 个');
+              chk('检索结果渲染 role 色标', N('#mem-out .mem-role') === 10, N('#mem-out .mem-role') + ' 个');
+              chk('检索正文非原始 JSON', !T('#mem-out').includes('"id"'));
+              const sc = calls.filter((c) => c.tool === 'memory_search').pop();
+              chk('检索一次拉满 top_k=20', !!sc && sc.args.top_k === 20, sc ? JSON.stringify(sc.args) : '无请求');
+              // 回归：从 L1 明细切到检索时，layer 不能被静默带过去（实跑抓到过）
+              chk('切模式后 layer 已重置（不残留 L1）', !!sc && !sc.args.layer, sc ? JSON.stringify(sc.args) : '无请求');
+              chk('检索分页显示 2 页', T('.pg-info').includes('2') && T('.pg-info').includes('17'), T('.pg-info'));
+
+              // 客户端翻页：不应重复请求面板
+              const beforePage = calls.filter((c) => c.tool === 'memory_search').length;
+              const n2 = d.querySelector('[data-pg="next"]');
+              if (n2) n2.dispatchEvent(new w.Event('click', { bubbles: true }));
+              setTimeout(() => {
+                chk('检索翻页不重复请求面板（客户端切片）',
+                  calls.filter((c) => c.tool === 'memory_search').length === beforePage);
+                chk('第 2 页剩 7 条', N('#mem-out .mem-item') === 7, N('#mem-out .mem-item') + ' 条');
+                chk('末页时下一页禁用', d.querySelector('[data-pg="next"]').disabled);
+
+                // 回到弹窗测试（切回总览页）
+                d.querySelector('#tabs button[data-tab="home"]').dispatchEvent(new w.Event('click', { bubbles: true }));
+                const bfBtn = d.querySelector('.page[data-page="home"] [data-act="backfill-start"]');
+                if (bfBtn) bfBtn.dispatchEvent(new w.Event('click', { bubbles: true }));
+                setTimeout(() => {
+                  chk('点击后弹窗显示', !modal.hasAttribute('hidden'));
+                  chk('弹窗已列出 agent 行', N('#upm-list .up-row') >= 2, N('#upm-list .up-row') + ' 行');
+                  chk('agent 行展示名称与待上传标记', T('#upm-list').includes('AgentHub') && T('#upm-list').includes('待上传'), T('#upm-list').slice(0, 50));
+                  chk('弹窗未自行启动回传（等用户确认）', calls.filter((c) => c.tool === 'backfillStart').length === 0);
+
+                  const sa = d.querySelector('#upm-sel-all');
+                  if (sa) sa.dispatchEvent(new w.Event('click', { bubbles: true }));
+                  const go = d.querySelector('#upm-go');
+                  if (go) go.dispatchEvent(new w.Event('click', { bubbles: true }));
+                  setTimeout(() => {
+                    const started = calls.filter((c) => c.tool === 'backfillStart');
+                    chk('全选后上传会带 targets 启动', started.length >= 1 && Array.isArray(started[0].args && started[0].args.targets) && started[0].args.targets.length === 2,
+                      started.length ? JSON.stringify((started[0].args || {}).targets) : '未启动');
+
+                    d.querySelector('#tabs button[data-tab="live"]').dispatchEvent(new w.Event('click', { bubbles: true }));
+                    setTimeout(() => {
+                      chk('live page 被激活', d.querySelector('.page[data-page="live"]').classList.contains('active'));
+                      chk('总览页失去激活', !d.querySelector('.page[data-page="home"]').classList.contains('active'));
+
+                      console.log('\n---------- 通过 ' + ok.length + ' / 失败 ' + bad.length + ' ----------');
+                      ok.forEach((x) => console.log('  ✓ ' + x));
+                      if (bad.length) { console.log(''); bad.forEach((x) => console.log('  ✗ ' + x)); }
+                      process.exit(bad.length ? 1 : 0);
+                    }, 120);
+                  }, 120);
+                }, 400);
+              }, 120);
+            }, 150);
+          }, 120);
         }, 120);
-      }, 120);
-    }, 400);
+      }, 150);
+    }, 150);
   }, 150);
 }, 250);

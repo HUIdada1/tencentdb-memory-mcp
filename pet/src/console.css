@@ -1131,7 +1131,64 @@ input.switch:disabled{opacity:.5;cursor:not-allowed}
 /* ============================================================
    22. 记忆页结果列表
    ============================================================ */
+/* 记忆页容器：内容区独立滚动 + 分页栏常驻底部。
+   旧版是 .out 单块 overflow:auto，卡片一多分页栏会被顶出可视区。 */
+.mem-wrap{display:flex;flex-direction:column;max-height:560px;overflow:hidden}
+.mem-body{
+  flex:1 1 auto;min-height:200px;overflow:auto;
+  padding:var(--sp-4) var(--sp-5);
+  font-size:var(--fs-sm);line-height:1.65;
+  color:var(--txt-2);
+}
+
+/* 搜索 / 分层 分段切换 */
+.memtabs{
+  display:inline-flex;gap:2px;padding:2px;flex:0 0 auto;
+  border-radius:var(--r-m);background:var(--line);border:1px solid var(--line);
+}
+.memtab{
+  border:0;background:transparent;cursor:pointer;
+  padding:5px 13px;border-radius:var(--r-s);
+  font-size:var(--fs-xs);font-weight:600;color:var(--txt-3);
+  transition:background var(--dur-base) var(--ease-out-quart),color var(--dur-base) var(--ease-out-quart);
+}
+.memtab:hover{color:var(--txt)}
+.memtab.active{background:var(--panel);color:var(--brand-text);box-shadow:0 1px 3px oklch(0.35 0.055 197 / 0.10)}
+.hide{display:none !important}
+
+/* 分页栏：底部居中 */
+.mem-pager{
+  flex:0 0 auto;display:none;align-items:center;justify-content:center;gap:6px;
+  padding:10px 14px;border-top:1px solid var(--line);background:var(--panel);
+}
+.mem-pager.show{display:flex}
+.pg-btn{
+  border:1px solid var(--line);background:var(--panel);cursor:pointer;
+  min-width:32px;padding:4px 10px;border-radius:var(--r-s);
+  font-size:var(--fs-xs);color:var(--txt-2);
+  transition:all var(--dur-base) var(--ease-out-quart);
+}
+.pg-btn:hover:not(:disabled){border-color:var(--brand);color:var(--brand-text)}
+.pg-btn:disabled{opacity:.4;cursor:not-allowed}
+.pg-info{
+  display:inline-flex;align-items:baseline;gap:6px;margin:0 8px;
+  font-size:var(--fs-xs);color:var(--txt-3);font-variant-numeric:tabular-nums;
+}
+.pg-info b{color:var(--brand-text);font-size:12.5px}
+.pg-info em{font-style:normal;font-size:10.5px;color:var(--txt-3)}
+
 .mem-head{font-size:var(--fs-xs);color:var(--txt-3);letter-spacing:1px;padding:2px 0 10px}
+.mem-stamp{float:right;font-size:10.5px;color:var(--txt-3);letter-spacing:.3px}
+/* 按钮载入态：点击时给出可见反馈（旧版点完毫无变化，像坏了） */
+.btn-ghost.busy,.btn-primary.busy{opacity:.6;cursor:progress}
+.btn-ghost.busy::before,.btn-primary.busy::before{
+  content:"";display:inline-block;width:9px;height:9px;margin-right:6px;
+  border:1.6px solid currentColor;border-top-color:transparent;border-radius:50%;
+  vertical-align:-1px;animation:mem-spin .7s linear infinite;
+}
+@keyframes mem-spin{to{transform:rotate(360deg)}}
+
+/* 结构化记忆卡片：顶部（角色/标题/分值）+ 正文 + 元信息（时间/引用/标签） */
 .mem-item{
   padding:11px 13px;border-radius:var(--r-m);margin-bottom:8px;
   background:var(--line);border:1px solid var(--line);
@@ -1139,27 +1196,47 @@ input.switch:disabled{opacity:.5;cursor:not-allowed}
              background var(--dur-base) var(--ease-out-quart);
 }
 .mem-item:hover{border-color:var(--brand);background:var(--brand-softer)}
-.mem-txt{font-size:12.5px;line-height:1.65;color:var(--txt);white-space:pre-wrap;word-break:break-word}
+.mem-itop{display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap}
+.mem-role{
+  flex:0 0 auto;padding:1px 8px;border-radius:var(--r-pill);
+  font-size:10px;font-weight:600;letter-spacing:.5px;text-transform:uppercase;
+  background:var(--line);color:var(--txt-3);
+}
+.mem-role.is-user{background:var(--brand-soft);color:var(--brand-text)}
+.mem-role.is-asst{background:oklch(0.94 0.03 285);color:oklch(0.42 0.11 285)}
+.mem-title{
+  flex:1 1 auto;min-width:0;font-size:12px;font-weight:600;
+  color:var(--txt);letter-spacing:.3px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+.mem-txt{font-size:12.5px;line-height:1.7;color:var(--txt);word-break:break-word}
 .mem-meta{
-  display:flex;gap:10px;align-items:center;margin-top:7px;
-  font-size:10.5px;color:var(--txt-3);letter-spacing:.4px;
+  display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px;
+  font-size:10.5px;color:var(--txt-3);letter-spacing:.3px;
+}
+.mem-time{font-variant-numeric:tabular-nums}
+.mem-refs{opacity:.85}
+.mem-tag{
+  padding:1px 7px;border-radius:var(--r-pill);
+  background:var(--panel);border:1px solid var(--line);
+  font-size:10px;color:var(--txt-2);
 }
 .mem-score{
-  padding:1px 7px;border-radius:var(--r-pill);
+  flex:0 0 auto;padding:1px 8px;border-radius:var(--r-pill);
   background:var(--brand-soft);color:var(--brand-text);
-  font-variant-numeric:tabular-nums;font-weight:600;
+  font-size:10.5px;font-variant-numeric:tabular-nums;font-weight:600;
 }
 
 /* 记忆分层计数（L0 / L1 / L2 / L3）：名称 + 占比条 + 条数 */
 .mem-layers{display:flex;flex-direction:column;gap:8px;margin-bottom:12px}
 .mem-lrow{
   display:grid;grid-template-columns:190px 1fr 84px;
-  gap:12px;align-items:center;
+  gap:12px;align-items:center;cursor:pointer;
   padding:10px 13px;border-radius:var(--r-m);
   background:var(--panel);border:1px solid var(--line);
   transition:border-color var(--dur-base) var(--ease-out-quart);
 }
-.mem-lrow:hover{border-color:var(--brand)}
+.mem-lrow:hover{border-color:var(--brand);background:var(--brand-softer)}
 .mem-lname{display:flex;flex-direction:column;gap:2px;min-width:0}
 .mem-lname b{font-size:12.5px;color:var(--brand-text);letter-spacing:.4px;font-weight:600}
 .mem-lname span{font-size:10.5px;color:var(--txt-3);line-height:1.4}

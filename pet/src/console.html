@@ -198,15 +198,22 @@
   <!-- ====== 记忆 ====== -->
   <section data-page="memory" class="page">
     <div class="toolbar glass">
+      <div class="memtabs" role="tablist">
+        <button class="memtab active" data-memmode="search" role="tab">关键词检索</button>
+        <button class="memtab" data-memmode="layers" role="tab">分层浏览</button>
+      </div>
       <input id="mem-q" placeholder="检索对话记忆…（回车即检索）">
-      <select id="mem-topk"><option>5</option><option>10</option><option>20</option></select>
+      <select id="mem-layer"><option value="">全部层</option><option>L0</option><option>L1</option><option>L2</option><option>L3</option></select>
       <button data-act="memory-search" class="btn-primary">检索</button>
-      <button data-act="memory-layers" class="btn-ghost">L1/L2/L3 分层</button>
+      <button data-act="memory-layers" class="btn-ghost">刷新</button>
       <button data-act="backfill-start" class="btn-ghost" id="bf-btn">回传历史会话</button>
     </div>
     <div id="b-backfill" class="banner"></div>
-    <div id="mem-out" class="out glass">
-      <div class="empty">输入关键词后回车开始检索，或点「L1/L2/L3 分层」查看记忆分层结构。</div>
+    <div class="mem-wrap glass">
+      <div id="mem-out" class="mem-body">
+        <div class="empty">输入关键词后回车检索，或切到「分层浏览」查看记忆分层结构。</div>
+      </div>
+      <div id="mem-pager" class="mem-pager"></div>
     </div>
   </section>
 

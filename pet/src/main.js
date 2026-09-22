@@ -174,6 +174,7 @@ function saveConn(body) {
     restart = { ok: !(st && st.lastError), external: !!(st && st.external), error: (st && st.lastError) || '' };
     if (restart.error) metrics.pushLog('error', '守护重启失败：' + restart.error);
     else if (restart.external) metrics.pushLog('info', '端口被外部守护进程占用，已切换为外部守护模式');
+    logTakeover(st && st.takeover);
   }).catch((e) => {
     restart = { ok: false, external: false, error: (e && e.message) || String(e) };
     metrics.pushLog('error', '守护重启异常：' + restart.error);
@@ -201,6 +202,21 @@ async function testConn() {
 }
 
 /* ---------- 健康轮询（内置/外部守护都能查，答案一致） ---------- */
+
+// 把"过期守护接管"的结果写进日志，让用户看得见升级有没有真的生效。
+// 背景：本机曾长期跑着 v0.2.2 老守护，应用升到 0.5.7 后新接口静默不可用，
+// 界面上却只显示"外部守护模式"，用户无从判断自己用的到底是不是新版本。
+function logTakeover(tk) {
+  if (!tk) return;
+  if (tk.took) {
+    metrics.pushLog('ok', `已接管过期守护进程 · v${tk.externalVersion || '?'} → v${tk.self}`,
+      `检测到端口被旧版本守护占用（PID ${tk.pid}，v${tk.externalVersion || '?'}），已结束并改用当前 v${tk.self}。\n${tk.reason || ''}`);
+  } else if (tk.externalVersion && String(tk.reason || '').includes('不早于')) {
+    metrics.pushLog('info', `沿用外部守护 v${tk.externalVersion}（不早于当前版本）`);
+  } else if (tk.reason && !/非本工具/.test(tk.reason)) {
+    metrics.pushLog('warn', '守护接管未完成：' + tk.reason);
+  }
+}
 
 function broadcast(channel, payload) {
   for (const w of BrowserWindow.getAllWindows()) {
@@ -506,6 +522,7 @@ ipcMain.handle('guard-set', async (_e, enabled) => {
   if (enabled) {
     const st = await guard.start(dm);
     metrics.pushLog('ok', '守护服务已手动开启');
+    logTakeover(st && st.takeover);
     return { ok: true, running: !!st.running, external: !!st.external, enabled: true };
   }
   guard.stop();
@@ -777,9 +794,10 @@ else {
       // 用户已手动停止守护：不自动启动，界面保持"已停止"状态
       metrics.pushLog('info', '守护服务处于停止状态（右上角可重新开启）');
     } else {
-      guard.start(dm).then(() => {
+      guard.start(dm).then((st) => {
         pollHealth();
         metrics.pushLog('ok', `守护进程已就绪 · 本地服务 127.0.0.1:${guard.port()}`);
+        logTakeover(st && st.takeover);
       }).catch((e) => {
         metrics.pushLog('warn', '守护进程启动失败：' + (e && e.message));
       });
