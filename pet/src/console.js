@@ -313,8 +313,8 @@
    */
   function renderLiveSub(snap, m) {
     const lat = m.latency > 0 && m.latencyStale !== true ? m.latency + 'ms' : '—';
-    let sub = `${sanitizePanel(snap.panelUrl)} · 面板延迟 ${lat} · 链路 ${fmtSpeed(m.upSpeed)}↑ ${fmtSpeed(m.downSpeed)}↓`;
-    // 守护已停止：链路读数停摆，必须直说，否则「0 B/s↑」会被读成"正在跑但没流量"
+    let sub = `${sanitizePanel(snap.panelUrl)} · 面板延迟 ${lat}`;
+    // 守护已停止：采集停摆，必须直说，否则用户会误以为仍在上传
     if (daemonStopped()) sub += ' · 采集已停止';
     return sub;
   }

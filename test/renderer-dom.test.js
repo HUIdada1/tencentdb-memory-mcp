@@ -353,17 +353,17 @@ t('渲染：三张关键指标卡有非占位文本（会话/请求/错误）', 
   assert.deepStrictEqual(stats.map((x) => x.querySelector('b').id), ['s-sess', 's-reqs', 's-err']);
 });
 
-t('渲染：hero 副标题是实时链路读数，且没有延迟波形残留', async () => {
+t('渲染：hero 副标题保留地址/延迟，且没有链路速率与延迟波形', async () => {
   const m = mkMetrics();
   const b = boot({ snapshot: makeSnapshot(m) });
   await new Promise((r) => setTimeout(r, 30));
   b.push(makeSnapshot(m));
   await new Promise((r) => setTimeout(r, 40));
-  // 副标题口径：面板地址 · 面板延迟 Nms · 链路 X↑ Y↓（全部随心跳刷新）
+  // 副标题口径：面板地址 · 面板延迟 Nms；上下行速率在下方流量卡展示
   const sub = b.text('#live-sub');
   assert.match(sub, /panel\.example|未配置面板/, '副标题应含面板地址，实际 ' + sub);
   assert.match(sub, /面板延迟 \d+ms/, '副标题应含真实延迟，实际 ' + sub);
-  assert.match(sub, /链路 .+\/s↑ .+\/s↓/, '副标题应含上下行速率，实际 ' + sub);
+  assert.doesNotMatch(sub, /链路|\/s[↑↓]/, '副标题不应含链路上下行速率，实际 ' + sub);
   // ⚠️ 面板延迟**只保留副标题这一处**（hero 体征条里的重复项已删除）。
   //    断言"整份 DOM 里只有一个可见的延迟读数"才是这条测试真正的意图。
   assert.strictEqual(b.has('#h-latency'), false, 'hero 里的重复延迟读数 #h-latency 应已删除');

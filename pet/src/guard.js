@@ -23,10 +23,21 @@ let lastError = '';
 let startedAt = '';
 let lastLoopAt = '';
 let takeover = null;     // 最近一次接管的结果（供控制台展示）
+let uploadHandler = null; // 宿主提供的上传成功通知（daemon 自己发请求，需显式桥接）
 // 上一次 stop() 时是否处于"外部守护模式"。
 // 外部守护由别的进程提供服务，本应用停不掉它 —— 这个标记让调用方能如实说明
 // "本应用已退出守护角色，但 8100 上的服务仍在（由外部进程提供）"。
 let stoppedExternal = false;
+
+function notifyUpload(info) {
+  if (typeof uploadHandler !== 'function') return;
+  try { uploadHandler(info || {}); } catch (_) { }
+}
+
+function setUploadHandler(handler) {
+  uploadHandler = typeof handler === 'function' ? handler : null;
+  if (state) state.onUpload = notifyUpload;
+}
 
 function port() { return (mod && mod.RECALL_PORT) || 8100; }
 // 版本号来自注入的 daemon 模块；selfVerOverride 仅用于测试注入（生产环境恒为 null）
@@ -83,6 +94,7 @@ async function start(daemonModule) {
     cfg = mod.loadConfig();
     api = mod.mkApi(cfg);
     state = mod.mkState ? mod.mkState() : { startedAt: new Date().toISOString(), hookCalls: 0, lastPush: '', agentCreated: {}, queue: 0 };
+    state.onUpload = notifyUpload;
     cache = mod.mkCache(cfg, api);
   } catch (e) {
     lastError = '守护初始化失败：' + ((e && e.message) || e);
@@ -310,7 +322,7 @@ async function push() {
 }
 
 module.exports = {
-  start, stop, restart, localStatus, health, push, port,
+  start, stop, restart, localStatus, health, push, port, setUploadHandler,
   // 接管相关：gtVer / findListenPid 供测试直接调用；takeover 供控制台读取最近一次接管结果
   gtVer, findListenPid, tryTakeover,
   get takeover() { return takeover; },

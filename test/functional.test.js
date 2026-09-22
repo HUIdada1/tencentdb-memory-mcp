@@ -10,6 +10,7 @@ const { spawn } = require('child_process');
 
 const REPO = path.resolve(__dirname, '..');
 const DAEMON = path.join(REPO, 'daemon', 'tdai-daemon.js');
+const daemonModule = require(DAEMON);
 const PORT = 18100;
 const MOCK_PORT = 18999;
 const results = [];
@@ -52,6 +53,19 @@ function startMock() {
   fs.writeFileSync(cTranscript, JSON.stringify({ type: 'user', message: { role: 'user', content: '帮我看看' } }) + '\n');
 
   await startMock();
+
+  // 上传成功必须能把语义化事件交给 Electron 宿主，供实时日志展示。
+  let uploadNotice = null;
+  const directUpload = await daemonModule.uploadBatch(
+    { userId: 'user-t', upload: { createAgentIfMissing: false } },
+    async () => ({ ok: true, status: 200, v: {} }),
+    { _source: 'zcode', session_id: 'zcode-session-1', messages: [{ content: 'hello' }] },
+    { onUpload: (info) => { uploadNotice = info; } },
+  );
+  check('上传成功触发实时日志回调', directUpload === true && uploadNotice && uploadNotice.source === 'zcode'
+    && uploadNotice.sessionId === 'zcode-session-1' && uploadNotice.messageCount === 1);
+  const mainSource = fs.readFileSync(path.join(REPO, 'pet', 'src', 'main.js'), 'utf8');
+  check('主进程桥接会话上传成功日志', /guard\.setUploadHandler[\s\S]{0,1200}会话上传成功/.test(mainSource));
 
   // 2) 守护进程（临时 HOME）
   const env = { ...process.env, USERPROFILE: TH, HOME: TH, TDAI_DAEMON_PORT: String(PORT) };

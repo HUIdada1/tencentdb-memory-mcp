@@ -65,6 +65,15 @@ t('meter：失败生成 warn 日志，且含 endpoint 详情', () => {
   assert.ok(w[0].detail.includes('/skill/list'), '详情应含 endpoint');
 });
 
+t('/health 失败仍计数但不进入实时日志', () => {
+  const m = createMetrics();
+  m.meter({ dir: 'up', bytes: 0, status: 0, method: 'GET', url: 'http://127.0.0.1:8100/health', error: 'ECONNREFUSED' });
+  const s = m.snapshot();
+  assert.strictEqual(s.metrics.reqFailed, 1, '探活失败仍应计入失败请求');
+  assert.strictEqual(s.metrics.uploadFails, 1, '探活失败仍应计入上行失败');
+  assert.strictEqual(s.logs.filter((l) => l.level === 'warn').length, 0, '探活失败不应污染实时日志');
+});
+
 t('失败日志有节流（同 5s 内不重复刷屏）', () => {
   const m = createMetrics();
   for (let i = 0; i < 20; i++) m.meter({ dir: 'down', bytes: 0, status: 0, url: 'http://x/api/v1/a' });

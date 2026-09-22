@@ -23,7 +23,7 @@ const QUEUE_DIR = path.join(DATA_DIR, 'queue');
 const LOG_PATH = path.join(DATA_DIR, 'daemon.log');
 
 const RECALL_PORT = Number(process.env.TDAI_DAEMON_PORT) || 8100;
-const APP_VER = '0.5.14';         // 与 package.json 同步；SEA exe 的版本号
+const APP_VER = '0.5.15';         // 与 package.json 同步；SEA exe 的版本号
 const REPO_API = 'https://api.github.com/repos/HUIdada1/tencentdb-memory-mcp/releases/latest';
 const RECALL_TIMEOUT_MS = 800;   // hook 链路硬超时：超时返回空，绝不阻塞对话
 const SCAN_INTERVAL_MS = 2 * 60 * 1000;  // 采集循环 2 分钟
@@ -588,6 +588,18 @@ async function uploadBatch(cfg, api, payload, state) {
       });
       if (!q.ok) {
         log(`extract enqueue rejected HTTP ${q.status} ${q.v.key || ''}: ${String((q.json && q.json.message) || q.raw || '').slice(0, 200)}`);
+      }
+      // Electron 宿主无法观察 daemon 自己发出的 HTTP 请求；上传成功后
+      // 通过 state 回调把语义化事件交给宿主，供实时日志展示。
+      if (state && typeof state.onUpload === 'function') {
+        try {
+          state.onUpload({
+            source: payload._source || '',
+            sessionId: payload.session_id || '',
+            messageCount: Array.isArray(payload.messages) ? payload.messages.length : 0,
+            extractQueued: !!q.ok,
+          });
+        } catch (_) { }
       }
       return true;
     }
@@ -1500,7 +1512,7 @@ if (require.main === module) main().catch((e) => { log(`fatal: ${e.message}`); p
 // 供 Electron 应用（pet/src/guard.js）复用：同一份实现，不做二次开发
 module.exports = {
   loadConfig, missingConfig, mkApi, mkCache, mkState, startServer,
-  scanAndUpload, flushQueue, enqueue, buildRecall, hasIntent,
+  scanAndUpload, flushQueue, enqueue, buildRecall, hasIntent, uploadBatch,
   runBackfill, startBackfill, backfillStatus, ensureUserId,
   agentStatus, updateCheck, consolePage, readPublicConfig, writeConfig,
   parseZCodeLine, parseClaudeLine, parseRolloutLine, sliceMessages, readNewLines,

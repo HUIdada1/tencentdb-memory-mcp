@@ -52,6 +52,23 @@ const fmtBytes = metricsMod.fmtBytes;
 const fmtSpeed = metricsMod.fmtSpeed;
 const shortEndpoint = metricsMod.shortEndpoint;
 
+// daemon 的上传请求在独立实现里发出，不会经过 rebuildCore() 的 HTTP 观察器。
+// 由 guard 转发成功事件，确保实时日志明确告诉用户哪一批会话已上传。
+guard.setUploadHandler((info) => {
+  const sourceNames = {
+    zcode: 'ZCode CLI',
+    'zcode-db': 'ZCode 会话库',
+    'zcode-rollout': 'ZCode Rollout',
+    'claude-code': 'Claude Code',
+  };
+  const source = sourceNames[info && info.source] || (info && info.source) || '会话';
+  const count = Number(info && info.messageCount) || 0;
+  const session = info && info.sessionId ? `\n会话     : ${info.sessionId}` : '';
+  const extract = info && info.extractQueued === false ? '\n抽取入队 : 失败（原文已上传）' : '';
+  metrics.pushLog('ok', `会话上传成功 · ${source} · ${count} 条消息`,
+    `来源     : ${source}\n消息数   : ${count}${session}${extract}`);
+});
+
 /* ---------- 应用偏好（主题 / 自启 / 自动更新 / 守护开关） ---------- */
 
 function defaultPrefs() { return { ui: { theme: 'dark' }, system: { autoStart: false, guardEnabled: true }, update: { autoCheck: true } }; }

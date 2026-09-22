@@ -152,8 +152,10 @@ function createMetrics() {
       latencyAt = t;
     }
 
-    // 失败日志（连接失败/4xx/5xx），做节流避免刷屏
-    if (failed && t - lastFailLogAt > FAIL_LOG_THROTTLE_MS) {
+    // /health 是本地探活，不把它的连接失败刷进实时日志；失败计数和状态仍照常记录。
+    const silentFailure = shortEndpoint(o.url) === '/health';
+    // 其它失败日志（连接失败/4xx/5xx）做节流避免刷屏
+    if (failed && !silentFailure && t - lastFailLogAt > FAIL_LOG_THROTTLE_MS) {
       lastFailLogAt = t;
       const ep = shortEndpoint(o.url);
       const st = num(o.status);

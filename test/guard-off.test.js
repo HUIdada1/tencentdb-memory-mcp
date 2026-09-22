@@ -108,7 +108,7 @@ function boot(o) {
     await wait(2300);
     chk('② 守护运行 + 新鲜延迟 → 仍显示「已连接」（回归保护）', b.txt('#health-text') === '已连接', b.txt('#health-text'));
     chk('② 且 hero 状态文案为「实时连接正常」', b.txt('#live-text') === '实时连接正常', b.txt('#live-text'));
-    chk('② 且副标题是真实时链路读数（含延迟与上下行速率）', /面板延迟 88ms · 链路 .+↑ .+↓/.test(b.txt('#live-sub')), b.txt('#live-sub'));
+    chk('② 副标题保留面板延迟但移除链路速率', /面板延迟 88ms/.test(b.txt('#live-sub')) && !/链路|\/s[↑↓]/.test(b.txt('#live-sub')), b.txt('#live-sub'));
     // 延迟只在副标题出现一次；hero 体征条里的重复项已删除
     chk('② 运行中三张指标卡同样恒为 3 张（与停止态一致）',
       b.d.querySelectorAll('#home-top .stat-row .stat').length === 3,
