@@ -1,4 +1,4 @@
-// test/console-structure.js — 渲染层结构 + 交互验证（jsdom 实跑真实 console.html/js）
+// test/console-structure.test.js — 渲染层结构 + 交互验证（jsdom 实跑真实 console.html/js）
 // 覆盖本轮的 8 项调整：记忆页自动加载、连接状态 pill、运行时长定时器、
 //   作者信息、卡片位置与样式一致性、快速检索移除、实时会话 tab 迁移。
 'use strict';
@@ -64,11 +64,12 @@ w.tdai = {
   daemonPing: () => Promise.resolve({ ok: false }),
   backfillStart: (opts) => { calls.push({ tool: 'backfillStart', args: opts }); return Promise.resolve({ ok: true }); },
   backfillStatus: () => Promise.resolve({ ok: true, payload: { running: false, doneAt: '', files: 0, filesDone: 0, msgs: 0 } }),
+  // 上传清单夹具：用**通用占位路径**，不要写真实项目/机器路径（开源仓库里不带任何本地痕迹）
   backfillInventory: () => Promise.resolve({
     ok: true,
     items: [
-      { key: 'zcode:E:\\idea work\\AgentHub', name: 'AgentHub', source: 'zcode', dir: 'E:\\idea work\\AgentHub', items: 83, msgs: 6508, pending: 83, lastTs: Date.now() },
-      { key: 'zcode-rollout:C:\\Users\\x\\.zcode\\cli\\rollout', name: 'rollout', source: 'zcode-rollout', dir: 'C:\\Users\\x\\.zcode\\cli\\rollout', items: 3, msgs: 18304, pending: 0, lastTs: Date.now() },
+      { key: 'zcode:~/projects/demo-app', name: 'demo-app', source: 'zcode', dir: '~/projects/demo-app', items: 83, msgs: 6508, pending: 83, lastTs: Date.now() },
+      { key: 'claude-code:~/projects/api-server', name: 'api-server', source: 'claude-code', dir: '~/projects/api-server', items: 3, msgs: 18304, pending: 0, lastTs: Date.now() },
     ],
     total: { groups: 2, items: 86, pending: 83, msgs: 24812 },
   }),
@@ -256,7 +257,7 @@ setTimeout(() => {
                 setTimeout(() => {
                   chk('点击后弹窗显示', !modal.hasAttribute('hidden'));
                   chk('弹窗已列出 agent 行', N('#upm-list .up-row') >= 2, N('#upm-list .up-row') + ' 行');
-                  chk('agent 行展示名称与待上传标记', T('#upm-list').includes('AgentHub') && T('#upm-list').includes('待上传'), T('#upm-list').slice(0, 50));
+                  chk('agent 行展示名称与待上传标记', T('#upm-list').includes('demo-app') && T('#upm-list').includes('待上传'), T('#upm-list').slice(0, 50));
                   chk('弹窗未自行启动回传（等用户确认）', calls.filter((c) => c.tool === 'backfillStart').length === 0);
 
                   const sa = d.querySelector('#upm-sel-all');

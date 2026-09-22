@@ -1,4 +1,4 @@
-// test/preview-verify.js — 校验生成的预览页能真实渲染（不联网、不需 Electron）
+// test/preview-verify.test.js — 校验生成的预览页能真实渲染（不联网、不需 Electron）
 'use strict';
 const fs = require('fs');
 const path = require('path');
@@ -35,8 +35,15 @@ setTimeout(() => {
   const checks = [
     ['连接状态有文案', txt('#live-text') !== '<缺失>' && txt('#live-text').length > 0],
     ['延迟已填充', /ms/.test(txt('#h-latency'))],
-    ['上行指标卡是速率', /\/s/.test(txt('#s-up'))],
-    ['下行指标卡是速率', /\/s/.test(txt('#s-down'))],
+    // 副标题是唯一的实时链路读数（面板地址 / 延迟 / 上下行速率）
+    ['副标题含实时链路读数', /面板延迟 .+ · 链路 .+↑ .+↓/.test(txt('#live-sub')), txt('#live-sub')],
+    // 已删除的重复展示：延迟波形 / 面板卡 / 三张重复指标卡
+    ['无延迟波形残留', n('#spark-line') === 0],
+    ['无「记忆库面板」卡', txt('#h-panel') === '<缺失>'],
+    ['无重复的上下行速度卡', txt('#s-up') === '<缺失>' && txt('#s-down') === '<缺失>'],
+    ['无重复的连接状态卡', txt('#s-status') === '<缺失>'],
+    ['指标卡只剩 3 张', n('.home-top .stat-row .stat') === 3, String(n('.home-top .stat-row .stat'))],
+    ['首排与指标卡同排（已分半）', (d.querySelector('#home-split') || {}).className && d.querySelector('#home-split').classList.contains('split')],
     ['请求数已填充', /^\d+$/.test(txt('#s-reqs'))],
     ['会话列表有行', n('#sess-list .sess-row') >= 3],
     ['会话摘要已渲染', d.querySelector('#sess-list').textContent.includes('审查完成')],
@@ -51,7 +58,6 @@ setTimeout(() => {
     ['端口已填充', /127\.0\.0\.1:\d+/.test(txt('#d-port'))],
     ['上行柱图有柱', n('#up-bars i') > 0],
     ['下行柱图有柱', n('#down-bars i') > 0],
-    ['延迟波形有采样点', (d.querySelector('#spark-line').getAttribute('points') || '').split(' ').filter(Boolean).length >= 2],
     ['可见 tab 为 5 个（含实时会话）', Array.from(d.querySelectorAll('#tabs button')).map((b) => b.dataset.tab).join(',') === 'home,memory,live,agent,settings'],
     ['隐藏 tab 不可见', !d.querySelector('#tabs button[data-tab="skills"]')],
     ['总览已无快速检索', !d.querySelector('#qs-input')],

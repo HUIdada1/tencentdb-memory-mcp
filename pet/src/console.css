@@ -889,9 +889,29 @@ input.switch:disabled{opacity:.5;cursor:not-allowed}
 /* ============================================================
    16. 总览 · ① 连接体征条
    ============================================================ */
+/* ------------------------------------------------------------
+   总览首排：连接体征条（半宽）+ 关键指标卡（其余半宽）
+   外层 #home-split 用 flex-wrap 做「整行 / 分行」两态：
+     .split   → hero 与 stat-row 各 flex:1 1 0，指标卡 3 列 2 行
+     .nosplit → hero 与 stat-row 各 flex:1 1 100%，各占整行（未连接时的降级版式）
+   两态由 console.js 按守护/连接状态切换。
+   ------------------------------------------------------------ */
+.home-top{margin-bottom:14px}
+.home-top>.hero{margin-bottom:0;box-sizing:border-box;min-width:0}
+.home-top>.stat-row{margin-bottom:0;align-content:flex-start}
+.home-top.split>.hero{flex:1 1 0;min-width:300px}
+.home-top.split>.stat-row{flex:1 1 0}
+.home-top.nosplit>.hero,
+.home-top.nosplit>.stat-row{flex:1 1 100%}
+
+/* 「连接状态 / 上传速度 / 下传速度」三张卡已删除（与 hero 体征条、上下行流量卡重复）。
+   卡片数由 6 变 3，这里同步收窄最小宽度，否则会在半宽里被挤成单列。 */
+.home-top .stat-row>.stat{min-width:118px}
+.home-top.nosplit .stat-row>.stat{min-width:158px}
+
 .hero{
-  display:grid;grid-template-columns:auto 1fr auto;gap:var(--sp-4);align-items:center;
-  padding:14px var(--sp-4);border-radius:var(--r-l);margin-bottom:14px;
+  display:grid;grid-template-columns:auto 1fr;gap:var(--sp-3) var(--sp-4);align-items:center;
+  padding:12px var(--sp-4);border-radius:var(--r-l);
 }
 .hero .live{display:flex;align-items:center;gap:var(--sp-3);min-width:190px}
 .live-badge{position:relative;width:14px;height:14px;flex:0 0 14px}
@@ -914,7 +934,7 @@ input.switch:disabled{opacity:.5;cursor:not-allowed}
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
 }
 
-.hero-kv{display:flex;gap:22px;flex-wrap:wrap}
+.hero-kv{display:flex;gap:22px;flex-wrap:wrap;min-width:0}
 .hero-kv>div{display:flex;flex-direction:column;gap:2px;min-width:0}
 .hero-kv label{font-size:10px;color:var(--txt-3);letter-spacing:.3px}
 .hero-kv b{
@@ -922,9 +942,6 @@ input.switch:disabled{opacity:.5;cursor:not-allowed}
   white-space:nowrap;font-variant-numeric:tabular-nums;
 }
 
-.spark-wrap{display:flex;flex-direction:column;gap:3px;width:230px}
-.spark-wrap label{font-size:10px;color:var(--txt-3)}
-.spark-wrap svg{width:100%;height:44px;display:block}
 
 /* ============================================================
    17. 总览 · ② 关键指标卡
@@ -953,7 +970,9 @@ input.switch:disabled{opacity:.5;cursor:not-allowed}
 .stat.err b{color:var(--err-text)}
 
 /* 关键时刻：保证「累计请求」「失败请求」等卡片尺寸完全一致。
- * 全部 .stat 共用同一套盒模型；这里显式锁定，防止后续新增卡片时被撑开不一致。 */
+ * 全部 .stat 共用同一套盒模型；这里显式锁定，防止后续新增卡片时被撑开不一致。
+ * 注意：总览首排的指标卡由 .home-top 的规则（半宽时收窄到 118px）覆盖，
+ *       选择器优先级见上方 16 节，改动时两处要一起看。 */
 .stat-row>.stat{flex:1 1 0;min-width:158px;box-sizing:border-box}
 .stat-row>.stat b{white-space:nowrap}
 
@@ -1479,13 +1498,14 @@ input.switch:disabled{opacity:.5;cursor:not-allowed}
 /* ============================================================
    29. 响应式（窄窗口）
    ============================================================ */
-@media (max-width:1000px){
-  .hero{grid-template-columns:1fr}
-  .spark-wrap{width:100%}
+/* 窄窗口：首排无法再分半（hero 里两列 + 四宫格体征需要约 560px），
+   强制退回整行版式 —— 两行各占满宽，不换行，保住卡片的最小可用宽度。 */
+@media (max-width:1120px){
+  .home-top>.hero,
+  .home-top>.stat-row{flex:1 1 100%}
+  .home-top .stat-row>.stat{min-width:158px}
 }
 @media (max-width:980px){
-  .hero{grid-template-columns:1fr}
-  .spark-wrap{width:100%}
   .sess-head,.sess-row{grid-template-columns:1.4fr 76px 56px 84px}
   .sess-head span:last-child,.sess-row .sess-sum{display:none}
 }

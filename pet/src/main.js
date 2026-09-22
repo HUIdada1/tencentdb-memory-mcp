@@ -114,11 +114,15 @@ const HTTP_HDR_DOWN = 200;  // 响应头典型开销
  * 以前 console.js 读 snap.panelOk / snap.daemonOk，但主进程从未提供这两个字段，
  * 导致判据恒为 undefined，连接状态卡与右上角 pill 永远无法正确变化。
  * 现在由主进程权威维护：
- *   panelOk    = 最近一次面板往返是否成功（连接失败或 4xx/5xx 记为 false）
- *   panelError = 失败原因（面板不可达 / HTTP 状态码）
- *   daemonOk   = 最近一次守护探活是否成功
+ *   panelOk       = 最近一次面板往返是否**业务成功**（连接失败 / 4xx / 5xx 都记 false）
+ *   panelAuthFail = 该次失败是否为鉴权问题（HTTP 401/403）
+ *                   → 让 UI 区分「地址错了/面板挂了」与「地址对但 key 不行」，
+ *                     后者不该显示"连接失败"（用户会跑去改地址，越改越乱）。
+ *   panelError    = 失败原因（不可达 / 认证失败 / HTTP 状态码）
+ *   daemonOk      = 最近一次守护探活是否成功
  */
 let panelOk = null;                 // null = 尚无结论
+let panelAuthFail = false;          // 最近一次往返是否因鉴权失败（401/403）
 let panelError = '';
 let panelOkAt = 0;
 let daemonOk = null;
@@ -133,28 +137,38 @@ function rebuildCore() {
     },
     _onHttp: (info) => {
       const st = info.status == null ? 0 : info.status;
-      const ok = st >= 200 && st < 300;
+      // httpOk = 拿到了 2xx（仅用于"这次往返成不成功"的计量展示）
+      const httpOk = st >= 200 && st < 300;
       const ep = shortEndpoint(info.url);
       const dir = info.method === 'GET' ? 'down' : 'up';
       const upBytes = (info.reqBytes || 0) + HTTP_HDR_UP;
       const downBytes = (info.resBytes || 0) + HTTP_HDR_DOWN;
 
       metrics.meter({ dir: 'up', bytes: upBytes, ms: info.ms, status: st, url: info.url, method: info.method, error: info.error });
-      // 只有"真正拿到响应"的往返才算面板延迟样本（2xx/4xx/5xx 都算——服务端答复了就说明可达）
-      metrics.meter({ dir: 'down', bytes: downBytes, ms: info.ms, status: st, url: info.url, method: info.method, error: info.error, latencySample: ok });
+      // 延迟样本：面板**答复了**就算（2xx/4xx/5xx 都算，说明可达）；连接失败不算
+      metrics.meter({ dir: 'down', bytes: downBytes, ms: info.ms, status: st, url: info.url, method: info.method, error: info.error, latencySample: httpOk });
       metrics.endTask(dir, {
-        state: ok ? 'done' : 'error',
+        state: httpOk ? 'done' : 'error',
         bytes: dir === 'up' ? upBytes : downBytes,
         ms: info.ms, status: st, url: info.url, method: info.method,
       });
 
-      // 面板健康：任何一次真实往返都能给出结论（连接失败/5xx 都算不可达）
-      panelOk = ok;
+      // 面板健康：**分层判定**，别把 401/403 说成"连接失败"（地址是对的！）
+      //   panelOk=true  → 面板可达且本次请求业务成功
+      //   panelOk=false + panelAuthFail=true → 面板活着，是 key/权限的问题（UI 要说"认证失败"）
+      //   panelOk=false + panelAuthFail=false → 真的不可达 / 服务端错误
+      // 注：本观察者只看得到 HTTP 状态码（拿不到 body 里的业务 code），
+      //     所以这里以 HTTP 401/403 作为鉴权失败的判据；更细的业务码判定见 core/panel-codes.js。
+      panelAuthFail = (st === 401 || st === 403);
+      panelOk = httpOk;
       panelOkAt = Date.now();
-      panelError = ok ? '' : (st === 0 ? '面板不可达（连接失败或超时）' : `面板返回 HTTP ${st}`);
+      panelError = httpOk ? ''
+        : st === 0 ? '面板不可达（连接失败或超时）'
+          : panelAuthFail ? `认证失败（HTTP ${st}）：userKey 失效或权限不足`
+            : `面板返回 HTTP ${st}`;
 
-      if (ok) {
-        metrics.pushLog('ok', `${ok && info.method === 'GET' ? '检索' : '提交'}成功 · ${ep} · ${info.ms}ms`,
+      if (httpOk) {
+        metrics.pushLog('ok', `${info.method === 'GET' ? '检索' : '提交'}成功 · ${ep} · ${info.ms}ms`,
           `HTTP ${st}\nendpoint : ${ep}\n方法     : ${info.method}\n上行     : ${fmtBytes(upBytes)}\n下行     : ${fmtBytes(downBytes)}\n耗时     : ${info.ms} ms`);
       } else {
         metrics.pushLog('error', `${st === 0 ? '连接失败' : 'HTTP ' + st} · ${ep}`,
@@ -180,7 +194,7 @@ function saveConn(body) {
     metrics.pushLog('error', '守护重启异常：' + restart.error);
   });
   // 配置刚变，立刻刷新一次面板健康判据，避免 pill 举着旧结论
-  panelOk = null; panelError = '';
+  panelOk = null; panelAuthFail = false; panelError = '';
   return Object.assign(dm.readPublicConfig(cfg), { restart });
 }
 
@@ -191,11 +205,17 @@ async function testConn() {
   if (!cfg.panelUrl || !cfg.userKey) return { nas: false, auth: false, latencyMs: 0, hint: '请先填写面板地址与 User Key' };
   try {
     const api = dm.mkApi(cfg);
-    const r = await api('/skill/list', { method: 'POST', body: { team_id: cfg.teamId || undefined }, timeout: 8000 });
-    const ok = r.status >= 200 && r.status < 300;
-    let hint = '';
-    if (!ok) hint = (r.status === 401 || r.status === 403) ? 'User Key 可能失效' : `面板返回 HTTP ${r.status}`;
-    return { nas: ok, auth: ok, latencyMs: Date.now() - t0, hint };
+    // ⚠️ 必须打 /chat-memory/my-agents（检索面端点，**真的校验 userKey**）。
+    //   实测：/skill/list 与 /meta/auth/verify 对坏 key 都返回 HTTP 200 + code:0，
+    //   用它们探活会让 auth 恒为 true —— 界面显示"已连接"但检索/上传全静默失败。
+    //   口径与 core/tdai-core.js health()、daemon /api/test-connection 三处必须一致。
+    const r = await api('/chat-memory/my-agents', { method: 'POST', body: { team_id: cfg.teamId || undefined }, timeout: 8000 });
+    const v = r.v || {};
+    // nas = 面板这家服务活着（4xx/404 也算活着）；auth = 真鉴权通过
+    const nas = r.ok || (v.status >= 100 && v.status < 500);
+    const auth = !!r.ok;
+    const hint = auth ? '' : (v.hint || v.message || (v.status ? `面板返回 HTTP ${v.status}` : '面板不可达'));
+    return { nas, auth, latencyMs: Date.now() - t0, hint, code: v.code, codeKey: v.key || '', kind: v.kind || '' };
   } catch (e) {
     return { nas: false, auth: false, latencyMs: Date.now() - t0, hint: '面板不可达（' + e.message + '）' };
   }
@@ -267,10 +287,14 @@ function currentSnapshot() {
   return metrics.snapshot({
     panelUrl: (core && core.cfg && core.cfg.panelUrl) || '',
     panelOk,
+    panelAuthFail,
     panelError,
     panelOkAt,
     daemonOk,
     daemonOkAt,
+    // 会话扫描降级警告（如 node:sqlite 不可用）随每秒快照一起推给渲染层，
+    // 这样即使用户没点"立即刷新"，实时会话页也会在首帧显示警告。
+    warnings: lastSessionScan.warnings || [],
   });
 }
 
@@ -505,6 +529,7 @@ ipcMain.handle('app-info', () => ({
   // 面板地址与连接健康：供右上角连接状态 pill 与总览状态卡判断"是否已连接"
   panelUrl: (core && core.cfg && core.cfg.panelUrl) || '',
   panelOk,
+  panelAuthFail,
   panelError,
   daemonOk,
 }));
@@ -700,9 +725,17 @@ ipcMain.handle('refresh', () => pollHealth());
 ipcMain.handle('metrics-get', () => currentSnapshot());
 
 // 会话扫描（可强制刷新）
+// warnings 一并回传：sqlite 权威源降级时 UI 必须显示明确警告，
+// 否则用户只会看到"最新会话停在几个月前"而误判程序坏了。
 ipcMain.handle('sessions-scan', (_e, opts) => {
   if (opts && opts.force) refreshSessions('manual');
-  return { ok: true, files: lastSessionScan.files, total: lastSessionScan.total, sessions: lastSessionScan.sessions };
+  return {
+    ok: true,
+    files: lastSessionScan.files,
+    total: lastSessionScan.total,
+    sessions: lastSessionScan.sessions,
+    warnings: lastSessionScan.warnings || [],
+  };
 });
 
 // 游标统计

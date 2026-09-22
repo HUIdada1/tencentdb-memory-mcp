@@ -1,4 +1,4 @@
-// test/flow-integration.js — 流量计量链路集成测试
+// test/flow-integration.test.js — 流量计量链路集成测试
 // 起一个本地假面板，让真实的 core（带 _onHttp 观察者）去打它，
 // 验证：真实字节计量 / 失败归类 / 任务进度 / 观察者缺省透明。
 'use strict';

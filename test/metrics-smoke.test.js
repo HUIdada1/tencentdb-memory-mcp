@@ -1,4 +1,4 @@
-// test/metrics-smoke.js — 指标中心单测（零依赖，直接跑 node）
+// test/metrics-smoke.test.js — 指标中心单测（零依赖，直接跑 node）
 'use strict';
 const assert = require('assert');
 const { createMetrics, fmtBytes, fmtSpeed, isFail } = require('../pet/src/metrics.js');

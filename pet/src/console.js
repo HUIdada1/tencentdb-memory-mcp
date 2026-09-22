@@ -7,7 +7,9 @@
   const fmt = (v) => (v === null || v === undefined || v === '' ? '—' : String(v));
   const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-  const S = { snap: null, appInfo: null, sessTimer: null, latencyHist: [], lastLogSeq: 0, logPaused: false, logClearSeq: 0, scanAnchor: 0, scanInterval: 120, guardEnabled: true, stoppedExternal: false };
+  // 延迟历史采样已移除：延迟波形（最近 60s）整块删除，不再需要逐拍累积的采样数组。
+  // 延迟只以「面板延迟」单个最新值呈现（hero 体征条 + 副标题），不留历史副本。
+  const S = { snap: null, appInfo: null, sessTimer: null, lastLogSeq: 0, logPaused: false, logClearSeq: 0, scanAnchor: 0, scanInterval: 120, guardEnabled: true, stoppedExternal: false };
 
   /* ---------- 数值格式化 ---------- */
   function fmtBytes(n) {
@@ -245,75 +247,94 @@
 
   // 每 2s 兜底刷新一次（即使没有 metrics 推送，也不会卡在"检测中"）
   function refreshHealthPill() {
-    // 守护被手动停止：pill 固定显示"守护已停止"，不跑其它判据（避免盖住用户意图）
+    let state = 'wait', text = '检测中', detail = '';
     if (S.guardEnabled === false) {
-      setHealthPill('off', '守护已停止', '守护服务已手动停止：采集上传与本地 recall 服务暂停。点击此按钮重新开启。');
-      return;
-    }
-    const snap = S.snap;
-    const panelUrl = (S.appInfo && S.appInfo.panelUrl) || (snap && snap.panelUrl) || '';
-    if (!panelUrl) {
-      setHealthPill('wait', '未配置', '尚未配置记忆库面板地址，请到「设置 → 记忆库连接」填写');
-      return;
-    }
-    if (!snap) {
-      setHealthPill('wait', '检测中', '已配置面板，等待首次心跳…');
-      return;
-    }
-    const host = sanitizePanel(panelUrl);
-    const m = snap.metrics || {};
-    // 延迟是 30s TTL 的滑窗样本：刚停止守护时最后一次探活仍有值，
-    // 不能拿它当"还连着"的证据（守护停止 = 面板往返链路已停）。
-    const latencyFresh = m.latency > 0 && !m.latencyStale;
-    if (snap.panelOk === false) {
-      setHealthPill('err', '连接失败', `${host} 不可达${snap.panelError ? '：' + snap.panelError : ''}`);
-    } else if (latencyFresh) {
-      setHealthPill('ok', '已连接', `${host} · 延迟 ${m.latency}ms`);
-    } else if (snap.daemonOk) {
-      setHealthPill('ok', '已连接', `${host} · 守护在线（尚未发请求，暂无延迟）`);
-    } else if (m.latency > 0) {
-      // 有过往返但样本已过期（>30s 无新样本）。
-      // 注意：守护在线时这个分支**不该出现** —— 10s 探活会持续刷新延迟。
-      // 真正会走到这里的是"守护还开但探活一路失败"，说明本地服务已不可达，
-      // 此时既不能举着"已连接"，也不该像面板挂了那样喊"连接失败"（面板可能好好的）。
-      setHealthPill('wait', '待确认', `${host} · 本地守护探活失败，最近一次成功的往返已过期`);
+      // 守护被手动停止：pill 固定显示"守护已停止"，不跑其它判据（避免盖住用户意图）
+      state = 'off'; text = '守护已停止';
+      detail = '守护服务已手动停止：采集上传与本地 recall 服务暂停。点击此按钮重新开启。';
     } else {
-      setHealthPill('wait', '检测中', `${host} · 已配置，等待首次成功往返…`);
+      const snap = S.snap;
+      const panelUrl = (S.appInfo && S.appInfo.panelUrl) || (snap && snap.panelUrl) || '';
+      if (!panelUrl) {
+        state = 'wait'; text = '未配置';
+        detail = '尚未配置记忆库面板地址，请到「设置 → 记忆库连接」填写';
+      } else if (!snap) {
+        state = 'wait'; text = '检测中';
+        detail = '已配置面板，等待首次心跳…';
+      } else {
+        const host = sanitizePanel(panelUrl);
+        const m = snap.metrics || {};
+        // 延迟是 30s TTL 的滑窗样本：刚停止守护时最后一次探活仍有值，
+        // 不能拿它当"还连着"的证据（守护停止 = 面板往返链路已停）。
+        const latencyFresh = m.latency > 0 && !m.latencyStale;
+        if (snap.panelOk === false) {
+          // 区分"地址错 / 面板挂了"与"地址对但 key 不行"：后者别喊"连接失败"，
+          // 否则用户会去改地址（越改越乱），真正该做的是重新签发 userKey。
+          if (snap.panelAuthFail) {
+            state = 'err'; text = '认证失败';
+            detail = `${host} 可达，但 userKey 失效或权限不足${snap.panelError ? '：' + snap.panelError : ''}。请到面板重新签发 userKey。`;
+          } else {
+            state = 'err'; text = '连接失败';
+            detail = `${host} 不可达${snap.panelError ? '：' + snap.panelError : ''}`;
+          }
+        } else if (latencyFresh) {
+          state = 'ok'; text = '已连接'; detail = `${host} · 延迟 ${m.latency}ms`;
+        } else if (snap.daemonOk) {
+          state = 'ok'; text = '已连接'; detail = `${host} · 守护在线（尚未发请求，暂无延迟）`;
+        } else if (m.latency > 0) {
+          // 有过往返但样本已过期（>30s 无新样本）。
+          // 注意：守护在线时这个分支**不该出现** —— 10s 探活会持续刷新延迟。
+          // 真正会走到这里的是"守护还开但探活一路失败"，说明本地服务已不可达，
+          // 此时既不能举着"已连接"，也不该像面板挂了那样喊"连接失败"（面板可能好好的）。
+          state = 'wait'; text = '待确认';
+          detail = `${host} · 本地守护探活失败，最近一次成功的往返已过期`;
+        } else {
+          state = 'wait'; text = '检测中';
+          detail = `${host} · 已配置，等待首次成功往返…`;
+        }
+      }
     }
+    setHealthPill(state, text, detail);
+    // pill 的定位交给 setHealthPill；首排「同排/分行」由这里统一收口，
+    // 保证任何一个 pill 状态变化都会同步版式（含停止后立刻回退整行）。
+    syncHomeSplit();
   }
 
-  function drawSpark() {
-    const line = $('#spark-line'), fill = $('#spark-fill');
-    if (!line) return;
-    const hist = S.latencyHist.slice(-60);
-    if (hist.length < 2) { line.setAttribute('points', ''); if (fill) fill.setAttribute('points', ''); return; }
-    const max = Math.max.apply(null, hist.concat([40]));
-    const W = 220, H = 44, pad = 3;
-    const step = hist.length > 1 ? W / (hist.length - 1) : W;
-    const pts = hist.map((v, i) => {
-      const x = (i * step).toFixed(1);
-      const y = (H - pad - (Math.min(v, max) / max) * (H - pad * 2)).toFixed(1);
-      return x + ',' + y;
-    });
-    line.setAttribute('points', pts.join(' '));
-    if (fill) fill.setAttribute('points', ('0,' + H + ' ' + pts.join(' ') + ' ' + W + ',' + H));
+  /* ---------- 首排布局：hero 与指标卡「同排 / 分行」两态 ----------
+   * 已连接（或尚在检测中）时首排分半：左 hero、右三张指标卡；
+   * 未连接 / 守护已停止时退回整行版式 —— 此时 hero 只剩状态文案，
+   * 与卡片各占半宽会空出一大片，反而比整行更难看。
+   */
+  function syncHomeSplit() {
+    const box = $('#home-split');
+    if (!box) return;
+    const split = HEALTH.connected !== false && !daemonStopped();
+    box.classList.toggle('split', split);
+    box.classList.toggle('nosplit', !split);
+  }
+
+  /* ---------- 顶部体征条副标题 = 唯一的实时链路读数 ----------
+   * 用户要求「总览页面中最顶部卡片」的数据实时刷新。
+   * 这里的口径：面板地址 · 面板延迟 · 上/下行速率，全部来自 1s 心跳快照。
+   * 面板地址放在这里，是为了替掉原先那张只会静态显示域名的「记忆库面板」卡
+   * （那张卡的数据来源 panelUrl 与 pill 的 title 完全重复，属于重复展示）。
+   */
+  function renderLiveSub(snap, m) {
+    const lat = m.latency > 0 && m.latencyStale !== true ? m.latency + 'ms' : '—';
+    let sub = `${sanitizePanel(snap.panelUrl)} · 面板延迟 ${lat} · 链路 ${fmtSpeed(m.upSpeed)}↑ ${fmtSpeed(m.downSpeed)}↓`;
+    // 守护已停止：链路读数停摆，必须直说，否则「0 B/s↑」会被读成"正在跑但没流量"
+    if (daemonStopped()) sub += ' · 采集已停止';
+    return sub;
   }
 
   /* ============================================================
      ② 关键指标卡
      ============================================================ */
+  /* 「连接状态 / 上传速度 / 下传速度」三张卡已删除：
+   * 连接状态与右上角 pill、hero 的 live-text 是同一份数据；
+   * 上传/下载速度与下方上下行流量卡的「当前速率」是同一份数据。
+   * 三张卡只是把同一批数字换个地方再显示一遍，属于典型重复展示。 */
   function renderStats(m, snap) {
-    // 与右上角 pill 共用同一口径（refreshHealthPill 是权威状态源）
-    const connected = HEALTH.connected;
-    const st = $('#s-status');
-    if (st) st.textContent = connected === true ? '在线' : (connected === false ? '离线' : '待连接');
-    setCls($('#c-status'), connected === true ? 'ok' : (connected === false ? 'err' : ''));
-
-    const se = $('#s-up'); if (se) se.textContent = fmtSpeed(m.upSpeed);
-    const sd = $('#s-down'); if (sd) sd.textContent = fmtSpeed(m.downSpeed);
-    setCls($('#c-up'), m.upSpeed > 0 ? 'act ok' : '');
-    setCls($('#c-down'), m.downSpeed > 0 ? 'act ok' : '');
-
     const ss = $('#s-sess');
     if (ss) ss.textContent = String((snap.sessions || []).filter((x) => x.state === 'thinking' || x.state === 'active').length);
     const sr = $('#s-reqs'); if (sr) sr.textContent = String(m.reqTotal || 0);
@@ -329,6 +350,18 @@
   const ST = { thinking: '交互中', active: '交互中', idle: '空闲', stale: '休眠', err: '异常' };
   // 来源显示名（缺失的来源直接用原始 source 字符串，界面不会显示空白或 "undefined"）
   const SRC_NAME = { zcode: 'ZCode CLI', 'zcode-rollout': 'ZCode Rollout', 'claude-code': 'Claude Code', cursor: 'Cursor', codex: 'Codex', trae: 'Trae', 'deepseek-harness': 'DeepSeek Harness' };
+
+  // sqlite 权威源降级警告：必须显示，否则用户只会看到"最新会话停在几个月前"
+  // 而误判程序坏了（Node < 22.16 时 node:sqlite 不可用 → 只统计归档文件）
+  function renderSessionWarnings(warnings) {
+    const box = $('#sess-warn');
+    if (!box) return;
+    const w = (warnings || []).find((x) => x && x.code === 'sqlite');
+    if (!w) { box.className = 'banner warn'; box.textContent = ''; return; }
+    box.className = 'banner warn show';
+    box.textContent = w.message + (w.hint ? ' ' + w.hint : '');
+    box.title = w.path ? '会话库路径：' + w.path : '';
+  }
 
   function renderSessions(list) {
     const box = $('#sess-list');
@@ -364,7 +397,10 @@
   async function refreshSessions(force) {
     try {
       const r = await tdai.sessionsScan({ force: !!force });
-      if (r && r.ok) renderSessions(r.sessions);
+      if (r && r.ok) {
+        renderSessionWarnings(r.warnings);
+        renderSessions(r.sessions);
+      }
     } catch (_) { /* 扫描失败不阻塞界面 */ }
   }
 
@@ -664,23 +700,18 @@
     } else {
       const up = $('#h-uptime'); if (up) up.textContent = fmtUptime(snap.uptime);
     }
-    const hp = $('#h-panel');
-    if (hp) hp.textContent = String(snap.panelUrl || '').replace(/^https?:\/\//, '') || '未配置';
 
-    // 延迟过期（metrics.latencyStale）时不再画入曲线，避免"幽灵延迟"
+    // 延迟过期（metrics.latencyStale）时不显示，避免"幽灵延迟"
     const latFresh = m.latency > 0 && m.latencyStale !== true;
-    if (latFresh) {
-      S.latencyHist.push(m.latency);
-      if (S.latencyHist.length > 120) S.latencyHist.shift();
-      drawSpark();
-    }
     const hl = $('#h-latency'); if (hl) hl.textContent = latFresh ? m.latency + ' ms' : '—';
 
-    // 连接状态 pill 必须跟着心跳一起更新（它就是权威状态源）
+    // 连接状态 pill 必须跟着心跳一起更新（它就是权威状态源）。
+    // 顺带同步首排版式：连上/断开会让 hero 与指标卡在「同排」和「分行」间切换。
     refreshHealthPill();
 
     renderStats(m, snap);
     renderFlow(m, snap.series);
+    renderSessionWarnings(snap.warnings);
     renderSessions(snap.sessions);
     renderLogs(snap.logs, snap.logSeq);
     renderLiveMeta(snap.sessions);
@@ -691,7 +722,8 @@
     setLive(
       connected !== false,
       connected === false ? '面板连接已中断' : (connected === true ? '实时连接正常' : '等待首次往返…'),
-      `${sanitizePanel(snap.panelUrl)} · 面板延迟 ${latFresh ? m.latency : 0}ms · 链路 ${fmtSpeed(m.upSpeed)}↑ ${fmtSpeed(m.downSpeed)}↓`
+      // 副标题 = 唯一的实时链路读数（面板地址 / 延迟 / 上下行速率），随 1s 心跳刷新
+      renderLiveSub(snap, m)
     );
   }
   function sanitizePanel(u) {
@@ -1802,8 +1834,15 @@
     const btn = this; btn.disabled = true; btn.textContent = '测试中…';
     try {
       const j = await tdai.connTest();
-      if (j.nas && j.auth) banner('b-conn', 'ok', `连接成功：面板可达且认证通过（${j.latencyMs}ms）。`);
-      else banner('b-conn', 'err', '连接失败：' + (j.hint || '面板不可达。'));
+      // nas 与 auth 现在**会分别成立**（面板活着但 key 错了 = nas true / auth false），
+      // 三态分开报，别让用户看到笼统的"连接失败"去乱改地址。
+      if (j.nas && j.auth) {
+        banner('b-conn', 'ok', `连接成功：面板可达且认证通过（${j.latencyMs}ms）。`);
+      } else if (j.nas && !j.auth) {
+        banner('b-conn', 'warn', '面板可达，但认证未通过：' + (j.hint || '请检查 User Key / serviceId。'));
+      } else {
+        banner('b-conn', 'err', '连接失败：' + (j.hint || '面板不可达。'));
+      }
     } catch (e) {
       banner('b-conn', 'err', '测试失败：' + (e && e.message ? e.message : e));
     } finally { btn.disabled = false; btn.textContent = '链接测试'; }

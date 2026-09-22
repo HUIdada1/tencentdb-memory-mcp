@@ -1,7 +1,7 @@
 # 发布流水线：手动触发（workflow_dispatch）。
 # 双产物：① Electron 控制台应用（electron-builder --publish always，NSIS 安装版 + 便携版 + latest.yml，
 #   安装版走 electron-updater 热更新，便携版读 latest.yml 比对版本提示手动下载）；② Node SEA 单文件守护进程 exe。
-# 参照 AgentHub 发版模式；版本号严格递增，tag 一经发布不可复用。
+# 手动触发式发版；版本号严格递增，tag 一经发布不可复用（语义化版本 + 数值比较，不按字典序）。
 # 注意：appId（com.tdai.pet）不可更改，改它会让老用户的升级路径断裂（NSIS 升级按 appId 派生 GUID 识别）。
 name: Release
 
@@ -70,8 +70,15 @@ jobs:
         run: |
           node daemon/tdai-daemon.js health
           node mcp/tdai-mcp.js list
-          node test/register.test.js
-          node test/functional.test.js
+
+      - name: 安装测试依赖（jsdom 等，仅 pet/）
+        # 全量测试里有 6 个套件依赖 pet/node_modules/jsdom（根目录保持零依赖）
+        run: npm ci --prefix pet
+
+      - name: 全量测试（16 个套件，发版门禁）
+        # 早先这里只跑 4 条冒烟，12 个套件里 8 个从不执行 —— 界面回归要等发版才暴露。
+        # 现在与 CI 走同一条 test:ci，确保"能发出去的版本一定通过了全部测试"。
+        run: npm run test:ci
 
       - name: 构建 SEA 单文件守护进程 exe
         shell: bash
@@ -88,7 +95,12 @@ jobs:
           ./tdai-daemon.exe hook --q "test" | wc -c
 
       - name: 安装依赖（pet）
-        run: npm ci --prefix pet
+        # 已在上面「安装测试依赖」步骤装过（npm ci --prefix pet 是同一个安装），
+        # 但 SEA 构建步骤不碰 pet/，为可读性保留在此处声明"打包前的依赖已就绪"。
+        # npm ci 会清空 node_modules 重装，重复执行代价约 30s，故改为校验已就绪。
+        shell: bash
+        run: |
+          if [ ! -d pet/node_modules ]; then npm ci --prefix pet; else echo "pet/node_modules 已就绪，跳过重复安装"; fi
 
       - name: 打包并发布 Electron 控制台应用（NSIS + 便携版 + latest.yml）
         run: npx electron-builder --win --publish always

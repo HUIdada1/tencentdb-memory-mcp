@@ -23,7 +23,7 @@ const QUEUE_DIR = path.join(DATA_DIR, 'queue');
 const LOG_PATH = path.join(DATA_DIR, 'daemon.log');
 
 const RECALL_PORT = Number(process.env.TDAI_DAEMON_PORT) || 8100;
-const APP_VER = '0.5.9';         // 与 package.json 同步；SEA exe 的版本号
+const APP_VER = '0.5.12';         // 与 package.json 同步；SEA exe 的版本号
 const REPO_API = 'https://api.github.com/repos/HUIdada1/tencentdb-memory-mcp/releases/latest';
 const RECALL_TIMEOUT_MS = 800;   // hook 链路硬超时：超时返回空，绝不阻塞对话
 const SCAN_INTERVAL_MS = 2 * 60 * 1000;  // 采集循环 2 分钟
@@ -112,11 +112,104 @@ function requestRaw(urlStr, { method = 'GET', headers = {}, body = null, timeout
   });
 }
 
+/* ---------- 面板响应判定（core/panel-codes.js 的**内联副本**） ----------
+ *
+ * ⚠️ 为什么内联而不 require：
+ *   本文件要能单独打包成 SEA exe（单文件自包含），不能依赖 core/ 目录存在。
+ *   `test/clients-consistency.test.js` 会断言这里的常量/函数与 core/panel-codes.js 语义一致，
+ *   改一边必须改另一边（测试会拦），别让两处漂移。
+ *
+ * 2026-09-22 实测（真实面板）——「HTTP 状态码 ≠ 结论」：
+ *   缺 X-Tdai-Service-Id        → 400 {"code":400,"message":"MISSING_INSTANCE_ID"}
+ *   缺 X-Tdai-User-Key          → 400 {"code":400,"message":"MISSING_USER_KEY"}
+ *   serviceId 不存在             → 400 {"code":400,"message":"INVALID_INSTANCE"}
+ *   检索没给 block_id            → 400 {"code":400,"message":"MISSING_BLOCK_ID"}
+ *   分层传了非法 layer           → 400 {"code":400,"message":"INVALID_LAYER"}
+ *   检索用错 userKey            → 401 {"code":401,"message":"INVALID_USER_KEY"}
+ *   /skill/list 用错 userKey    → 200 {"code":0}  ← 该端点**不校验** key！
+ *   端点不存在 / 方法不对        → 404 纯文本（**无 JSON**）
+ *   成功                       → 200 {"code":0,"message":"ok","data":{...}}
+ *
+ * 旧实现只看 status===401/403 与 status>=500 → 把「HTTP 400 + 可操作业务码」和
+ * 「HTTP 404」判成成功 ⇒ 上游静默"上传成功"实则零写入。本块修的就是这个。
+ */
+const PANEL_OK_CODE = 0;
+const PANEL_API_PREFIX = '/api/v1';   // ⚠️ 不是上游文档里的 /v3（/v3 是前端路由，实测全 404）
+const PANEL_HINTS = {
+  MISSING_INSTANCE_ID: '未带 X-Tdai-Service-Id 头：请在配置里填 serviceId（默认 default）',
+  MISSING_USER_KEY: '缺少 userKey：请在「设置 → 记忆库连接」里填面板的用户密钥',
+  INVALID_INSTANCE: 'serviceId 面板不认：核对「设置 → 记忆库连接」里的 serviceId 是否与面板一致',
+  INVALID_USER_KEY: 'userKey 失效：去面板重新复制一份用户密钥，填回「设置 → 记忆库连接」',
+  PERMISSION_DENIED: '当前 userKey 没有该操作权限：请在面板里给这个用户授权（或换有权限的 key）',
+  FORBIDDEN: '当前 userKey 没有该操作权限：请在面板里给这个用户授权',
+  MISSING_BLOCK_ID: '缺少记忆块：请配置 teamId + agentId，或显式指定 block_id',
+  INVALID_LAYER: 'layer 只支持 L0/L1/L2/L3：请检查记忆页选的层级',
+  INVALID_TEAM_ID: 'teamId 无效或不存在：核对「设置 → 记忆库连接」里的团队 ID',
+  INVALID_AGENT_ID: 'agentId 无效或不存在：核对「设置 → 记忆库连接」里的 Agent ID',
+  INTERNAL_ERROR: '面板内部错误（可重试）：若持续出现请查看面板服务端日志',
+  SERVICE_UNAVAILABLE: '面板服务不可用（可重试）：稍后再试，或确认面板容器状态',
+  LLM_ERROR: '面板的模型服务报错（可重试）：蒸馏/抽取依赖模型，稍后再试',
+  EXTRACT_FAILED: '面板抽取流水线失败（可重试）',
+};
+const PANEL_CODE_CLASS = {
+  MISSING_INSTANCE_ID: 'config', MISSING_USER_KEY: 'config', INVALID_INSTANCE: 'config',
+  INVALID_USER_KEY: 'config', PERMISSION_DENIED: 'config', FORBIDDEN: 'config',
+  MISSING_BLOCK_ID: 'input', INVALID_LAYER: 'input', INVALID_TEAM_ID: 'input', INVALID_AGENT_ID: 'input',
+  INTERNAL_ERROR: 'server', SERVICE_UNAVAILABLE: 'server', LLM_ERROR: 'server', EXTRACT_FAILED: 'server',
+};
+function codeKeyOf(message) {
+  const s = String(message == null ? '' : message).trim();
+  if (!s) return '';
+  const m = s.match(/^([A-Z][A-Z0-9_]{2,})/);
+  if (m) return m[1];
+  const head = s.split(/[:：]/)[0].trim();
+  return /^[A-Z][A-Z0-9_]{2,}$/.test(head) ? head : '';
+}
+// 详见 core/panel-codes.js 的 classify 文档。返回值多带 ok/kind/retriable 便于调用方分支。
+function classifyPanel(r) {
+  const status = (r && typeof r.status === 'number') ? r.status : 0;
+  let json = (r && r.json && typeof r.json === 'object') ? r.json : null;
+  if (!json && r && typeof r.raw === 'string' && r.raw) {
+    const t = r.raw.trim();
+    if (t.startsWith('{') || t.startsWith('[')) { try { json = JSON.parse(t); } catch (_) { json = null; } }
+  }
+  const code = json && typeof json.code === 'number' ? json.code : undefined;
+  const message = String((json && (json.message || json.msg || json.error)) || '');
+  // ⚠️ 业务码常量可能出现在三处：message / code（字符串）/ error。
+  //   只看数字 code 会漏掉 {"code":"MISSING_INSTANCE_ID"} 这类形态 → 提示退化成
+  //   "面板返回 HTTP 400"。与 core/panel-codes.js 的 classify() 保持同一口径。
+  const shownCode = json && typeof json.code === 'string' ? json.code : code;
+  const key = codeKeyOf(
+    (json && typeof json.code === 'string' ? json.code : '')
+    || message
+    || String((json && json.error) || ''));
+  const hint = (key && PANEL_HINTS[key]) || '';
+  const cls = (key && PANEL_CODE_CLASS[key]) || '';
+  const base = { status, code: shownCode, message, key, hint, cls, json };
+  if (status === 0) return Object.assign(base, { ok: false, kind: 'unreachable', retriable: true, hint: hint || '面板不可达：检查地址/端口/公网开闸' });
+  if (code !== undefined && code !== PANEL_OK_CODE) {
+    if (code === 401 || code === 403) return Object.assign(base, { ok: false, kind: 'auth', retriable: false, hint: hint || 'userKey 失效或权限不足：去面板重新复制密钥' });
+    if (code >= 500) return Object.assign(base, { ok: false, kind: 'server', retriable: true, hint: hint || '面板内部错误（可重试）' });
+    const kind = cls === 'server' ? 'server' : (cls === 'config' ? 'auth' : (cls === 'input' ? 'input' : 'unknown'));
+    return Object.assign(base, { ok: false, kind, retriable: cls === 'server', hint });
+  }
+  if (status >= 200 && status < 300) return Object.assign(base, { ok: true, kind: 'ok', retriable: false, hint: '' });
+  if (status === 401 || status === 403) return Object.assign(base, { ok: false, kind: 'auth', retriable: false, hint: hint || 'userKey 失效或权限不足：去面板重新复制密钥' });
+  if (status === 404) return Object.assign(base, { ok: false, kind: 'not-found', retriable: false, hint: hint || '面板没有这个接口：请确认面板版本（本项目走 /api/v1 业务面）' });
+  if (status >= 500) return Object.assign(base, { ok: false, kind: 'server', retriable: true, hint: hint || '面板 5xx（可重试）' });
+  return Object.assign(base, { ok: false, kind: 'unknown', retriable: false, hint: hint || `面板返回 HTTP ${status}` });
+}
+/** 一行摘要：优先业务 hint。 */
+function panelSummary(v) {
+  if (!v || v.ok) return '';
+  return v.hint || v.message || (v.status ? `面板返回 HTTP ${v.status}` : '面板不可达');
+}
+
 /* ---------- 面板 API ---------- */
 
 function mkApi(cfg) {
   return async function api(pathname, { method = 'GET', body = null, timeout = REQ_TIMEOUT } = {}) {
-    const url = cfg.panelUrl + '/api/v1' + pathname;
+    const url = cfg.panelUrl + PANEL_API_PREFIX + pathname;
     const r = await requestRaw(url, {
       method, body, timeout,
       headers: {
@@ -127,7 +220,12 @@ function mkApi(cfg) {
     });
     let json = null;
     try { json = JSON.parse(r.body); } catch (_) { }
-    return { status: r.status, json, raw: r.body };
+    const out = { status: r.status, json, raw: r.body };
+    // v.ok === true 才是真成功。旧代码用 `status >= 200 && status < 300` 判断，
+    // 会把 404 / 业务 4xx 当成功 —— 现统一挂 v，调用方一律判 v.ok。
+    out.v = classifyPanel(out);
+    out.ok = out.v.ok;
+    return out;
   };
 }
 
@@ -444,22 +542,28 @@ async function ensureUserId(cfg, api, state) {
 async function uploadBatch(cfg, api, payload, state) {
   try {
     const r = await api('/chat-memory/import', { method: 'POST', body: payload });
-    if (r.status >= 200 && r.status < 300) {
+    // 判据统一走 classifyPanel 结论（r.ok），不再看 HTTP 状态码区间 ——
+    // 面板会用 "HTTP 400 + message:MISSING_BLOCK_ID/INVALID_INSTANCE" 表达失败，
+    // 旧写法 `status>=200&&status<300` 会漏掉这类（虽然 400 本就不在区间内，
+    // 但 404 与"HTTP 200 + 非零业务码"会被误判成成功写入）。
+    if (r.ok) {
       // 入队 L1 抽取：服务端契约要求 user_id 非空 + messages 全量回传；失败必须留痕，不可静默
       const q = await api('/skill/conversation/add', {
         method: 'POST',
         body: { user_id: cfg.userId || state.userId || '', team_id: payload.team_id, agent_id: payload.agent_id, session_id: payload.session_id, messages: payload.messages },
       });
-      if (!(q.status >= 200 && q.status < 300)) {
-        log(`extract enqueue rejected HTTP ${q.status}: ${String((q.json && q.json.message) || q.body || '').slice(0, 200)}`);
+      if (!q.ok) {
+        log(`extract enqueue rejected HTTP ${q.status} ${q.v.key || ''}: ${String((q.json && q.json.message) || q.raw || '').slice(0, 200)}`);
       }
       return true;
     }
-    if (r.status >= 500 || r.status === 0) return false; // 可重试
+    // 可重试：网络层失败 / 5xx / 面板内部错误 / 服务不可用
+    if (r.v.retriable || r.status === 0 || r.status >= 500) return false;
     const msg = (r.json && r.json.message) || '';
     if (/agent/i.test(msg)) { await ensureAgent(cfg, api, payload._source || 'zcode', state); return false; }
-    log(`upload rejected HTTP ${r.status}: ${msg.slice(0, 200)}`);
-    return 'skip'; // 4xx 不可恢复：放弃本批
+    // 给日志带上中文可操作提示，别让用户只看到裸的 HTTP 400
+    log(`upload rejected HTTP ${r.status}${r.v.key ? ' ' + r.v.key : ''}: ${panelSummary(r.v) || msg.slice(0, 200)}`);
+    return 'skip'; // 4xx / 404 不可恢复：放弃本批
   } catch (e) {
     log(`upload error: ${e.message}`);
     return false;
@@ -656,7 +760,7 @@ function mkCache(cfg, api) {
       if (Date.now() - cache.ts < CACHE_TTL_MS) return;
       try {
         const s = await api('/skill/list', { method: 'POST', body: { team_id: cfg.teamId } });
-        if (s.status >= 200 && s.status < 300 && s.json && s.json.data) {
+        if (s.ok && s.json && s.json.data) {
           const items = s.json.data.items || s.json.data || [];
           const names = Array.isArray(items) ? items.map((x) => x && (x.name || x.skill_name)).filter(Boolean).slice(0, 30) : [];
           cache.skills = names.length ? names.join('、') : '';
@@ -684,14 +788,16 @@ async function buildRecall(cfg, api, cache, query) {
   const always = cfg.recallAlways === true || String(cfg.recallAlways) === 'true';
   if (query && (always || hasIntent(query))) {
     try {
-      const r = await requestRaw(cfg.panelUrl + '/api/v1/chat-memory/search', {
+      const r = await requestRaw(cfg.panelUrl + PANEL_API_PREFIX + '/chat-memory/search', {
         method: 'POST', timeout: RECALL_TIMEOUT_MS - 100,
         headers: { 'Content-Type': 'application/json', 'X-Tdai-Service-Id': cfg.serviceId || 'default', 'X-Tdai-User-Key': cfg.userKey },
         body: { query: String(query).slice(0, 500), top_k: 5, block_id: cfg.blockId || 'chat-memory', team_id: cfg.teamId || undefined, agent_id: cfg.agentId || undefined },
       });
-      if (r.status >= 200 && r.status < 300) {
-        const j = JSON.parse(r.body);
-        const items = (j.data && j.data.items) || [];
+      // 走统一判定：recall 路径早先也只看 HTTP 2xx，一个 404（端点变更）会被当成功但解析出空 items，
+      // 表现为"记忆检索永远为空"却查不出原因。
+      const rv = classifyPanel({ status: r.status, raw: r.body });
+      if (rv.ok) {
+        const items = (rv.json && rv.json.data && rv.json.data.items) || [];
         if (items.length) {
           const lines = items.map((it) => {
             const text = (it.content || it.text || it.summary || '').toString();
@@ -707,54 +813,119 @@ async function buildRecall(cfg, api, cache, query) {
 
 /* ---------- 控制台 API：配置读写 / 连接测试 / Agent 接入状态 / 更新检查 ---------- */
 
-// UserPromptSubmit hook 检测（与 pet/src/register.js 的 hookState 同口径）。
+// UserPromptSubmit hook 检测（与 pet/src/register.js 的 hookState、core/clients.js 同口径）。
 // 返回 { present, legacy }：present = 确实挂了本工具的 hook（新旧写法都算）；
 // legacy = 旧写法（tdai-daemon.js/.cjs + node.exe），建议关→开切到本应用。
+//
+// ⚠️ 本文件必须保持**单文件自包含**（要能被 SEA 打包成独立 exe，不能 require 外部模块），
+// 所以这里不能直接 require core/clients.js —— 常量只能内联一份。
+// 代价是存在"三处字面量"的漂移风险，因此 test/clients-consistency.test.js 里
+// 专门断言 daemon 的 HOOK 常量与 core/clients.js 完全一致；改一处必须改三处。
+const HOOK_MARK = 'tdai-hook.cmd';
+const HOOK_LEGACY_MARKS = ['tdai-daemon.js', 'tdai-daemon.cjs'];
 function hookStateOf(file) {
   let s = null;
   try { s = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (_) { return { present: false, legacy: false }; }
   const arr = (s && s.hooks && s.hooks.UserPromptSubmit) || [];
   const text = JSON.stringify(arr);
-  const present = text.includes('tdai-hook.cmd') || text.includes('tdai-daemon.js') || text.includes('tdai-daemon.cjs');
-  return { present, legacy: present && !text.includes('tdai-hook.cmd') };
+  const present = text.includes(HOOK_MARK) || HOOK_LEGACY_MARKS.some((m) => text.includes(m));
+  return { present, legacy: present && !text.includes(HOOK_MARK) };
 }
 
 // agent 接入状态：fs 检测各客户端配置（installed=已接入 / absent=客户端未安装 / missing=未接入）
+//
+// ⚠️ 本函数的客户端清单必须与 core/clients.js 保持一致，但本文件不能 require 它
+// （单文件自包含，要能 SEA 打包）。故这里用**表驱动**内联一份最小清单：
+// 只要客户端集合变化，必须同时改 core/clients.js 与下面这张表 ——
+// test/clients-consistency.test.js 的 ⑨ 组会逐个断言两边覆盖的客户端完全一致。
+// （早先这里是 5 段手写 if，漏了 Trae 与 DeepSeek Harness：
+//   网页控制台只显示 4 个客户端，桌面应用显示 6 个 —— 用户看到的接入状态是残的。）
 function agentStatus() {
   const home = os.homedir();
   const readJSON = (f) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch (_) { return null; } };
   const readText = (f) => { try { return fs.readFileSync(f, 'utf8'); } catch (_) { return null; } };
+
+  // MCP 条目是否已写入该客户端配置：kind 决定判定方式（与 core/clients.js 的语义对齐）
+  const mcpInstalled = (kind, file, opts) => {
+    const o = opts || {};
+    if (kind === 'toml') {
+      const t = readText(file);
+      return t == null ? 'absent' : (t.includes(`[${o.tomlSection || 'mcp_servers.tdai'}]`) ? 'installed' : 'missing');
+    }
+    if (kind === 'dsh-patch') {
+      // patch 层：只要有 profile 的 cordis.patch.yml 里含标记即算已接入
+      let profiles = [];
+      try { profiles = fs.readdirSync(file).filter((n) => n !== 'node_modules'); } catch (_) { return 'absent'; }
+      const mark = o.patchMark || 'dsh-mcp-client';
+      for (const p of profiles) {
+        const t = readText(path.join(file, p, 'cordis.patch.yml'));
+        if (t && t.includes(mark)) return 'installed';
+      }
+      return 'missing';
+    }
+    if (kind === 'yaml') {
+      // Hermes：块定位判定（与 register.js 的写入标记同源：2 空格缩进的子键）
+      const t = readText(file);
+      if (t == null) return 'absent';
+      return new RegExp('^\\s{2}' + (o.yamlLeaf || 'tdai') + ':', 'm').test(t) ? 'installed' : 'missing';
+    }
+    if (kind === 'opencode') {
+      // OpenCode：字段 'mcp'，且 command 是数组 —— 用"存在且 command 为数组"当已接入判据
+      const c = readJSON(file);
+      if (c == null) return 'absent';
+      const parts = String(o.pointer || '/mcp/tdai').split('/').filter(Boolean);
+      let cur = c;
+      for (const p of parts) { if (!cur || typeof cur !== 'object') return 'missing'; cur = cur[p]; }
+      return cur && Array.isArray(cur.command) ? 'installed' : 'missing';
+    }
+    // json / json-nested：按 pointer 取值（父路径缺失即视为未接入）
+    const c = readJSON(file);
+    if (c == null) return 'absent';
+    const parts = String(o.pointer || '/mcpServers/tdai').split('/').filter(Boolean);
+    const leaf = parts.pop();
+    let cur = c;
+    for (const p of parts) { if (!cur || typeof cur !== 'object') return 'missing'; cur = cur[p]; }
+    return cur && cur[leaf] ? 'installed' : 'missing';
+  };
+
+  // 客户端清单（与 core/clients.js 对齐；含 probe 用于"客户端是否装了"）
+  // ⚠️ 本列表是 core/clients.js 的**内联副本**（SEA 单文件要求，不能 require）。
+  //    改一边必须改另一边 —— `test/clients-consistency.test.js` ⑨ 会拦漂移。
+  //    路径分段用 CLIENT_PATHS 的同一种写法（'x/y/z' 正斜杠），方便逐字比对。
+  const CLIENTS_MIN = [
+    { name: 'ZCode CLI', kind: 'json-nested', probe: path.join(home, '.zcode'), file: path.join(home, '.zcode', 'cli', 'config.json'), pointer: '/mcp/servers/tdai', hookFile: path.join(home, '.zcode', 'cli', 'config.json') },
+    { name: 'Claude Code', kind: 'json', probe: path.join(home, '.claude.json'), file: path.join(home, '.claude.json'), pointer: '/mcpServers/tdai', hookFile: path.join(home, '.claude', 'settings.json') },
+    { name: 'Cursor', kind: 'json', probe: path.join(home, '.cursor'), file: path.join(home, '.cursor', 'mcp.json'), pointer: '/mcpServers/tdai' },
+    { name: 'Codex', kind: 'toml', probe: path.join(home, '.codex', 'config.toml'), file: path.join(home, '.codex', 'config.toml'), tomlSection: 'mcp_servers.tdai' },
+    { name: 'Trae', kind: 'json', probe: path.join(home, '.trae'), file: path.join(home, '.trae', 'mcp.json'), pointer: '/mcpServers/tdai' },
+    { name: 'DeepSeek Harness', kind: 'dsh-patch', probe: path.join(home, '.dsh'), file: path.join(home, '.dsh', 'profiles'), patchMark: 'dsh-mcp-client' },
+    { name: 'CodeBuddy', kind: 'json', probe: path.join(home, '.codebuddy'), file: path.join(home, '.codebuddy', '.mcp.json'), pointer: '/mcpServers/tdai' },
+    { name: 'WorkBuddy', kind: 'json', probe: path.join(home, '.workbuddy-ai'), file: path.join(home, '.workbuddy-ai', 'mcp.json'), pointer: '/mcpServers/tdai' },
+    { name: 'OpenCode', kind: 'opencode', probe: path.join(home, '.config', 'opencode'), file: path.join(home, '.config', 'opencode', 'opencode.json'), pointer: '/mcp/tdai' },
+    { name: 'Hermes', kind: 'yaml', probe: path.join(home, '.hermes'), file: path.join(home, '.hermes', 'config.yaml'), yamlTop: 'mcp_servers', yamlLeaf: 'tdai' },
+    { name: 'OpenClaw', kind: 'json-nested', probe: path.join(home, '.openclaw'), file: path.join(home, '.openclaw', 'openclaw.json'), pointer: '/mcp/servers/tdai' },
+    { name: 'Pi', kind: 'json', probe: path.join(home, '.pi'), file: path.join(home, '.pi', 'agent', 'mcp.json'), pointer: '/mcpServers/tdai' },
+  ];
+
   const items = [];
+  for (const cl of CLIENTS_MIN) {
+    // 客户端目录/文件不存在 → absent（未装该客户端），与桌面端口径一致
+    if (!fs.existsSync(cl.probe)) { items.push({ name: cl.name, status: 'absent' }); continue; }
+    const st = mcpInstalled(cl.kind, cl.file, cl);
+    const rec = { name: cl.name, status: st };
+    // hook 状态只对有 hook 的客户端显示（ZCode CLI / Claude Code）
+    // 注：「旧写法」= 直接 `node daemon.js hook`，对**源码/CLI 用户**其实是正确的形态
+    // （他们的 register-all.cjs 就是这么写的）；提示"建议切换"是给 exe 用户看的
+    // （exe 用户该走 .cmd 包装的 tdai-hook.cmd）。守护进程无法判断用户属于哪一类，
+    // 故统一给出中性提示，不误报为"未注入"。
+    if (cl.hookFile) {
+      const hs = hookStateOf(cl.hookFile);
+      if (hs.present) rec.detail = hs.legacy ? 'hook 已注入（脚本写法，exe 用户建议关→开切换）' : 'hook 已注入';
+    }
+    items.push(rec);
+  }
 
-  // ZCode CLI（MCP + hook）—— hook 状态此前只对 Claude Code 检查，
-  // ZCode 明明同样支持 UserPromptSubmit hook 却从不显示，两端口径不一致。
-  let f = path.join(home, '.zcode', 'cli', 'config.json');
-  let c = readJSON(f);
-  const zcSt = hookStateOf(path.join(home, '.zcode', 'cli', 'config.json'));
-  items.push({
-    name: 'ZCode CLI',
-    status: c == null ? 'absent' : (c.mcp && c.mcp.servers && c.mcp.servers.tdai ? 'installed' : 'missing'),
-    detail: zcSt.present ? (zcSt.legacy ? 'hook 已注入（旧写法，建议切换）' : 'hook 已注入') : undefined,
-  });
-
-  // Claude Code（MCP + hook）
-  f = path.join(home, '.claude.json');
-  c = readJSON(f);
-  const ccMcp = c != null && c.mcpServers && c.mcpServers.tdai ? 'installed' : (c == null ? 'absent' : 'missing');
-  const ccSt = hookStateOf(path.join(home, '.claude', 'settings.json'));
-  items.push({ name: 'Claude Code', status: ccMcp, detail: ccSt.present ? (ccSt.legacy ? 'hook 已注入（旧写法，建议切换）' : 'hook 已注入') : undefined });
-
-  // Cursor
-  f = path.join(home, '.cursor', 'mcp.json');
-  c = readJSON(f);
-  items.push({ name: 'Cursor', status: c == null ? 'absent' : (c.mcpServers && c.mcpServers.tdai ? 'installed' : 'missing') });
-
-  // Codex
-  f = path.join(home, '.codex', 'config.toml');
-  const t = readText(f);
-  items.push({ name: 'Codex', status: t == null ? 'absent' : (t.includes('[mcp_servers.tdai]') ? 'installed' : 'missing') });
-
-  // 指令文件（档 B 兜底）
+  // 指令文件（档 B 兜底）：与 register.js 的 INSTR_TARGETS 同源（.zcode/AGENTS.md + .claude/CLAUDE.md）
   const inst1 = readText(path.join(home, '.zcode', 'AGENTS.md'));
   const inst2 = readText(path.join(home, '.claude', 'CLAUDE.md'));
   items.push({ name: '全局指令文件', status: (inst1 && inst1.includes('tdai-memory:begin')) || (inst2 && inst2.includes('tdai-memory:begin')) ? 'installed' : 'missing' });
@@ -910,21 +1081,24 @@ function startServer(cfg, api, cache, state) {
       if (u.pathname === '/api/test-connection' && req.method === 'POST') {
         const t0 = Date.now();
         let nas = false, auth = false, hint = '';
+        let code, codeKey, kind;
         if (cfg.panelUrl && cfg.userKey) {
           try {
-            const r = await api('/skill/list', { method: 'POST', body: { team_id: cfg.teamId || undefined }, timeout: 8000 });
-            nas = r.status >= 200 && r.status < 300;
-            auth = nas;
-            // 括号不可省：早先写成 `!nas && r.status === 401 || r.status === 403`，
-            // && 优先级高于 ||，实际语义是 `(!nas && 401) || 403` —— 任何 403 都会跳过
-            // else 分支的通用提示。今天两种写法结论恰好一致（403 时 nas 必为 false），
-            // 但只要上面几行改一下就会被误判，属于埋在连接测试里的隐性坑。
-            if (!nas && (r.status === 401 || r.status === 403)) { auth = false; hint = 'userKey 可能失效'; }
-            else if (!nas) hint = `面板返回 HTTP ${r.status}`;
+            // ⚠️ 必须打 /chat-memory/my-agents（检索面端点，**真的校验 userKey**）。
+            //   实测：/skill/list 与 /meta/auth/verify 对坏 key 都返回 HTTP 200 + code:0，
+            //   用它们探活会让 auth 恒为 true —— "连接正常"但检索/上传全静默失败。
+            //   口径与 core/tdai-core.js health()、pet main.js testConn 必须一致。
+            const r = await api('/chat-memory/my-agents', { method: 'POST', body: { team_id: cfg.teamId || undefined }, timeout: 8000 });
+            const v = r.v;
+            // nas = 面板这家服务活着（拿到 4xx/404 也算活着）；auth = 真鉴权通过
+            nas = r.ok || (v.status >= 100 && v.status < 500);
+            auth = r.ok;
+            hint = auth ? '' : (panelSummary(v) || '');
+            code = v.code; codeKey = v.key || ''; kind = v.kind || '';
           } catch (e) { hint = `面板不可达 (${e.message})`; }
         } else hint = '请先填写 panelUrl 和 userKey';
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify({ nas, auth, latencyMs: Date.now() - t0, hint }));
+        res.end(JSON.stringify({ nas, auth, latencyMs: Date.now() - t0, hint, code, codeKey, kind }));
         return;
       }
       if (u.pathname === '/api/agents-status') {
@@ -940,12 +1114,15 @@ function startServer(cfg, api, cache, state) {
       if (u.pathname === '/health') {
         let queueLen = 0;
         try { queueLen = fs.readdirSync(QUEUE_DIR).length; } catch (_) { }
-        let nas = null;
+        // nas = 面板是否可达（4xx/404 也算可达）；auth = 真鉴权通过。
+        // /skill/list 对坏 key 返回 200/code:0，**不能**用来判 auth（曾经就是这么错的）。
+        let nas = null, auth = null;
         if (cfg.panelUrl && cfg.userKey) {
           try {
-            const r = await api('/skill/list', { method: 'POST', body: { team_id: cfg.teamId || undefined }, timeout: 5000 });
-            nas = !!(r && r.status >= 200 && r.status < 300);
-          } catch (_) { nas = false; }
+            const r = await api('/chat-memory/my-agents', { method: 'POST', body: { team_id: cfg.teamId || undefined }, timeout: 5000 });
+            nas = r.ok || (r.v.status >= 100 && r.v.status < 500);
+            auth = r.ok;
+          } catch (_) { nas = false; auth = false; }
         }
         // uploadSources：控制台守护卡片「采集上传」行的唯一依据。
         // 优先用 state 里由采集循环回填的值（反映真实运行态）；state 尚未回填时
@@ -955,7 +1132,7 @@ function startServer(cfg, api, cache, state) {
         // nextScanAt：优先 state（采集循环每轮回填），退回持久化值；都没有则按"现在 + 一个周期"估算
         const nextScanAt = state.nextScanAt || loadStatus().nextScanAt || '';
         jsonRes(res, 200, {
-          local: true, nas, configOk: !missingConfig(cfg), version: APP_VER,
+          local: true, nas, auth, configOk: !missingConfig(cfg), version: APP_VER,
           hookCalls: state.hookCalls, lastPush: state.lastPush, queueLen,
           uptimeSince: state.startedAt, nextScanAt, uploadSources,
         });
@@ -1096,7 +1273,7 @@ function backfillStatus() {
   return Object.assign({}, bfJob, { backfilledFiles: Object.keys(loadBackfilled()).length });
 }
 
-// targets 来自控制台弹窗勾选的 agent key，形如 "zcode:AgentHub" / "claude-code:<dir>"。
+// targets 来自控制台弹窗勾选的 agent key，形如 "zcode:~/projects/demo-app" / "claude-code:<dir>"。
 // key 空数组 = 不限制（= 全部上传）。
 //
 // 统一语义：target = "<来源>:<目录>"。命中规则 = 目录完全相同，或互为子路径。
@@ -1293,4 +1470,7 @@ module.exports = {
   agentInventory, targetsMatchDir,
   SOURCES, ZDB_CURSOR_PREFIX, ZCODE_DB,
   APP_VER, RECALL_PORT, CFG_PATH, DATA_DIR, QUEUE_DIR, LOG_PATH, SCAN_INTERVAL_MS,
+  // 面板响应判定的内联副本：导出仅为让 test/clients-consistency.test.js 能逐字段
+  // 与 core/panel-codes.js 比对（防"改了 core 忘了 daemon"的漂移）。
+  PANEL_HINTS, PANEL_CODE_CLASS, PANEL_API_PREFIX, classifyPanel, panelSummary, codeKeyOf,
 };

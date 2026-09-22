@@ -1,0 +1,89 @@
+# CI：每次 push / PR 跑全量测试。
+#
+# 为什么必须存在（P0-4）：
+#   早先只有 release.yml 且里面只跑了 4 条冒烟（daemon health / mcp list / register / functional），
+#   12 个测试套件里有 8 个**从不执行** —— 界面回归（renderer-dom / console-behavior /
+#   guard-off / sqlite-degrade / clients-consistency …）只能在本地手动发现，
+#   带病合并后要等到发版才暴露。本 workflow 把 test:ci 作为合并门禁。
+#
+# 需要 pet/node_modules（jsdom 装在 pet 下，根目录保持零依赖），故先 npm ci --prefix pet。
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    # 全量测试里有 Windows 路径/注册表相关断言（register / clients-consistency 用 path.join 写盘、
+    # daemon 的 VBS 自启），必须在 windows 上跑才等价于真实用户环境。
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: pet/package-lock.json
+
+      - name: 安装测试依赖（jsdom 等，仅 pet/）
+        run: npm ci --prefix pet
+
+      - name: 版本号四处一致校验
+        shell: bash
+        run: |
+          PET_VERSION="$(node -p "require('./pet/package.json').version")"
+          ROOT_VERSION="$(node -p "require('./package.json').version")"
+          DAEMON_VER="$(node -e "process.stdout.write((require('fs').readFileSync('daemon/tdai-daemon.js','utf8').match(/APP_VER = '([^']+)'/)||[])[1]||'')")"
+          MCP_VER="$(node -e "process.stdout.write((require('fs').readFileSync('mcp/tdai-mcp.js','utf8').match(/SERVER_VER = '([^']+)'/)||[])[1]||'')")"
+          fail=0
+          [ "$PET_VERSION" = "$ROOT_VERSION" ] || { echo "::error::pet/package.json ($PET_VERSION) 与根 package.json ($ROOT_VERSION) 版本不一致"; fail=1; }
+          [ "$DAEMON_VER" = "$PET_VERSION" ] || { echo "::error::daemon APP_VER ($DAEMON_VER) ≠ $PET_VERSION"; fail=1; }
+          [ "$MCP_VER" = "$PET_VERSION" ] || { echo "::error::mcp SERVER_VER ($MCP_VER) ≠ $PET_VERSION"; fail=1; }
+          [ "$fail" = "0" ] || exit 1
+          echo "版本一致：$PET_VERSION（root/pet/daemon/mcp）"
+
+      - name: 全量测试（16 个套件 + 两条冒烟）
+        run: npm run test:ci
+
+      - name: 语法自检（所有入口文件可解析）
+        shell: bash
+        run: |
+          for f in core/*.js daemon/*.js mcp/*.js pet/src/*.js register-all.cjs scripts/*.cjs; do
+            node --check "$f" || { echo "::error::语法错误：$f"; exit 1; }
+          done
+          echo "全部入口语法通过"
+
+  # 「硬编码纪律」门禁：开源仓库不得出现作者机器路径 / 真实项目名。
+  # 背景：曾把桌面原型稿路径与 D:/私人项目/.../jsdom 硬编码进三个脚本，靠人工 review 才发现。
+  hygiene:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 扫描作者机器路径与私有项目名
+        shell: bash
+        run: |
+          set +e
+          # 只扫被 git 跟踪的文件（node_modules / dist 不在其列）
+          HITS="$(git ls-files -z | xargs -0 grep -nHE '[A-Za-z]:[\\/](Users|用户)[\\/]' 2>/dev/null \
+            | grep -viE 'C:/Users/x/|C:/x/|C:\\\\Users\\\\x\\\\|Program Files|nodejs' )"
+          if [ -n "$HITS" ]; then
+            echo "::error::发现疑似作者机器路径（如属合法的通用占位符，请加入白名单）"
+            echo "$HITS"
+            exit 1
+          fi
+          # 私有项目名（历史违规词；命中即为回归）
+          HITS2="$(git ls-files -z | xargs -0 grep -nHE 'AgentHub|私人项目' 2>/dev/null)"
+          if [ -n "$HITS2" ]; then
+            echo "::error::发现私有项目名残留"
+            echo "$HITS2"
+            exit 1
+          fi
+          echo "硬编码纪律检查通过"

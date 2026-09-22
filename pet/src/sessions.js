@@ -25,13 +25,49 @@ const SQLITE_TTL = 3000;       // sqlite 查询节流：3s 内复用上一次结
 
 /* ---------- ZCode SQLite 会话库（权威源） ---------- */
 
-// node:sqlite 是 Node 22 内置模块（Experimental），Electron 主进程同样可用。
-// 拿不到就安静降级到文件扫描 —— 绝不因为 sqlite 不可用而让整个列表空白。
+// node:sqlite 是 Node 22.16+ 内置模块（Experimental），Electron 主进程同样可用。
+// 拿不到就降级到文件扫描 —— 但**必须把降级事实暴露出去**（sqliteStatus().degraded），
+// 否则用户看到的是"最新会话停在几个月前"的假象，还会以为程序坏了。
+// ⚠️ node:sqlite 在 Node < 22.16 / Electron 未编译该模块时会 require 失败。
+const SQLITE_MIN_NODE = '22.16.0';
 let _sqliteMod;
 function sqliteMod() {
   if (_sqliteMod !== undefined) return _sqliteMod;
   try { _sqliteMod = require('node:sqlite'); } catch (_) { _sqliteMod = null; }
   return _sqliteMod;
+}
+
+// 降级原因：分「模块缺失」「库文件缺失」「查询失败」三种 —— 用户能据此自助修复。
+// kind: 'ok' | 'no-module' | 'no-db' | 'query-error'
+function sqliteStatus() {
+  const mod = sqliteMod();
+  const nodeVer = (process.versions && process.versions.node) || '';
+  if (!mod) {
+    return {
+      kind: 'no-module', ok: false, degraded: true,
+      node: nodeVer, minNode: SQLITE_MIN_NODE, path: SQLITE,
+      message: `当前 Node ${nodeVer || '未知'} 不支持内置 node:sqlite（需 ≥${SQLITE_MIN_NODE}），`
+        + '正在进行中的会话只统计归档文件，可能看不到最近的对话。',
+      hint: `升级 Node 到 ≥${SQLITE_MIN_NODE}，或从源码用更高版本重新运行应用。`,
+    };
+  }
+  if (!fs.existsSync(SQLITE)) {
+    return {
+      kind: 'no-db', ok: true, degraded: false,
+      node: nodeVer, path: SQLITE,
+      message: '', hint: '',
+    };
+  }
+  const err = _sqliteCache && _sqliteCache.error;
+  if (err) {
+    return {
+      kind: 'query-error', ok: false, degraded: true,
+      node: nodeVer, path: SQLITE, minNode: SQLITE_MIN_NODE,
+      message: `读取 ZCode 会话库失败：${err}`,
+      hint: '若 ZCode 正在写入，稍后会自动重试；持续失败请确认该文件未被其它程序独占。',
+    };
+  }
+  return { kind: 'ok', ok: true, degraded: false, node: nodeVer, path: SQLITE, message: '', hint: '' };
 }
 
 let _sqliteCache = { at: 0, rows: null, error: null };
@@ -339,7 +375,11 @@ function scanSessions(opts) {
 
   const out = Array.from(byKey.values());
   out.sort((a, b) => b.lastTs - a.lastTs);
-  return { ok: true, files: all.length, total: out.length, sessions: out.slice(0, limit) };
+  // sqliteHealth 一并回传：UI 据此在降级时显示明确警告，而不是静默少显示会话
+  const sqlite = sqliteStatus();
+  const res = { ok: true, files: all.length, total: out.length, sessions: out.slice(0, limit) };
+  if (sqlite.degraded) res.warnings = [{ code: 'sqlite', source: 'zcode', ...sqlite }];
+  return res;
 }
 
 // 游标统计：哪些会话已建立上传进度
@@ -361,5 +401,6 @@ function cursorStats() {
 module.exports = {
   scanSessions, cursorStats, zcodeFiles, claudeFiles, scanOne,
   sqliteSessions,       // sqlite 权威源（守护进程上传侧也要用它）
+  sqliteStatus,         // 降级状态（UI 警告用）：kind/degraded/message/hint
   SQLITE,
 };

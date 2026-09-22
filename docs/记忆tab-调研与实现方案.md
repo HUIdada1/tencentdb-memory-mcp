@@ -321,7 +321,7 @@ async countLayers({ team_id, agent_id, block_id } = {}) { /* my-agents → layer
 
 > 依据项目既有约定，以下几处**改完必须同步更新**，否则测试会红：
 
-1. **tab 数量/顺序是契约** —— 本方案**不新增 tab**，只在 `memory` 页内部加二级结构，因此 `test/renderer-dom.js`、`test/ui.test.js`、`test/preview-verify.js` 里的 tab 断言不受影响
+1. **tab 数量/顺序是契约** —— 本方案**不新增 tab**，只在 `memory` 页内部加二级结构，因此 `test/renderer-dom.test.js`、`test/ui.test.js`、`test/preview-verify.test.js` 里的 tab 断言不受影响
 2. **`test/ui.test.js` 校验 page 前必须先剥 HTML 注释**（`replace(/<!--[\s\S]*?-->/g,'')`），否则被注释的 tab 会误匹配通过
 3. **断言 DOM 顺序/数量必须 `querySelectorAll` 取数组比索引**，不能用文本包含 —— 分层构成条的"L0 在最左、L3 在最右"属于顺序契约
 4. **jsdom 下 `document.readyState` 不可信** —— 新增的 boot 逻辑必须 `boot()` 无条件立即调用 + `DOMContentLoaded` 兜底 + `booted` 幂等守卫

@@ -1,4 +1,4 @@
-// test/renderer-dom.js — 渲染层 DOM 集成测试
+// test/renderer-dom.test.js — 渲染层 DOM 集成测试
 // 用 jsdom 加载真实的 pet/src/console.html + console.js + console.css，
 // 注入一个模拟的 preload 桥（window.tdai），然后：
 //   ① 校验 HTML 结构契约（tab/page 一对一、被注释的 tab 确实不可见、无重复 id）
@@ -229,10 +229,13 @@ t('HTML：全文档没有重复 id', () => {
   assert.strictEqual(dup.length, 0, '重复 id：' + dup.join(', '));
 });
 
-t('HTML：总览六分区容器齐全', () => {
+t('HTML：总览首排容器齐全（hero 体征条 + 指标卡同排）', () => {
   const b = boot();
-  ['#live-badge', '#live-text', '#h-latency', '#h-uptime', '#spark-line',
-    '#s-status', '#s-up', '#s-down', '#s-sess', '#s-reqs', '#s-err',
+  // 「记忆库面板」卡、延迟波形（#spark*）已删除：面板地址并入 hero 副标题，
+  // 延迟只保留 #h-latency 单个最新值。
+  ['#live-badge', '#live-text', '#live-sub', '#h-latency', '#h-uptime',
+    '#home-split', '.home-top .hero', '.home-top .stat-row',
+    '#s-sess', '#s-reqs', '#s-err',
     '#sess-list', '#sess-count',
     '#up-speed', '#up-total', '#up-peak', '#up-task-name', '#up-task-bar', '#up-bars',
     '#down-speed', '#down-total', '#down-peak', '#down-task-name', '#down-task-bar', '#down-bars',
@@ -240,6 +243,25 @@ t('HTML：总览六分区容器齐全', () => {
     '#d-mode', '#d-since', '#d-hooks', '#d-port', '#d-files'].forEach((sel) => {
       assert.strictEqual(b.has(sel), true, '缺少总览元素 ' + sel);
     });
+});
+
+t('HTML：已删除的重复展示确实不在 DOM 中（延迟波形 / 面板卡 / 三张重复指标卡）', () => {
+  const b = boot();
+  // 延迟波形整块
+  ['#spark', '#spark-line', '#spark-fill', '#sparkGrad'].forEach((sel) => {
+    assert.strictEqual(b.has(sel), false, '应已删除 ' + sel);
+  });
+  // 「记忆库面板」静态卡（地址已并入 hero 副标题）
+  assert.strictEqual(b.has('#h-panel'), false, '#h-panel 应已删除');
+  // 与 pill / 上下行流量卡重复的三张指标卡
+  ['#c-status', '#c-up', '#c-down', '#s-status', '#s-up', '#s-down'].forEach((sel) => {
+    assert.strictEqual(b.has(sel), false, '应已删除 ' + sel);
+  });
+  // 指标卡只剩 3 张，且累计/失败相邻
+  const stats = Array.from(b.doc.querySelectorAll('.home-top .stat-row .stat'));
+  assert.strictEqual(stats.length, 3, '指标卡应只剩 3 张，实际 ' + stats.length);
+  assert.deepStrictEqual(stats.map((x) => x.querySelector('b').id), ['s-sess', 's-reqs', 's-err'],
+    '指标卡顺序应为 进行中会话 / 累计请求 / 失败请求');
 });
 
 t('HTML：Agent 接入是独立页面（不是塞在设置里）', () => {
@@ -312,21 +334,40 @@ t('渲染：连接体征条按快照点亮', async () => {
   assert.ok(b.text('#live-text').length > 0, 'live-text 应有文案');
 });
 
-t('渲染：六个关键指标卡有非占位文本（状态/上行/下行/会话/请求/错误）', async () => {
+t('渲染：三张关键指标卡有非占位文本（会话/请求/错误）', async () => {
   const m = mkMetrics();
   const b = boot({ snapshot: makeSnapshot(m) });
   await new Promise((r) => setTimeout(r, 30));
   b.push(makeSnapshot(m));
   await new Promise((r) => setTimeout(r, 40));
   const s = makeSnapshot(m);
-  assert.match(b.text('#s-up'), /B|KB|MB/, '#s-up 应是格式化后的字节数，实际 ' + b.text('#s-up'));
-  assert.match(b.text('#s-down'), /B|KB|MB/, '#s-down 应是格式化后的字节数');
   assert.strictEqual(b.text('#s-reqs'), String(s.metrics.reqTotal), '#s-reqs 应等于 reqTotal');
   assert.strictEqual(b.text('#s-err'), String(s.metrics.reqFailed), '#s-err 应等于 reqFailed');
   // #s-sess 的标签是「进行中会话」——只统计 thinking/active，不是全部会话
   const active = s.sessions.filter((x) => x.state === 'thinking' || x.state === 'active').length;
   assert.strictEqual(b.text('#s-sess'), String(active), '#s-sess 应等于进行中会话数');
   assert.ok(s.sessions.length >= 2, '夹具应有 2 个会话，实际 ' + s.sessions.length);
+  // 删卡后「失败请求」仍应紧邻「累计请求」右侧（结构契约，别在改版时丢）
+  const stats = Array.from(b.doc.querySelectorAll('.home-top .stat-row .stat'));
+  assert.deepStrictEqual(stats.map((x) => x.querySelector('b').id), ['s-sess', 's-reqs', 's-err']);
+});
+
+t('渲染：hero 副标题是实时链路读数，且没有延迟波形残留', async () => {
+  const m = mkMetrics();
+  const b = boot({ snapshot: makeSnapshot(m) });
+  await new Promise((r) => setTimeout(r, 30));
+  b.push(makeSnapshot(m));
+  await new Promise((r) => setTimeout(r, 40));
+  // 副标题口径：面板地址 · 面板延迟 Nms · 链路 X↑ Y↓（全部随心跳刷新）
+  const sub = b.text('#live-sub');
+  assert.match(sub, /panel\.example|未配置面板/, '副标题应含面板地址，实际 ' + sub);
+  assert.match(sub, /面板延迟 \d+ms/, '副标题应含真实延迟，实际 ' + sub);
+  assert.match(sub, /链路 .+\/s↑ .+\/s↓/, '副标题应含上下行速率，实际 ' + sub);
+  // #h-latency 仍是单个最新值（延迟的唯一保留处）
+  assert.match(b.text('#h-latency'), /^\d+ ms$/, '#h-latency 应为单个延迟值，实际 ' + b.text('#h-latency'));
+  // 延迟波形已删除，DOM 与 JS 都不该再有残留
+  assert.strictEqual(b.doc.querySelector('#spark-line'), null, '延迟波形 DOM 应已删除');
+  assert.ok(!JS.includes('drawSpark') && !JS.includes('latencyHist'), 'console.js 不应再有 drawSpark / latencyHist');
 });
 
 t('渲染：会话列表渲染出真实会话行（标题/摘要/轮次/时间）', async () => {

@@ -49,45 +49,34 @@
   <!-- ====== 总览（实时监控台） ====== -->
   <section data-page="home" class="page active">
 
-    <!-- ① 连接体征条 -->
-    <div class="hero glass">
-      <div class="live">
-        <span id="live-badge" class="live-badge"><i></i></span>
-        <div class="live-txt">
-          <b id="live-text">正在建立实时连接…</b>
-          <span id="live-sub">等待首次心跳</span>
+    <!-- ① 连接体征条（半宽）+ 右侧三张关键指标卡 —— 同一排
+         布局：.home-top 外层仍是一个 .row，可被 #home-split 切成 .split / .nosplit 两态：
+           连接 → hero 与 stat-row 各占半宽，四张卡并排两行
+           未连接 → 还原为 hero 整行 + stat-row 整行，指标卡铺满一行
+         指标卡与 hero 同排，故不再各自带 .row 的下外边距（由 .home-top 统一给） -->
+    <div class="row home-top" id="home-split">
+      <div class="hero glass">
+        <div class="live">
+          <span id="live-badge" class="live-badge"><i></i></span>
+          <div class="live-txt">
+            <b id="live-text">正在建立实时连接…</b>
+            <span id="live-sub">等待首次心跳</span>
+          </div>
+        </div>
+        <div class="hero-kv">
+          <div><label>面板延迟</label><b id="h-latency">—</b></div>
+          <div><label>守护探活</label><b id="h-beat">—</b></div>
+          <div><label>运行时长</label><b id="h-uptime">—</b></div>
+          <div><label>版本</label><b id="h-ver">—</b></div>
         </div>
       </div>
-      <div class="hero-kv">
-        <div><label>记忆库面板</label><b id="h-panel">未配置</b></div>
-        <div><label>面板延迟</label><b id="h-latency">—</b></div>
-        <div><label>守护探活</label><b id="h-beat">—</b></div>
-        <div><label>运行时长</label><b id="h-uptime">—</b></div>
-        <div><label>版本</label><b id="h-ver">—</b></div>
-      </div>
-      <div class="spark-wrap">
-        <label>延迟波形（最近 60s）</label>
-        <svg id="spark" viewBox="0 0 220 44" preserveAspectRatio="none">
-          <defs>
-            <linearGradient id="sparkGrad" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stop-color="var(--brand)" stop-opacity="0.30"/>
-              <stop offset="100%" stop-color="var(--brand)" stop-opacity="0"/>
-            </linearGradient>
-          </defs>
-          <polyline id="spark-fill" fill="url(#sparkGrad)" stroke="none" points=""></polyline>
-          <polyline id="spark-line" fill="none" stroke="var(--brand)" stroke-width="1.5" points=""></polyline>
-        </svg>
-      </div>
-    </div>
 
-    <!-- ② 关键指标卡（「累计请求」与「失败请求」相邻，样式完全一致） -->
-    <div class="row stat-row">
-      <div class="stat glass" id="c-status"><i></i><div><b id="s-status">—</b><span>连接状态</span></div></div>
-      <div class="stat glass" id="c-up"><i></i><div><b id="s-up">—</b><span>上传速度</span></div></div>
-      <div class="stat glass" id="c-down"><i></i><div><b id="s-down">—</b><span>下载速度</span></div></div>
-      <div class="stat glass"><i></i><div><b id="s-sess">—</b><span>进行中会话</span></div></div>
-      <div class="stat glass" id="c-reqs"><i></i><div><b id="s-reqs">—</b><span>累计请求</span></div></div>
-      <div class="stat glass" id="c-err"><i></i><div><b id="s-err">—</b><span>失败请求</span></div></div>
+      <!-- ② 关键指标卡（「累计请求」与「失败请求」相邻，样式完全一致） -->
+      <div class="row stat-row">
+        <div class="stat glass"><i></i><div><b id="s-sess">—</b><span>进行中会话</span></div></div>
+        <div class="stat glass" id="c-reqs"><i></i><div><b id="s-reqs">—</b><span>累计请求</span></div></div>
+        <div class="stat glass" id="c-err"><i></i><div><b id="s-err">—</b><span>失败请求</span></div></div>
+      </div>
     </div>
 
     <!-- ③ 实时会话已迁移至独立「实时会话」tab（避免总览过长） -->
@@ -229,6 +218,7 @@
         <div class="sess-head">
           <span>会话 / 来源</span><span>状态</span><span>轮次</span><span>最近交互</span><span>内容摘要</span>
         </div>
+        <div id="sess-warn" class="banner warn"></div>
         <div id="sess-list" class="sess-list"><div class="empty">扫描中…</div></div>
       </div>
     </div>

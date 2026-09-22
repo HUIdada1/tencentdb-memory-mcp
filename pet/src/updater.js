@@ -1,4 +1,4 @@
-// updater.js — 自更新模块(抄 AgentHub updater.cjs 精简版)
+// updater.js — 自更新模块（精简版，只实现本应用需要的两条更新路径）
 // 安装版(NSIS):electron-updater 自动下载/安装
 // 便携版(portable):只读 latest.yml,提示后跳 GitHub 手动下
 'use strict';
@@ -26,8 +26,9 @@ let notifiedVersion = '';
 
 function isPortable() {
   if (process.env.PORTABLE_EXECUTABLE_DIR) return true;
-  // 与 AgentHub 同口径：exe 同目录放 portable.flag 手动开启便携模式，
-  // 不然手动便携副本会走 electron-updater 自动更新路径（更新的是被当便携用的副本）
+  // 便携模式判定：exe 同目录放 portable.flag 即可手动开启。
+  // 否则手动复制出来的便携副本会走 electron-updater 自动更新路径
+  // （结果更新的是"被当便携用的那份副本"，而不是用户以为的程序本体）。
   try {
     const fs = require('fs');
     if (app.isPackaged && fs.existsSync(path.join(path.dirname(app.getPath('exe')), 'portable.flag'))) return true;

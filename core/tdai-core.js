@@ -2,6 +2,15 @@
 // 用法：const core = require('./tdai-core'); const c = core.create();
 // 环境：Node ≥16（内置 https）；Node ≥18 走 fetch。零 npm 依赖。
 // 配置仅读本机 ~/.zcode/tdai-mcp.json（env 同权覆盖）；密钥不出本机，无硬编码资产 ID。
+//
+// ⚠️ 面板 API 前缀是 `/api/v1`（业务面），**不是**上游文档里的 `/v3`。
+//    2026-09-22 实测（真实面板）：
+//      POST /api/v1/skill/list        → 200 {"code":0,...}
+//      POST /v3/skill/list            → 404 Not Found
+//      POST /v3/chat-memory/search    → 404 Not Found
+//      GET  /v3                       → 200（返回前端 SPA 的 index.html）
+//    → `/v3` 是**前端路由**，与会话记忆业务面是两回事。别把这里"对齐"成 /v3。
+//    真值常量在 core/panel-codes.js 的 API_PREFIX（daemon 有内联副本，测试会校验一致）。
 
 'use strict';
 const fs = require('fs');
@@ -9,6 +18,8 @@ const os = require('os');
 const path = require('path');
 const http = require('http');
 const https = require('https');
+// 面板响应判定（业务码/HTTP 码/中文提示）唯一真源，与 daemon 内联版本语义一致
+const panel = require('./panel-codes.js');
 
 const CFG_PATH = path.join(os.homedir(), '.zcode', 'tdai-mcp.json');
 const RESULT_LIMIT = 6144; // 单条结果截断 ≤6KB
@@ -110,8 +121,10 @@ function requestRaw(urlStr, { method = 'GET', headers = {}, body = null, timeout
 
 /* ---------- 统一结果封装 ---------- */
 
-function ok(data, hint) { return { ok: true, data, hint: hint || '' }; }
-function err(message, hint) { return { ok: false, error: message, hint: hint || '' }; }
+// extra.panel = core/panel-codes.js classify() 的结论（业务码/hint/kind），
+// 供调用方做 UI 分类（例如把 kind==='auth' 渲染成"去改配置"）；不带也不影响既有调用方。
+function ok(data, hint, extra) { return Object.assign({ ok: true, data, hint: hint || '' }, extra || {}); }
+function err(message, hint, extra) { return Object.assign({ ok: false, error: message, hint: hint || '' }, extra || {}); }
 function clip(s, n = RESULT_LIMIT) {
   s = typeof s === 'string' ? s : JSON.stringify(s, null, 2);
   return s.length > n ? s.slice(0, n) + `\n…[截断, 共 ${s.length} 字符]` : s;
@@ -137,7 +150,7 @@ function create(overrides) {
   async function api(pathname, { method = 'GET', body = null, extraHeaders = {}, timeout = REQ_TIMEOUT } = {}) {
     const miss = missingConfig(cfg);
     if (miss) return err('未完成配置', miss);
-    const url = cfg.panelUrl + '/api/v1' + pathname;
+    const url = cfg.panelUrl + panel.API_PREFIX + pathname;
     const t0 = Date.now();
     // 上行字节 = 请求体长度（真实写出前即可精确得知）
     let reqBytes = 0;
@@ -161,11 +174,14 @@ function create(overrides) {
     // r 理论上不会是 null，但请求层任何改动都可能让它变成 undefined；
     // 这里显式兜底，避免下游出现 "Cannot read properties of null" 这种难查的崩溃。
     if (!r || typeof r.status !== 'number') return err('面板响应异常', '响应结构不符合预期（未拿到 status）');
-    if (r.status === 401 || r.status === 403) return err(`认证失败 HTTP ${r.status}`, 'userKey 可能失效');
-    if (r.status >= 500) return err(`面板 5xx (${r.status})`, clip(r.body, 800));
-    let json;
-    try { json = JSON.parse(r.body); } catch (_) { json = { raw: r.body }; }
-    return ok(json, `HTTP ${r.status}`);
+
+    // 判定收敛到 core/panel-codes.js。**不再只看 HTTP 状态码** ——
+    // 实测面板用 "HTTP 400 + code:400 + message:MISSING_BLOCK_ID" 表达参数错误，
+    // 旧实现把它当成功，导致上游"上传成功"实则零写入（最隐蔽的一类 bug）。
+    const v = panel.classify(r);
+    // 把判定结果一并带回（err/ok 的第三个字段），供上层做 UI 分类展示
+    if (!v.ok) return err(panel.summarize(v), v.hint || clip(r.body, 800), { panel: v });
+    return ok(v.json == null ? { raw: r.body } : v.json, `HTTP ${r.status}`, { panel: v });
   }
 
   /* ---- 只读工具 ---- */
@@ -173,27 +189,50 @@ function create(overrides) {
   return {
     cfg,
 
-    // 健康检查：面板可达性 + 检索面探活（真实端点，不再用 404 的 /meta/auth/verify）
-    // 判据与另外两处**保持同一口径**（daemon /api/test-connection、pet main.js testConn）：
-    //   nas  = HTTP 2xx
-    //   auth = nas
-    // 早先这里多写了一个 `!(a.data && a.data.code === 401)`，是**永远不生效的死条件**——
-    // api() 已把 HTTP 401/403 收敛成 err()（a.ok=false），根本走不到这里；
-    // 而实测面板认证失败返回的是 HTTP 401，不会用「HTTP 200 + 业务 code:401」表达。
-    // 留着它只会让人误以为存在业务码分支，且一旦面板改成 200 内嵌 code，
-    // 三处实现就会给出互相矛盾的结论。故统一为"2xx 即可达且认证通过"。
+    // 健康检查：面板可达性 + **真实鉴权**探活。
+    //
+    // ⚠️ 2026-09-22 实测修正（旧注释与旧实现都是错的，别再改回去）：
+    //   实测各端点对 userKey 的校验态度**不一致**：
+    //     POST /api/v1/skill/list            + 坏 key → HTTP 200 {"code":0}  ← **不校验！**
+    //     POST /api/v1/meta/auth/verify      + 坏 key → HTTP 200 {"code":0,"valid":true} ← **也不校验！**
+    //     POST /api/v1/chat-memory/my-agents + 坏 key → HTTP 401 {"code":401,"message":"INVALID_USER_KEY"} ← ✅ 真校验
+    //     POST /api/v1/chat-memory/search    + 坏 key → HTTP 401 {"code":401}   ← ✅ 真校验
+    //     POST /api/v1/chat-memory/layer     + 坏 key → HTTP 401 {"code":401}   ← ✅ 真校验
+    //   旧实现打 `/skill/list` 并写 `auth = nas` → **auth 恒等于"面板可达"**，
+    //   永远发现不了 key 失效：用户看到"连接正常"，实际所有检索/上传都在静默失败。
+    //   （本文件更早的版本甚至用 `/meta/auth/verify`，同样测不出 —— 名字有误导性。）
+    //   → 探活必须打 `/chat-memory/my-agents`：它是检索面端点，**真的会校验**，
+    //     且已经携带 team_id，顺带验证 teamId 是否有效（坏 serviceId 会回 400 INVALID_INSTANCE）。
+    //
+    //   口径（与 daemon /api/test-connection、pet main.js testConn **必须一致**）：
+    //     nas  = 面板这家服务活着（HTTP 有响应，含 4xx/404）
+    //     auth = classify() 判定为成功（v.ok），即 key 真实有效
+    //   ⚠️ `nas !== auth` 是**正常且必要**的：面板活着但 key 错了必须能区分出来。
+    //      别再写 `auth = nas`（那是本次修掉的 bug）。
     async health() {
       const t0 = Date.now();
       const miss = missingConfig(cfg);
-      if (miss) return ok({ nas: false, auth: false, panelUrl: cfg.panelUrl, hint: miss });
-      const a = await api('/skill/list', { method: 'POST', body: { team_id: cfg.teamId || undefined }, timeout: 8000 });
-      const nas = !!a.ok;
+      if (miss) return ok({ nas: false, auth: false, panelUrl: cfg.panelUrl, hint: miss, kind: 'config', codeKey: '' });
+      const a = await api('/chat-memory/my-agents', {
+        method: 'POST',
+        body: { team_id: cfg.teamId || undefined },
+        timeout: 8000,
+      });
+      // api() 在**网络层失败**时返回的 err() 不带 panel（没拿到响应，无从判定），
+      // 这里补一个 unreachable 结论，让 UI 的 kind 分支不会拿到空串。
+      const v = a.panel || { kind: 'unreachable', status: 0, code: undefined, key: '', hint: '' };
+      const nas = a.ok || (v.status >= 100 && v.status < 500);  // 拿到 4xx/404 也算"面板活着"
+      const auth = !!a.ok;
       return ok({
         panelUrl: cfg.panelUrl,
         nas,
-        auth: nas,
+        auth,
         latencyMs: Date.now() - t0,
-        hint: a.ok ? '' : (a.error || ''),
+        // 面板活着但 key 不行时，hint 要能直接告诉用户去改哪里
+        hint: auth ? '' : (a.hint || a.error || ''),
+        code: v.code,
+        codeKey: v.key || '',
+        kind: v.kind || 'unreachable',
       });
     },
 
@@ -350,4 +389,4 @@ function create(overrides) {
   };
 }
 
-module.exports = { create, loadConfig, requestRaw, ok, err, clip, CFG_PATH, missingConfig };
+module.exports = { create, loadConfig, requestRaw, ok, err, clip, CFG_PATH, missingConfig, panel };

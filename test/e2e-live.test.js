@@ -1,4 +1,4 @@
-// test/e2e-live.js — 端到端联调（不需要 Electron）
+// test/e2e-live.test.js — 端到端联调（不需要 Electron）
 // 复刻 main.js 的接线方式：core 观察者 -> metrics -> 快照，
 // 打一个本地假面板，验证「一次真实 memory_search」能在总览快照里
 // 留下完整的上下行流量、任务进度、日志、以及依赖的渲染字段。

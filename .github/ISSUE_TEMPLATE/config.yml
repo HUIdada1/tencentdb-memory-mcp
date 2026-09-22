@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 安装与配置问题
+    url: https://github.com/HUIdada1/tencentdb-memory-mcp/blob/main/INSTALL.md
+    about: 装不上、连不上、端口占用、面板侧怎么准备 —— 先看安装文档，多数问题里面有
+  - name: 参与贡献
+    url: https://github.com/HUIdada1/tencentdb-memory-mcp/blob/main/CONTRIBUTING.md
+    about: 提交信息规范、代码约定、测试要求、我们不会接受的改动

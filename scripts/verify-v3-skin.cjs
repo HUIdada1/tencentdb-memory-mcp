@@ -92,10 +92,13 @@ t('CSS：点击点波纹用 --rx / --ry 且带兜底', () => {
   assert(/var\(--ry,\s*50%\)/.test(css), '波纹未使用 --ry 兜底值');
 });
 
-t('SVG：仪表盘与波形已改为 CSS 令牌（不再硬编码 hex）', () => {
-  ['stroke="var(--brand)"', 'stroke="var(--teal)"', 'url(#sparkGrad)']
+t('SVG：仪表盘已改为 CSS 令牌（不再硬编码 hex）', () => {
+  // 注：延迟波形（url(#sparkGrad) 渐变）已随「延迟波形（最近 60s）」整块删除，
+  //     这里不再断言它存在 —— 但必须断言它确实没了，防止改版时被误加回来。
+  ['stroke="var(--brand)"', 'stroke="var(--teal)"']
     .forEach((s) => assert(html.includes(s), '未替换：' + s));
   assert(!/stroke="#[0-9A-Fa-f]{6}"/.test(html), '仍有硬编码 hex stroke');
+  assert(!/id="spark"/.test(html) && !/sparkGrad/.test(html), '延迟波形应已删除');
 });
 
 t('JS：波纹绑定已写入 --rx / --ry', () => {

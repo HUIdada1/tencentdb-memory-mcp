@@ -85,7 +85,12 @@ function boot(o) {
     const b = boot({ guardEnabled: false, pingOk: false, latency: 88, latencyStale: false });
     await wait(2300);   // 等 2s 兜底刷新 + 15s 首轮守护刷新
     chk('① 停止后 pill 显示「守护已停止」', b.txt('#health-text') === '守护已停止', b.txt('#health-text'));
-    chk('① 停止后连接状态卡显示「离线」（不再谎报在线）', b.txt('#s-status') === '离线', b.txt('#s-status'));
+    // 「连接状态」指标卡已删除；状态改由 hero 的 live-text 承载，这里改断言它
+    chk('① 停止后 hero 状态文案为「面板连接已中断」（不再谎报在线）', b.txt('#live-text') === '面板连接已中断', b.txt('#live-text'));
+    chk('① 停止后副标题带「采集已停止」', /采集已停止/.test(b.txt('#live-sub')), b.txt('#live-sub'));
+    // 首排退回整行版式：停止后 hero 只剩一行文案，分半会空出一大片
+    const split = b.d.querySelector('#home-split');
+    chk('① 停止后首排退回整行版式', split.classList.contains('nosplit') && !split.classList.contains('split'), split.className);
     const pill = b.d.querySelector('#health-pill');
     chk('① 停止后 pill 用 off 灰态（不是 wait 检测中）', pill.classList.contains('off') && !pill.classList.contains('wait'), pill.className);
     chk('① 停止后倒计时不显示「即将采集…」', b.txt('#d-nextscan') === '—', b.txt('#d-nextscan'));
@@ -100,7 +105,9 @@ function boot(o) {
     const b = boot({ guardEnabled: true, pingOk: false, latency: 88, latencyStale: false });
     await wait(2300);
     chk('② 守护运行 + 新鲜延迟 → 仍显示「已连接」（回归保护）', b.txt('#health-text') === '已连接', b.txt('#health-text'));
-    chk('② 且连接状态卡为「在线」', b.txt('#s-status') === '在线', b.txt('#s-status'));
+    chk('② 且 hero 状态文案为「实时连接正常」', b.txt('#live-text') === '实时连接正常', b.txt('#live-text'));
+    chk('② 且副标题是真实时链路读数（含延迟与上下行速率）', /面板延迟 88ms · 链路 .+↑ .+↓/.test(b.txt('#live-sub')), b.txt('#live-sub'));
+    chk('② 已连接时首排为分半版式', b.d.querySelector('#home-split').classList.contains('split'), b.d.querySelector('#home-split').className);
   }
 
   /* ---------- ③ 陈旧延迟 + 探活失败：不能继续举着"已连接" ---------- */
@@ -108,7 +115,7 @@ function boot(o) {
     const b = boot({ guardEnabled: true, pingOk: false, latency: 88, latencyStale: true });
     await wait(2300);
     chk('③ 延迟过期且探活失败 → 不再显示「已连接」', b.txt('#health-text') !== '已连接', b.txt('#health-text'));
-    chk('③ 连接状态卡不再是「在线」', b.txt('#s-status') !== '在线', b.txt('#s-status'));
+    chk('③ hero 状态文案不再是「实时连接正常」', b.txt('#live-text') !== '实时连接正常', b.txt('#live-text'));
   }
 
   /* ---------- ④ 守护在跑且探活成功：采集上传一行给出真实开关状态 ---------- */

@@ -1,6 +1,15 @@
 # TD 记忆守护（TencentDB Memory MCP）
 
-腾讯云 TencentDB 记忆库的无感接入工具集：**Agent 按需检索（MCP）** + **后台自动采集上传与注入（守护进程）**。零 npm 依赖（守护进程/MCP 侧），纯 Node ≥16，密钥不出本机。
+腾讯云 TencentDB 记忆库的无感接入工具集：**Agent 按需检索（MCP）** + **后台自动采集上传与注入（守护进程）**。零 npm 依赖（守护进程/MCP 侧），纯 Node，密钥不出本机。
+
+> **Node 版本要求**（按形态分列，别装错）
+>
+> | 形态 | 要求 | 原因 |
+> |---|---|---|
+> | **桌面应用**（`pet/`，exe 安装版） | Node **≥22.16.0** | 会话扫描用内置 `node:sqlite` 读 ZCode 会话库；低版本会**静默降级**成只扫归档文件目录，你会看到几个月前的旧会话 |
+> | 守护进程 / MCP / core / CLI | Node **≥16.0.0** | 零依赖、内置 `http`/`https`/`fetch`（16 无原生 fetch 时自动走 http 模块） |
+>
+> 装桌面应用的用户**不需要自己装 Node**（安装包已内置 Electron 运行时）。这一条只影响**从源码跑 `pet/`** 的开发者。
 
 - 仓库：https://github.com/HUIdada1/tencentdb-memory-mcp
 - 发版（exe 下载）：https://github.com/HUIdada1/tencentdb-memory-mcp/releases
@@ -14,6 +23,8 @@
 | **命令行守护**（`tdai-daemon-vX.Y.Z-win-x64.exe`，Node SEA 单文件） | 服务器/无界面环境、或只想跑后台 | 跑一次 `node register-all.cjs`（源码）或手动写各客户端配置；exe 自带网页控制台 |
 
 两者**共用同一份配置** `~/.zcode/tdai-mcp.json` 与同一套运行时数据 `~/.zcode/tdai-daemon/`，可同时存在：谁先占用 `127.0.0.1:8100` 谁提供检索服务，另一个自动降级、不做重复采集（桌面应用界面会显示「外部进程」）。
+
+> 📖 **第一次装？看 [INSTALL.md](INSTALL.md)** —— 面板侧准备、三条安装路径、配置字段速查、9 条常见问题（含会话只显示旧数据、链路测试失败、双守护等）。
 
 ## 目录结构
 
@@ -184,4 +195,18 @@ gh workflow run release.yml -f version=0.4.0
 - Windows：脚本全程 UTF-8（Node `JSON.stringify`）；不要用 Git Bash 内联 `curl -d` 传中文（GBK 乱码）
 - hook 场景 stdin 可能不关闭，daemon hook 子命令限时 300ms 收数
 - 检索的 `block_id` 默认 `chat-memory`，可在配置里加 `"blockId"` 按面板实际取值覆盖
-- 本机 Node 16 无 fetch 也能跑（内置 http/https），推荐 Node ≥18
+- 本机 Node 16 无 fetch 也能跑（内置 http/https）；守护进程/MCP 侧要求 Node ≥16，桌面应用（源码运行）要求 Node ≥22.16.0（见文首版本表）
+
+## 贡献
+
+欢迎 Issue / PR。提交前请先读 [CONTRIBUTING.md](CONTRIBUTING.md)（提交信息规范、代码范围划分、测试要求）。
+
+- 报 Bug 请用 [Issue 模板](.github/ISSUE_TEMPLATE/bug_report.md)，附上 `设置 → 关于` 里的版本号与「实时日志」里的相关行
+- 跑一遍全量测试：`npm run test:all`
+- 版本变更见 [CHANGELOG.md](CHANGELOG.md)
+
+## 许可证
+
+[MIT](LICENSE) © 2026 TD 记忆守护 contributors
+
+本项目与腾讯云 TencentDB 官方仓库（[TencentCloud/TencentDB-Agent-Memory](https://github.com/TencentCloud/TencentDB-Agent-Memory)）**无隶属关系**，是社区侧的接入工具；「腾讯云」「TencentDB」等商标归其各自权利人所有。

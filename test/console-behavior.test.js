@@ -1,4 +1,4 @@
-// test/console-behavior.js — 渲染层行为验证（jsdom 实跑真实 console.html/js）
+// test/console-behavior.test.js — 渲染层行为验证（jsdom 实跑真实 console.html/js）
 // 覆盖：右上角连接状态 pill 的四种判定、总览「连接状态」卡联动、
 //       运行时长在无推送时仍自动刷新（不依赖切换页面）。
 'use strict';
@@ -56,7 +56,12 @@ const wait = (ms) => new Promise((r) => setTimeout(r, ms));
     await wait(2200);
     chk('A 已连接时 pill 文案为「已连接」', b.d.querySelector('#health-text').textContent.trim() === '已连接', b.d.querySelector('#health-text').textContent.trim());
     chk('A 已连接时 pill 有 on 类', b.d.querySelector('#health-pill').classList.contains('on'), b.d.querySelector('#health-pill').className);
-    chk('A 连接状态卡显示「在线」', b.d.querySelector('#s-status').textContent.trim() === '在线', b.d.querySelector('#s-status').textContent.trim());
+    // 「连接状态」指标卡已删除：连接状态唯一可见处是右上角 pill + hero 的 live-text，
+    // 这里断言 hero 文案确实承载了状态，避免删卡后"状态无处可看"。
+    chk('A hero 状态文案为「实时连接正常」', b.d.querySelector('#live-text').textContent.trim() === '实时连接正常', b.d.querySelector('#live-text').textContent.trim());
+    // 首排两态：已连接 → 分半（hero 与指标卡同排）
+    const split = b.d.querySelector('#home-split');
+    chk('A 已连接时首排为分半版式', split.classList.contains('split') && !split.classList.contains('nosplit'), split.className);
   }
 
   // ---- 场景 B：面板不可达（panelOk:false）→ pill 应为「连接失败」且点亮 err ----
@@ -68,7 +73,10 @@ const wait = (ms) => new Promise((r) => setTimeout(r, ms));
     await wait(2200);
     chk('B 不可达时 pill 文案为「连接失败」', b.d.querySelector('#health-text').textContent.trim() === '连接失败', b.d.querySelector('#health-text').textContent.trim());
     chk('B 不可达时 pill 有 err 类', b.d.querySelector('#health-pill').classList.contains('err'), b.d.querySelector('#health-pill').className);
-    chk('B 连接状态卡显示「离线」', b.d.querySelector('#s-status').textContent.trim() === '离线', b.d.querySelector('#s-status').textContent.trim());
+    chk('B hero 状态文案为「面板连接已中断」', b.d.querySelector('#live-text').textContent.trim() === '面板连接已中断', b.d.querySelector('#live-text').textContent.trim());
+    // 断开 → 首排退回整行版式（hero 只剩状态文案，分半会空出一大片）
+    const split = b.d.querySelector('#home-split');
+    chk('B 不可达时首排退回整行版式', split.classList.contains('nosplit') && !split.classList.contains('split'), split.className);
   }
 
   // ---- 场景 C：未配置面板 → pill 应为「未配置」 ----

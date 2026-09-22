@@ -33,175 +33,181 @@ function record(target, action, detail) {
 function readJSON(file) { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch (_) { return null; } }
 function writeJSON(file, obj) { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, JSON.stringify(obj, null, 2)); }
 
-/* ---------- 1. MCP 注册（各客户端配置文件） ---------- */
+// 在 JSON.stringify 后的文本里查找某条路径：Windows 的 `\` 转义成 `\\`。
+// 直接 includes(原始路径) 会永远不命中（幂等判定失效 → 重复写入），必须先转义。
+function escapeForJsonMatch(p) {
+  return JSON.stringify(String(p)).slice(1, -1);   // 去掉首尾引号，得到 JSON 串里的实际形态
+}
 
+/* ---------- 0. 客户端清单（来自 core/clients.js 唯一真源） ---------- */
+
+const { CLIENTS, INSTR, INSTR_MARK, INSTR_TARGETS } = require('./core/clients.js');
+
+/* ---------- 1. MCP 注册（各客户端配置文件，表驱动） ---------- */
+
+// 与桌面端 register.js 共用同一份 CLIENTS 清单：认识哪些客户端、配置文件在哪、
+// 用什么格式写 —— 全部同源。这里唯一不同的是"注册目标"：源码用户指向 node + 源码目录
+// （桌面端指向应用 exe，那是刻意的设计差异）。
 const mcpStdio = { type: 'stdio', command: NODE, args: [MCP] };
 
-// ZCode CLI
-{
-  const f = path.join(os.homedir(), '.zcode', 'cli', 'config.json');
-  const c = readJSON(f) || {};
-  c.mcp = c.mcp || {}; c.mcp.servers = c.mcp.servers || {};
-  const existed = !!c.mcp.servers.tdai;
-  c.mcp.servers.tdai = mcpStdio;
-  backup(f); writeJSON(f, c);
-  record(f, existed ? '覆盖' : '新增', 'mcp.servers.tdai');
+// 按 pointer 读写 JSON 条目（'/mcp/servers/tdai' 或 '/mcpServers/tdai' 通吃）
+function getPointer(obj, pointer) {
+  const parts = String(pointer).split('/').filter(Boolean);
+  const leaf = parts.pop();
+  let cur = obj;
+  for (const p of parts) { if (!cur || typeof cur !== 'object') return undefined; cur = cur[p]; }
+  return cur && typeof cur === 'object' ? cur[leaf] : undefined;
+}
+function setPointer(obj, pointer, value) {
+  const parts = String(pointer).split('/').filter(Boolean);
+  const leaf = parts.pop();
+  let parent = obj;
+  for (const p of parts) { if (!parent[p] || typeof parent[p] !== 'object') parent[p] = {}; parent = parent[p]; }
+  parent[leaf] = value;
 }
 
-// Claude Code（用户级 ~/.claude.json）
-{
-  const f = path.join(os.homedir(), '.claude.json');
-  if (fs.existsSync(f)) {
-    const c = readJSON(f) || {};
-    c.mcpServers = c.mcpServers || {};
-    const existed = !!c.mcpServers.tdai;
-    c.mcpServers.tdai = mcpStdio;
-    backup(f); writeJSON(f, c);
-    record(f, existed ? '覆盖' : '新增', 'mcpServers.tdai');
-  } else record(f, '跳过', '文件不存在（未安装 Claude Code）');
-}
-
-// Cursor
-{
-  const f = path.join(os.homedir(), '.cursor', 'mcp.json');
-  const existed = fs.existsSync(f);
-  const c = existed ? (readJSON(f) || {}) : {};
-  c.mcpServers = c.mcpServers || {};
-  c.mcpServers.tdai = mcpStdio;
-  if (existed) backup(f);
-  writeJSON(f, c);
-  record(f, existed ? '覆盖' : '新增', 'mcpServers.tdai');
-}
-
-// Trae（~/.trae/mcp.json）
-{
-  const dir = path.join(os.homedir(), '.trae');
-  if (!fs.existsSync(dir)) record('.trae/mcp.json', '跳过', '未安装 Trae');
-  else {
-    const f = path.join(dir, 'mcp.json');
-    const existed = fs.existsSync(f);
-    const c = existed ? (readJSON(f) || {}) : {};
-    c.mcpServers = c.mcpServers || {};
-    c.mcpServers.tdai = mcpStdio;
-    if (existed) backup(f);
-    writeJSON(f, c);
-    record(f, existed ? '覆盖' : '新增', 'mcpServers.tdai');
-  }
-}
-
-// Codex（TOML 追加）
-{
-  const f = path.join(os.homedir(), '.codex', 'config.toml');
-  if (fs.existsSync(f)) {
-    const text = fs.readFileSync(f, 'utf8');
-    if (text.includes('[mcp_servers.tdai]')) {
-      record(f, '跳过', '已存在 [mcp_servers.tdai]');
-    } else {
-      backup(f);
-      fs.appendFileSync(f, `\n[mcp_servers.tdai]\ncommand = "${NODE.replace(/\\/g, '\\\\')}"\nargs = ["${MCP.replace(/\\/g, '\\\\')}"]\n`);
-      record(f, '追加', '[mcp_servers.tdai]');
-    }
-  } else record(f, '跳过', '文件不存在（未安装 Codex）');
-}
-
-// DeepSeek Harness（~/.dsh/profiles/*/cordis.patch.yml，官方用户 patch 层：insert 一个 dsh-mcp-client 条目）
-{
-  const profilesDir = path.join(os.homedir(), '.dsh', 'profiles');
-  if (!fs.existsSync(path.join(os.homedir(), '.dsh'))) record('~/.dsh', '跳过', '未安装 DeepSeek Harness');
-  else {
-    let profiles = [];
-    try { profiles = fs.readdirSync(profilesDir).filter((n) => n !== 'node_modules'); } catch (_) { }
-    let wrote = 0, skipped = 0;
-    for (const p of profiles) {
-      const f = path.join(profilesDir, p, 'cordis.patch.yml');
-      if (!fs.existsSync(f)) continue; // profile 未初始化（无 patch 文件）不动
-      const text = fs.readFileSync(f, 'utf8');
-      if (text.includes('dsh-mcp-client')) { skipped++; continue; }
-      backup(f);
-      const block = [
-        '# tdai-memory:begin （TD 记忆 MCP，由 register-all 写入）',
-        '- insert:',
-        "    - resolve: '@deepseek-ai/dsh-mcp-client'",
-        '      config:',
-        '        transport: stdio',
-        '        serverName: tdai-memory',
-        `        command: '${NODE}'`,
-        '        args:',
-        `          - '${MCP}'`,
-        '',
-      ].join('\n');
-      // 模板占位（仅注释或空数组 []）不能直接追加（[] 后跟条目是非法 YAML）：保留注释行、整体重写
-      const body = text.split('\n').filter((l) => !l.trim().startsWith('#')).join('\n').trim();
-      if (body === '' || body === '[]') {
-        const header = text.split('\n').filter((l) => l.trim().startsWith('#')).join('\n');
-        fs.writeFileSync(f, (header ? header + '\n' : '') + block);
-      } else {
-        fs.appendFileSync(f, '\n' + block);
+for (const cls of CLIENTS) {
+  const probe = cls.probe(os.homedir());
+  if (!fs.existsSync(probe)) { record(cls.name, '跳过', '未安装该客户端'); continue; }
+  const file = cls.file(os.homedir());
+  try {
+    if (cls.kind === 'toml') {
+      const sec = cls.tomlSection || 'mcp_servers.tdai';
+      const text = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : null;
+      if (text == null) { record(cls.name, '跳过', `文件不存在（未安装 ${cls.name}）`); continue; }
+      if (text.includes(`[${sec}]`)) { record(file, '跳过', `已存在 [${sec}]`); continue; }
+      backup(file);
+      const esc = (s) => String(s).replace(/\\/g, '\\\\');
+      fs.appendFileSync(file, `\n[${sec}]\ncommand = "${esc(NODE)}"\nargs = ["${esc(MCP)}"]\n`);
+      record(file, '追加', `[${sec}]`);
+    } else if (cls.kind === 'dsh-patch') {
+      const profilesDir = file;
+      let profiles = [];
+      try { profiles = fs.readdirSync(profilesDir).filter((n) => n !== 'node_modules'); } catch (_) { }
+      const mark = cls.patchMark || 'dsh-mcp-client';
+      let wrote = 0, skipped = 0;
+      for (const p of profiles) {
+        const f = path.join(profilesDir, p, 'cordis.patch.yml');
+        if (!fs.existsSync(f)) continue; // profile 未初始化（无 patch 文件）不动
+        const text = fs.readFileSync(f, 'utf8');
+        if (text.includes(mark)) { skipped++; continue; }
+        backup(f);
+        const block = [
+          '# tdai-memory:begin （TD 记忆 MCP，由 register-all 写入）',
+          '- insert:',
+          "    - resolve: '@deepseek-ai/dsh-mcp-client'",
+          '      config:',
+          '        transport: stdio',
+          '        serverName: tdai-memory',
+          `        command: '${NODE}'`,
+          '        args:',
+          `          - '${MCP}'`,
+          '',
+        ].join('\n');
+        // 模板占位（仅注释或空数组 []）不能直接追加（[] 后跟条目是非法 YAML）：保留注释行、整体重写
+        const body = text.split('\n').filter((l) => !l.trim().startsWith('#')).join('\n').trim();
+        if (body === '' || body === '[]') {
+          const header = text.split('\n').filter((l) => l.trim().startsWith('#')).join('\n');
+          fs.writeFileSync(f, (header ? header + '\n' : '') + block);
+        } else {
+          fs.appendFileSync(f, '\n' + block);
+        }
+        wrote++;
       }
-      wrote++;
+      record('~/.dsh/profiles', wrote ? '追加' : '跳过', wrote ? `${wrote} 个 profile 写入 insert 条目` : (skipped ? 'patch 已存在' : '无 cordis.patch.yml'));
+    } else if (cls.kind === 'opencode') {
+      // OpenCode 专有形态：字段名是 'mcp'，且 command 是**数组**（自带参数，无独立 args）
+      const existed = fs.existsSync(file);
+      const c = existed ? (readJSON(file) || {}) : {};
+      const ptr = cls.pointer || '/mcp/tdai';
+      const entry = { type: 'local', command: [NODE, MCP], enabled: true };
+      const prev = getPointer(c, ptr);
+      if (prev && JSON.stringify(prev) === JSON.stringify(entry)) {
+        record(file, '跳过', `${ptr.replace(/^\//, '')} 已是最新`);
+        continue;
+      }
+      setPointer(c, ptr, entry);
+      if (existed) backup(file);
+      writeJSON(file, c);
+      record(file, prev ? '覆盖' : '新增', ptr.replace(/^\//, ''));
+    } else if (cls.kind === 'yaml') {
+      // Hermes：MCP 配置在**主配置 ~/.hermes/config.yaml** 的顶层 mcp_servers 里。
+      // 用「块定位」而不是全量解析，避免引入 YAML 依赖（本项目零 npm 依赖是硬约束）。
+      const text = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
+      const top = cls.yamlTop || 'mcp_servers';
+      const leaf = cls.yamlLeaf || 'tdai';
+      if (new RegExp('^\\s{2}' + leaf + ':', 'm').test(text)) { record(file, '跳过', `已存在 ${top}.${leaf}`); continue; }
+      if (text) backup(file);
+      // YAML 里 Windows 路径要加引号，否则 `C:\...` 会被当作转义序列
+      const q = (s) => '"' + String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
+      const block = new RegExp('^' + top + ':', 'm').test(text)
+        ? `  ${leaf}:\n    command: ${q(NODE)}\n    args:\n      - ${q(MCP)}\n`
+        : `${top}:\n  ${leaf}:\n    command: ${q(NODE)}\n    args:\n      - ${q(MCP)}\n`;
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.appendFileSync(file, (text && !/\n$/.test(text) ? '\n' : '') + '\n' + block);
+      record(file, text ? '追加' : '新建', `${top}.${leaf}`);
+    } else {
+      const existed = fs.existsSync(file);
+      const c = existed ? (readJSON(file) || {}) : {};
+      const ptr = cls.pointer || '/mcpServers/tdai';
+      // 真幂等：条目内容完全一致就跳过（不重写、不备份）。
+      // 早先只看"条目是否存在"，于是每次运行都重写+留一份 .bak，
+      // 备份目录被无意义地堆满，用户也分不清这次到底改没改。
+      const prev = getPointer(c, ptr);
+      if (prev && JSON.stringify(prev) === JSON.stringify(mcpStdio)) {
+        record(file, '跳过', `${ptr.replace(/^\//, '')} 已是最新`);
+        continue;
+      }
+      setPointer(c, ptr, mcpStdio);
+      if (existed) backup(file);
+      writeJSON(file, c);
+      record(file, prev ? '覆盖' : '新增', ptr.replace(/^\//, ''));
     }
-    record('~/.dsh/profiles', wrote ? '追加' : '跳过', wrote ? `${wrote} 个 profile 写入 insert 条目` : (skipped ? 'patch 已存在' : '无 cordis.patch.yml'));
+  } catch (e) {
+    record(cls.name, '失败', e.message);
   }
 }
 
-/* ---------- 2. Claude Code UserPromptSubmit hook ---------- */
+/* ---------- 2. UserPromptSubmit hook（Claude Code / ZCode） ---------- */
 
+// hook 目标来自 CLIENTS 的 hook 声明（单一真源）：
+// Claude Code 的 hook 写在 ~/.claude/settings.json，ZCode 写在 ~/.zcode/cli/config.json。
+// 早先本文件把这两个路径硬编码在下面两段里，与 pet/src/register.js 各写一份，极易漂移。
 if (DO_HOOK) {
-  const f = path.join(os.homedir(), '.claude', 'settings.json');
-  const c = readJSON(f) || {};
-  c.hooks = c.hooks || {};
-  c.hooks.UserPromptSubmit = c.hooks.UserPromptSubmit || [];
-  const cmd = `${NODE} "${DAEMON}" hook`;
-  const entry = { matcher: '*', hooks: [{ type: 'command', command: cmd }] };
-  const already = JSON.stringify(c.hooks.UserPromptSubmit).includes(DAEMON);
-  if (already) {
-    record(f, '跳过', 'hook 已存在');
-  } else {
-    c.hooks.UserPromptSubmit.push(entry);
-    backup(f); writeJSON(f, c);
-    record(f, '新增', 'UserPromptSubmit → daemon hook');
-  }
-}
-
-// ZCode UserPromptSubmit hook（~/.zcode/cli/config.json）
-if (DO_HOOK) {
-  const f = path.join(os.homedir(), '.zcode', 'cli', 'config.json');
-  if (!fs.existsSync(f)) record(f, '跳过', '未安装 ZCode');
-  else {
+  const hookClients = CLIENTS.filter((c) => c.hook);
+  for (const cls of hookClients) {
+    const dir = cls.probe(os.homedir());
+    const f = cls.hook.file(os.homedir());
+    if (!fs.existsSync(dir)) { record(f, '跳过', '未安装该客户端'); continue; }
     const c = readJSON(f) || {};
     c.hooks = c.hooks || {};
     c.hooks.UserPromptSubmit = c.hooks.UserPromptSubmit || [];
     const cmd = `${NODE} "${DAEMON}" hook`;
-    const entry = { matcher: '*', hooks: [{ type: 'command', command: cmd }] };
-    if (JSON.stringify(c.hooks.UserPromptSubmit).includes(DAEMON)) {
+    // ⚠️ 幂等判据必须用**已 JSON 转义**的形式去比：
+    // Windows 路径里的 `\` 在 JSON 串里是 `\\`，直接 includes(DAEMON) 永远不命中
+    // → 每次运行都再追加一条，hook 静默翻倍（每次提问注入两次记忆）。
+    // 早先就是踩了这个坑，这里用 escapeForJsonMatch(DAEMON) 修正。
+    const needle = escapeForJsonMatch(DAEMON);
+    const hasCommand = (arr) => JSON.stringify(arr).includes(needle);
+    if (hasCommand(c.hooks.UserPromptSubmit)) {
       record(f, '跳过', 'hook 已存在');
     } else {
-      c.hooks.UserPromptSubmit.push(entry);
+      c.hooks.UserPromptSubmit.push({ matcher: '*', hooks: [{ type: 'command', command: cmd }] });
       backup(f); writeJSON(f, c);
-      record(f, '新增', 'UserPromptSubmit → daemon hook');
+      record(f, '新增', `UserPromptSubmit → daemon hook（${cls.name}）`);
     }
   }
 }
 
 /* ---------- 3. 全局指令文件（档 B 兜底硬规则） ---------- */
 
-const INSTR = [
-  '',
-  '<!-- tdai-memory:begin -->',
-  '## 团队记忆（TD）',
-  '当用户提到「之前」「上次」「我们怎么做的」「还记得」等回忆类表述时，先调用 tdai.my_agents 拿 block_id，再调用 tdai.memory_search 检索团队记忆，基于检索结果回答并标注来源；不要凭猜测回答历史问题。',
-  '技能/Wiki/代码图谱检索用 tdai.skill_list / tdai.skill_get / tdai.wiki_search / tdai.codegraph_search / tdai.codegraph_explore。',
-  '<!-- tdai-memory:end -->',
-  '',
-].join('\n');
-
+// 指令块正文与目标清单都来自 core/clients.js（唯一真源）：
+// 写入集合 = 检测集合，避免用户自带的同名文件造成"已接入"假阳性。
 if (DO_INSTR) {
-  for (const f of [
-    path.join(os.homedir(), '.zcode', 'AGENTS.md'),
-    path.join(os.homedir(), '.claude', 'CLAUDE.md'),
-  ]) {
+  for (const [dir, name] of INSTR_TARGETS) {
+    const f = path.join(os.homedir(), dir, name);
     const text = fs.existsSync(f) ? fs.readFileSync(f, 'utf8') : '';
-    if (text.includes('tdai-memory:begin')) { record(f, '跳过', '指令块已存在'); continue; }
+    if (text.includes(INSTR_MARK)) { record(f, '跳过', '指令块已存在'); continue; }
     if (fs.existsSync(f)) backup(f);
     fs.mkdirSync(path.dirname(f), { recursive: true });
     fs.appendFileSync(f, INSTR);
