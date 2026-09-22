@@ -41,7 +41,10 @@ function load(breakSqlite) {
   const hasBuildIn = (() => { try { require('node:sqlite'); return true; } catch (_) { return false; } })();
   if (hasBuildIn) {
     chk('① 模块可用时 degraded=false', st.degraded === false, JSON.stringify(st.kind));
-    chk('① 模块可用时 kind=ok', st.kind === 'ok', st.kind);
+    // kind 的两种合法值：'ok'（本机有会话库）/ 'no-db'（干净机器或 CI runner 上无会话库，
+    // sessions.js 里 ok:true + degraded:false，属正常降档而非降级 —— v0.5.12 CI 实证 runner 即 no-db）
+    chk('① 模块可用时 kind=ok|no-db（均非降级）',
+      st.kind === 'ok' || st.kind === 'no-db', st.kind);
     const r = s.scanSessions({ limit: 3 });
     chk('① 正常路径不带 warnings', !r.warnings || r.warnings.length === 0,
       JSON.stringify(r.warnings || []));

@@ -79,8 +79,12 @@ jobs:
             echo "$HITS"
             exit 1
           fi
-          # 私有项目名（历史违规词；命中即为回归）
-          HITS2="$(git ls-files -z | xargs -0 grep -nHE 'AgentHub|私人项目' 2>/dev/null)"
+          # 私有项目名（历史违规词；命中即为回归）。
+          # 例外：规则定义与审计文件会合法引用词本身（本 workflow / CONTRIBUTING /
+          # docs 审计文档 / 钉死本门禁的 docs-consistency 断言），从命中中排除；
+          # 其余文件命中即真回归（v0.5.12 实证：不过滤则门禁自命中必挂）。
+          HITS2="$(git ls-files -z | xargs -0 grep -nHE 'AgentHub|私人项目' 2>/dev/null \
+            | grep -vE '^\.github/workflows/ci\.yml:|^CONTRIBUTING\.md:|^docs/改进方案-对齐上游规范\.md:|^test/docs-consistency\.test\.js:')"
           if [ -n "$HITS2" ]; then
             echo "::error::发现私有项目名残留"
             echo "$HITS2"
