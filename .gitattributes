@@ -1,0 +1,4 @@
+# 仓库内容原样签出，不做任何行尾转换。
+# 原因：windows-latest runner 的 git 默认 core.autocrlf=true，checkout 会把 LF 转成 CRLF，
+# 使测试中 ^---\n 等行尾锚定断言失败（v0.5.12 发版实证，Release run #20）。
+* -text
