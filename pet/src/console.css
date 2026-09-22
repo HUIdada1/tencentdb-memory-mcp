@@ -1044,7 +1044,15 @@ input.switch:disabled{opacity:.5;cursor:not-allowed}
   font-size:10px;color:var(--txt-3);letter-spacing:.4px;
   background:var(--line);border-bottom:1px solid var(--line);
 }
-.sess-list{max-height:260px;overflow-y:auto}
+.sess-list{max-height:520px;overflow-y:auto}
+.sess-pager{
+  display:flex;align-items:center;justify-content:center;gap:6px;padding:10px 12px;
+  border-top:1px solid var(--line);background:var(--panel);
+}
+.sess-pager[hidden]{display:none}
+.sess-pager .pg-btn{min-width:32px}
+.sess-pager .pg-info{min-width:150px;justify-content:center}
+.sess-scope{margin-top:8px;color:var(--txt-3);font-size:11px;line-height:1.5}
 .sess-row{
   border-bottom:1px solid var(--line);font-size:var(--fs-sm);color:var(--txt-2);
   transition:background var(--dur-fast) var(--ease-out-quart);
@@ -1154,9 +1162,38 @@ input.switch:disabled{opacity:.5;cursor:not-allowed}
 /* ============================================================
    22. 记忆页结果列表
    ============================================================ */
+/* 记忆工作区：把“查看结构”和“检索内容”分成两个稳定的操作面，
+   避免同一个工具栏里同时出现互相影响的输入框、层选择和下钻状态。 */
+.memory-head{
+  display:flex;align-items:flex-end;justify-content:space-between;gap:24px;
+  padding:22px 24px;margin-bottom:12px;min-height:92px;
+}
+.memory-head .eyebrow{
+  display:block;color:var(--brand-text);font-size:10px;letter-spacing:1.8px;
+  font-weight:650;margin-bottom:5px;
+}
+.memory-head h2{margin:0;color:var(--txt);font-size:24px;line-height:1.2;font-weight:650;letter-spacing:.2px}
+.memory-head p{margin:6px 0 0;color:var(--txt-3);font-size:12px;line-height:1.5}
+.memory-summary{display:flex;flex-direction:column;align-items:flex-end;gap:3px;flex:0 0 auto}
+.memory-summary span{font-size:11px;color:var(--txt-3)}
+.memory-summary b{font-size:22px;color:var(--brand-text);font-variant-numeric:tabular-nums}
+.memory-controls{
+  display:flex;align-items:center;justify-content:space-between;gap:14px;
+  padding:10px 12px;margin-bottom:12px;min-width:0;
+}
+.mem-control-main{display:flex;align-items:center;gap:12px;min-width:0;flex:1 1 auto}
+.mem-search-controls,.mem-layer-controls{display:flex;align-items:center;gap:8px;min-width:0;flex:1 1 auto}
+.mem-search-controls input{flex:1 1 240px;min-width:120px}
+.mem-search-controls select{flex:0 0 110px}
+.mem-layer-controls{color:var(--txt-2);font-size:12px}
+.mem-layer-controls>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-right:auto}
+.mem-layer-controls [hidden],.mem-search-controls[hidden]{display:none !important}
+.mem-wrap.is-loading .mem-body{opacity:.55;pointer-events:none}
+.mem-busy{position:absolute;z-index:2;top:10px;right:14px;color:var(--brand-text);font-size:11px;background:var(--glass-hi);padding:3px 8px;border-radius:var(--r-s)}
+.mem-busy[hidden]{display:none}
 /* 记忆页容器：内容区独立滚动 + 分页栏常驻底部。
    旧版是 .out 单块 overflow:auto，卡片一多分页栏会被顶出可视区。 */
-.mem-wrap{display:flex;flex-direction:column;max-height:560px;overflow:hidden}
+.mem-wrap{position:relative;display:flex;flex-direction:column;max-height:640px;overflow:hidden}
 .mem-body{
   flex:1 1 auto;min-height:200px;overflow:auto;
   padding:var(--sp-4) var(--sp-5);
@@ -1525,13 +1562,20 @@ input.switch:disabled{opacity:.5;cursor:not-allowed}
 .update-logo{width:50px;height:50px;border-radius:var(--r-xl)}
 .update-head b{display:block;font-size:23px;font-weight:650;letter-spacing:.2px}
 .update-head span{font-size:var(--fs-xs);color:var(--txt-3);letter-spacing:.3px}
-.up-progress{height:6px;background:var(--line);border-radius:var(--r-pill);overflow:hidden;margin-bottom:10px}
-.up-progress i{
-  display:block;height:100%;border-radius:var(--r-pill);transition:width var(--dur-slow) var(--ease-out-quart);
-  background:linear-gradient(90deg,var(--brand),var(--brand-2));
+.update-progress{
+  position:relative;height:8px;background:var(--line);border-radius:var(--r-pill);
+  overflow:hidden;margin-bottom:10px;border:1px solid var(--line-2);
 }
-.up-progress.indeterminate i{
+.update-progress-fill{
+  display:block;width:100%;height:100%;border-radius:inherit;
+  transform:scaleX(var(--progress-scale,0));transform-origin:left center;
+  transition:transform var(--dur-base) var(--ease-out-quart),background var(--dur-base) var(--ease-out-quart);
+  background:linear-gradient(90deg,var(--brand),var(--brand-2));
+  will-change:transform;
+}
+.update-progress.indeterminate .update-progress-fill{
   width:100% !important;
+  transform:scaleX(1);
   background:linear-gradient(90deg,transparent,var(--brand-2),transparent);
   background-size:200% 100%;animation:shimmer 1.5s linear infinite;
 }
@@ -1585,11 +1629,19 @@ input.switch:disabled{opacity:.5;cursor:not-allowed}
   .row{gap:10px}
   .srow>span:first-child{width:104px}
   .kv{grid-template-columns:96px 1fr}
+  .memory-controls{align-items:stretch;flex-direction:column}
+  .mem-control-main{align-items:stretch;flex-direction:column}
+  .mem-search-controls,.mem-layer-controls{width:100%}
 }
 @media (max-width:720px){
   .subtabs{width:100%;overflow-x:auto}
   .card{padding:var(--sp-3) var(--sp-4)}
   .stat{min-width:132px;padding:var(--sp-3) var(--sp-4)}
+  .memory-head{align-items:flex-start;flex-direction:column;padding:18px}
+  .memory-summary{align-items:flex-start}
+  .mem-search-controls{flex-wrap:wrap}
+  .mem-search-controls input{flex-basis:100%}
+  .mem-search-controls select{flex:1 1 120px}
 }
 
 /* ============================================================
@@ -1667,8 +1719,8 @@ input.switch:disabled{opacity:.5;cursor:not-allowed}
 .up-tag.pend{background:var(--warn-soft,rgba(214,150,20,.16));color:var(--warn,#b8791a)}
 
 /* 进度 */
-.up-progress{margin-top:14px;padding-top:14px;border-top:1px solid var(--line)}
-.up-progress[hidden]{display:none}
+.upload-progress{margin-top:14px;padding-top:14px;border-top:1px solid var(--line)}
+.upload-progress[hidden]{display:none}
 .up-pbar{height:6px;border-radius:var(--r-pill);background:var(--line);overflow:hidden;margin-bottom:8px}
 .up-pbar i{display:block;height:100%;width:0;border-radius:var(--r-pill);
   background:linear-gradient(90deg,var(--brand),var(--brand-soft));

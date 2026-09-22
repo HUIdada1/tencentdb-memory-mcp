@@ -9,7 +9,7 @@
 
   // 延迟历史采样已移除：延迟波形（最近 60s）整块删除，不再需要逐拍累积的采样数组。
   // 延迟只以「面板延迟」单个最新值呈现（hero 体征条 + 副标题），不留历史副本。
-  const S = { snap: null, appInfo: null, sessTimer: null, lastLogSeq: 0, logPaused: false, logClearSeq: 0, scanAnchor: 0, scanInterval: 120, guardEnabled: true, stoppedExternal: false, guideOpen: null };
+  const S = { snap: null, appInfo: null, sessTimer: null, live: { items: [], page: 1, perPage: 40 }, lastLogSeq: 0, logPaused: false, logClearSeq: 0, scanAnchor: 0, scanInterval: 120, guardEnabled: true, stoppedExternal: false, guideOpen: null };
 
   /* ---------- 数值格式化 ---------- */
   function fmtBytes(n) {
@@ -355,20 +355,43 @@
     box.title = w.path ? '会话库路径：' + w.path : '';
   }
 
+  const LIVE_PAGE_SIZE = 40;
+
+  function renderSessionPager(total) {
+    const box = $('#sess-pager');
+    if (!box) return;
+    const pages = Math.max(1, Math.ceil(total / LIVE_PAGE_SIZE));
+    const page = Math.min(Math.max(S.live.page, 1), pages);
+    S.live.page = page;
+    if (pages <= 1) { box.innerHTML = ''; box.hidden = true; return; }
+    box.hidden = false;
+    box.innerHTML = `
+      <button class="pg-btn" data-session-pg="first" ${page <= 1 ? 'disabled' : ''} title="首页">«</button>
+      <button class="pg-btn" data-session-pg="prev" ${page <= 1 ? 'disabled' : ''}>上一页</button>
+      <span class="pg-info"><b>${page}</b> / ${pages}<em>共 ${total.toLocaleString('zh-CN')} 个</em></span>
+      <button class="pg-btn" data-session-pg="next" ${page >= pages ? 'disabled' : ''}>下一页</button>
+      <button class="pg-btn" data-session-pg="last" ${page >= pages ? 'disabled' : ''} title="末页">»</button>`;
+  }
+
   function renderSessions(list) {
     const box = $('#sess-list');
     if (!box) return;
-    list = list || [];
+    list = Array.isArray(list) ? list : [];
+    S.live.items = list;
+    const pages = Math.max(1, Math.ceil(list.length / LIVE_PAGE_SIZE));
+    S.live.page = Math.min(Math.max(S.live.page, 1), pages);
+    const pageItems = list.slice((S.live.page - 1) * LIVE_PAGE_SIZE, S.live.page * LIVE_PAGE_SIZE);
     const cnt = $('#sess-count');
     if (cnt) {
       const act = list.filter((x) => x.state === 'thinking' || x.state === 'active').length;
-      cnt.textContent = `共 ${list.length} 个 · 进行中 ${act}`;
+      cnt.textContent = `共 ${list.length} 个 · 当前第 ${S.live.page}/${pages} 页 · 进行中 ${act}`;
     }
     if (!list.length) {
       box.innerHTML = '<div class="empty">未扫描到会话文件（与任一 Agent 对话后出现）</div>';
+      renderSessionPager(0);
       return;
     }
-    box.innerHTML = list.map((s) => {
+    box.innerHTML = pageItems.map((s) => {
       const state = ST[s.state] || s.state || '—';
       const stale = (s.state === 'stale') ? ' dim' : '';
       const file = s.file || '';
@@ -384,14 +407,16 @@
         <span class="sess-sum" title="${esc(s.lastNote || '')}">${esc(s.lastNote || '—')}</span>
       </div>`;
     }).join('');
+    renderSessionPager(list.length);
   }
 
   async function refreshSessions(force) {
     try {
-      const r = await tdai.sessionsScan({ force: !!force });
+      const r = await tdai.sessionsScan({ force: !!force, limit: 0 });
       if (r && r.ok) {
         renderSessionWarnings(r.warnings);
         renderSessions(r.sessions);
+        renderLiveMeta(r.sessions);
       }
     } catch (_) { /* 扫描失败不阻塞界面 */ }
   }
@@ -747,6 +772,19 @@
     renderScanCountdown();
   }
 
+  document.addEventListener('click', (e) => {
+    const el = e.target.closest ? e.target.closest('[data-session-pg]') : null;
+    if (!el || el.disabled) return;
+    const totalPages = Math.max(1, Math.ceil(S.live.items.length / LIVE_PAGE_SIZE));
+    const map = { first: 1, prev: S.live.page - 1, next: S.live.page + 1, last: totalPages };
+    const next = map[el.dataset.sessionPg];
+    if (!next) return;
+    S.live.page = Math.min(Math.max(next, 1), totalPages);
+    renderSessions(S.live.items);
+    const list = $('#sess-list');
+    if (list) list.scrollTop = 0;
+  });
+
   /* ---------- 实时会话页：动态来源统计 ----------
    * 不再写死"ZCode CLI / Claude Code"：按扫描结果实际出现的 source 动态列出行，
    * 未出现的来源不出现在列表里；同时生成对应的来源说明文案。
@@ -926,15 +964,17 @@
    */
   const MEM_PER_PAGE = 10;
   const MEM = {
-    mode: 'search',        // 'search' | 'layers'
+    mode: 'layers',        // 'search' | 'layers'
     page: 1,
     perPage: MEM_PER_PAGE,
     total: 0,              // 服务端(分层)或客户端(检索)已知总数
+    summaryTotal: 0,       // 分层概览的真实总量（概览不参与分页）
     items: [],             // 当前页要渲染的条目
     query: '',             // 最近一次检索词（翻页时复用）
     layer: '',             // 分层模式当前层：'' = 概览，L0~L3 = 明细
     serverPaged: false,    // 该模式是否走服务端分页
     loadedAt: 0,
+    requestId: 0,
   };
 
   // 时间格式化：面板给的是 ISO UTC（如 2026-09-21T17:37:15.404Z），
@@ -987,6 +1027,30 @@
     </div>`;
   }
 
+  function setMemoryContext(mode, total, label) {
+    const modeEl = $('#mem-summary-mode');
+    const totalEl = $('#mem-summary-total');
+    const crumb = $('#mem-breadcrumb');
+    const name = label || (mode === 'search' ? '关键词检索' : (MEM.layer ? `记忆层 ${MEM.layer}` : '分层概览'));
+    if (modeEl) modeEl.textContent = name;
+    if (totalEl) totalEl.textContent = Number(total) > 0 ? Number(total).toLocaleString('zh-CN') + ' 条' : '—';
+    if (crumb) crumb.textContent = mode === 'layers'
+      ? (MEM.layer ? `全部记忆 · ${name}` : '全部记忆 · 分层概览')
+      : (MEM.query ? `检索：${MEM.query}` : '输入关键词开始检索');
+    const back = $('#mem-layer-back');
+    if (back) back.hidden = !(mode === 'layers' && MEM.layer);
+  }
+
+  function setMemoryBusy(busy) {
+    const wrap = $('.mem-wrap');
+    const badge = $('#mem-busy');
+    if (wrap) {
+      wrap.classList.toggle('is-loading', !!busy);
+      wrap.setAttribute('aria-busy', busy ? 'true' : 'false');
+    }
+    if (badge) badge.hidden = !busy;
+  }
+
   // 分页控件（底部居中）：只有一页时不占位
   function renderPager() {
     const box = $('#mem-pager');
@@ -1010,6 +1074,7 @@
     const stamp = when ? `<span class="mem-stamp">刷新于 ${new Date(when).toLocaleTimeString('zh-CN', { hour12: false })}</span>` : '';
     if (!r || !r.ok) {
       box.innerHTML = `<div class="empty">检索失败：${esc((r && (r.error || r.hint)) || '未知错误')}</div>`;
+      setMemoryContext(MEM.mode, 0, '加载失败');
       renderPager();
       return;
     }
@@ -1026,6 +1091,7 @@
         MEM.total > list.length ? `共 ${MEM.total.toLocaleString('zh-CN')} 条` : '',
       ].filter(Boolean).join(' · ');
       box.innerHTML = `<div class="mem-head">${head}${stamp}</div>` + list.map(itemCard).join('');
+      setMemoryContext(MEM.mode, MEM.total, isLayerDetail ? `记忆层 ${String(d.layer)}` : '关键词检索');
       renderPager();
       return;
     }
@@ -1033,6 +1099,7 @@
     // ①' 命中但该页为空（翻过头 / 该层无数据）
     if (list && !list.length) {
       box.innerHTML = `<div class="empty">这一页没有内容${MEM.total ? `（共 ${MEM.total} 条）` : ''}</div>`;
+      setMemoryContext(MEM.mode, MEM.total, MEM.mode === 'search' ? '关键词检索' : `记忆层 ${MEM.layer}`);
       renderPager();
       return;
     }
@@ -1066,6 +1133,8 @@
         </div>
         <div class="mem-hint">L0 为对话原文（最大头），L1→L3 为记忆库自动蒸馏出的分层记忆，逐级递减属正常。点任意一层可查看该层明细。</div>`;
       // 概览页没有分页
+      MEM.summaryTotal = total;
+      setMemoryContext('layers', total, '分层概览');
       MEM.total = 0;
       renderPager();
       return;
@@ -1096,6 +1165,7 @@
           ${it.note ? `<div class="mem-meta"><span>${esc(String(it.note))}</span></div>` : ''}
         </div>`).join('');
       MEM.total = 0;
+      setMemoryContext('layers', layerItems.reduce((sum, x) => sum + (Number(x.count) || 0), 0), '分层概览');
       renderPager();
       return;
     }
@@ -1106,6 +1176,7 @@
       ? `<div class="mem-head">原始返回${stamp}</div><pre class="mem-raw">${esc(raw.slice(0, 8000))}</pre>`
       : '<div class="empty">返回为空（该记忆库暂无数据）</div>';
     MEM.total = 0;
+    setMemoryContext(MEM.mode, 0, '原始返回');
     renderPager();
   }
 
@@ -1145,6 +1216,7 @@
   function memFail(r) {
     const box = $('#mem-out');
     if (!box) return;
+    setMemoryBusy(false);
     const why = (r && (r.error || r.hint)) || '';
     box.innerHTML = `<div class="empty">尚未取到记忆数据${why ? '：' + esc(why) : '（请先在「设置 → 记忆库连接」完成配置）'}</div>`;
     MEM.total = 0;
@@ -1157,7 +1229,9 @@
   async function loadMemLayers(opts) {
     const o = opts || {};
     const btn = o.btn || null;
+    const requestId = ++MEM.requestId;
     if (o.mark) memLayersBusy(true, btn);
+    setMemoryBusy(true);
     memLoading(MEM.layer ? '正在加载该层记忆…' : '正在加载记忆分层…');
     let r;
     if (MEM.layer) {
@@ -1169,6 +1243,7 @@
       MEM.serverPaged = false;
       MEM.total = 0;
     }
+    if (requestId !== MEM.requestId) return r;
     if (o.mark) memLayersBusy(false);
     if (r && r.ok) {
       const d = r.data && (r.data.data || r.data);
@@ -1178,6 +1253,7 @@
         if (d.offset != null) MEM.page = Math.floor(Number(d.offset) / MEM.perPage) + 1;
       }
       renderMemResult(r, { loadedAt: Date.now() });
+      setMemoryBusy(false);
     } else {
       memFail(r);
     }
@@ -1189,11 +1265,14 @@
   async function loadMemSearch(opts) {
     const o = opts || {};
     const btn = o.btn || null;
+    const requestId = ++MEM.requestId;
     if (o.mark) memLayersBusy(true, btn);
+    setMemoryBusy(true);
     memLoading('检索中…');
     const args = { query: MEM.query, top_k: 20 };
     if (MEM.layer) args.layer = MEM.layer;   // 全部层时让面板用默认（L0）
     const r = await memCall('memory_search', args);
+    if (requestId !== MEM.requestId) return r;
     if (o.mark) memLayersBusy(false);
     if (r && r.ok) {
       const d = r.data && (r.data.data || r.data);
@@ -1205,6 +1284,7 @@
       // 客户端切片后交给同一个渲染器（它只认识"当前页 items"）
       const pageItems = all.slice(0, MEM.perPage);
       renderMemResult({ ok: true, data: Object.assign({}, d, { items: pageItems }), hint: r.hint }, { loadedAt: Date.now() });
+      setMemoryBusy(false);
     } else {
       memFail(r);
     }
@@ -1237,27 +1317,45 @@
     const prev = MEM.mode;
     MEM.mode = mode === 'layers' ? 'layers' : 'search';
     MEM.page = 1;
+    // 模式切换本身先让旧请求失效。尤其是切到检索但尚未输入关键词时，
+    // 没有新请求可覆盖旧响应，必须在这里主动截断旧响应的写回资格。
+    if (prev !== MEM.mode) MEM.requestId++;
     // 切换模式时把"层"重置为全部层：
     // 两个模式共用同一个选择器，若不重置，从 L1 明细切到检索会静默把 layer=L1 带过去，
     // 用户以为在搜全库、实际只在搜 L1（这是实跑测试抓到的真实问题）。
     if (prev !== MEM.mode && !o.keepLayer) MEM.layer = '';
-    $$('[data-memmode]').forEach((b) => b.classList.toggle('active', b.dataset.memmode === MEM.mode));
+    $$('[data-memmode]').forEach((b) => {
+      const active = b.dataset.memmode === MEM.mode;
+      b.classList.toggle('active', active);
+      b.setAttribute('aria-selected', active ? 'true' : 'false');
+    });
     const q = $('#mem-q'), lsel = $('#mem-layer'), sbtn = $('[data-act="memory-search"]'), lbtn = $('[data-act="memory-layers"]');
+    const searchControls = $('#mem-search-controls'), layerControls = $('#mem-layer-controls');
     const isLayers = MEM.mode === 'layers';
+    if (searchControls) searchControls.hidden = isLayers;
+    if (layerControls) layerControls.hidden = !isLayers;
     if (q) q.classList.toggle('hide', isLayers);
     if (sbtn) sbtn.classList.toggle('hide', isLayers);
     if (lbtn) lbtn.classList.toggle('hide', !isLayers);
-    if (lsel) { lsel.classList.toggle('hide', false); lsel.value = MEM.layer; }
+    if (lsel) { lsel.value = MEM.layer; }
+    const back = $('#mem-layer-back');
+    if (back) back.hidden = !isLayers || !MEM.layer;
+    setMemoryContext(MEM.mode, MEM.mode === 'layers' ? (MEM.layer ? MEM.total : MEM.summaryTotal) : MEM.total);
     if (!o.silent) {
       if (isLayers) loadMemLayers({ mark: true, btn: lbtn });
       else if (MEM.query) loadMemSearch({ mark: true, btn: sbtn });
-      else memLoading('输入关键词后回车检索。');
+      else {
+        memLayersBusy(false);
+        setMemoryBusy(false);
+        memLoading('输入关键词后回车检索。');
+      }
     }
   }
 
   async function onMemoryShown() {
     if (memLoaded) return;
     memLoaded = true;
+    setMemMode('layers', { silent: true, keepLayer: true });
     try {
       await loadMemLayers();
     } catch (_) { /* 内部已兜底，这里只防极端情况 */ }
@@ -1617,6 +1715,37 @@
     }
   });
 
+  document.addEventListener('keydown', (e) => {
+    const row = e.target.closest ? e.target.closest('.mem-lrow[data-layer]') : null;
+    if (!row || (e.key !== 'Enter' && e.key !== ' ')) return;
+    e.preventDefault();
+    row.click();
+  });
+
+  const memBack = $('#mem-layer-back');
+  if (memBack) memBack.addEventListener('click', () => {
+    MEM.layer = '';
+    MEM.page = 1;
+    setMemMode('layers', { silent: true, keepLayer: true });
+    loadMemLayers({ mark: true, btn: $('[data-act="memory-layers"]') });
+  });
+  const memClear = $('#mem-clear');
+  if (memClear) memClear.addEventListener('click', () => {
+    const q = $('#mem-q');
+    if (q) { q.value = ''; q.focus(); }
+    MEM.query = '';
+    MEM.layer = '';
+    MEM.page = 1;
+    MEM.items = [];
+    MEM.total = 0;
+    MEM.requestId++;
+    setMemoryContext('search', 0, '输入关键词开始检索');
+    setMemoryBusy(false);
+    const box = $('#mem-out');
+    if (box) box.innerHTML = '<div class="empty">输入关键词后回车检索。</div>';
+    renderPager();
+  });
+
   // 层选择器：'' = 全部层（回概览）
   const memLayerSel = $('#mem-layer');
   if (memLayerSel) memLayerSel.addEventListener('change', () => {
@@ -1928,6 +2057,7 @@
     renderUpdate(s);
   }
   function renderUpdate(s) {
+    s = s || {};
     const set = (id, v) => { const el = $(id); if (el) el.textContent = v; };
     set('#up-current', fmt(s.currentVersion));
     const map = {
@@ -1936,7 +2066,17 @@
       downloaded: '已下载，待安装', error: '出错',
     };
     set('#up-status', map[s.status] || fmt(s.status));
-    const pg = $('#up-progress i'); if (pg) pg.style.width = (s.percent || 0) + '%';
+    const progress = $('#up-progress');
+    const pg = progress && progress.querySelector('.update-progress-fill');
+    const pct = Math.max(0, Math.min(100, Number(s.percent) || 0));
+    if (progress) {
+      progress.classList.toggle('indeterminate', s.status === 'checking');
+      progress.setAttribute('aria-valuenow', String(pct));
+      progress.dataset.status = String(s.status || 'idle');
+    }
+    // 用 transform 驱动整条填充层，而不是依赖 inline width；这样不会被
+    // 上传弹窗的同名样式或浏览器重排吞掉视觉变化。
+    if (pg) pg.style.setProperty('--progress-scale', String(pct / 100));
     set('#up-message', s.message || '');
     const dl = $('#up-download'); if (dl) dl.style.display = (s.status === 'available' && !s.isPortable) ? '' : 'none';
     const ins = $('#up-install'); if (ins) ins.style.display = s.status === 'downloaded' ? '' : 'none';

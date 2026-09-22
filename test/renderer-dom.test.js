@@ -89,7 +89,11 @@ function boot(opts) {
     guardRestart: () => Promise.resolve({ ok: true }),
     agentsStatus: () => (calls.push('agentsStatus'), Promise.resolve(o.agents || [])),
     agentsRegister: () => (calls.push('agentsRegister'), Promise.resolve({ ok: true, results: [], items: [] })),
-    toolCall: (tool) => (calls.push('toolCall:' + tool), Promise.resolve({ ok: true, data: null })),
+    toolCall: (tool, args) => {
+      calls.push('toolCall:' + tool);
+      if (typeof o.toolCall === 'function') return o.toolCall(tool, args);
+      return Promise.resolve({ ok: true, data: null });
+    },
     getHealth: () => Promise.resolve({ ok: true }),
     refresh: () => (calls.push('refresh'), Promise.resolve({ ok: true })),
     metricsGet: () => (calls.push('metricsGet'), Promise.resolve(snapshot)),
@@ -499,6 +503,66 @@ t('CSS：classList 多类名操作不会用到空格分隔（防 InvalidCharacte
   // console.js 里不允许出现 classList.toggle('a b') 这种写法
   const bad = JS.match(/classList\.(toggle|add|remove)\(\s*['"][^'"]*\s[^'"]*['"]/g);
   assert.strictEqual(bad, null, '发现空格分隔多类名调用：' + (bad || []).join(' | '));
+});
+
+t('更新：进度数字变化时同步更新视觉填充与无障碍值', async () => {
+  const b = boot();
+  await new Promise((r) => setTimeout(r, 30));
+  const progress = b.doc.querySelector('#up-progress');
+  const fill = b.doc.querySelector('#up-progress .update-progress-fill');
+  assert.ok(progress && fill, '缺少更新进度条节点');
+  b.emit('update:state', { status: 'downloading', percent: 42, currentVersion: '0.4.1', latestVersion: '0.4.2' });
+  assert.strictEqual(fill.style.getPropertyValue('--progress-scale'), '0.42', '填充层应按百分比缩放');
+  assert.strictEqual(progress.getAttribute('aria-valuenow'), '42', 'aria-valuenow 应同步');
+  b.emit('update:state', { status: 'downloaded', percent: 100 });
+  assert.strictEqual(fill.style.getPropertyValue('--progress-scale'), '1', '完成状态应填满进度条');
+});
+
+t('实时会话：超过 40 条时加载全部结果并按 40 条分页', async () => {
+  const sessions = Array.from({ length: 85 }, (_, i) => ({
+    id: 's-' + i, label: '会话 ' + i, source: 'zcode', state: 'idle', turns: i + 1,
+    lastTs: Date.now() - i * 1000, lastNote: '摘要 ' + i,
+  }));
+  const b = boot({ sessions: { ok: true, sessions, total: sessions.length, warnings: [] } });
+  await new Promise((r) => setTimeout(r, 100));
+  assert.strictEqual(b.doc.querySelectorAll('#sess-list .sess-row').length, 40, '第一页应显示 40 条');
+  assert.match(b.text('#sess-count'), /共\s*85\s*个/, '总数不能被截成 40');
+  assert.match(b.text('#sess-pager'), /1\s*\/\s*3/, '应有 3 页分页');
+  b.doc.querySelector('#sess-pager [data-session-pg="next"]').dispatchEvent(new b.window.Event('click', { bubbles: true }));
+  assert.strictEqual(b.doc.querySelectorAll('#sess-list .sess-row').length, 40, '第二页应显示 40 条');
+  assert.match(b.text('#sess-pager'), /2\s*\/\s*3/, '翻页后应显示第 2 页');
+  b.doc.querySelector('#sess-pager [data-session-pg="last"]').dispatchEvent(new b.window.Event('click', { bubbles: true }));
+  assert.strictEqual(b.doc.querySelectorAll('#sess-list .sess-row').length, 5, '末页应显示剩余 5 条');
+});
+
+t('记忆：快速切换模式时旧响应不会覆盖新结果', async () => {
+  const pending = [];
+  const b = boot({
+    toolCall: (tool, args) => {
+      if (tool === 'memory_layers') {
+        return new Promise((resolve) => pending.push({ args, resolve }));
+      }
+      if (tool === 'memory_search') {
+        return Promise.resolve({ ok: true, data: { items: [{ id: 'new', title: '新检索结果', body: '新结果' }], total: 1 } });
+      }
+      return Promise.resolve({ ok: true, data: null });
+    },
+  });
+  b.doc.querySelector('#tabs button[data-tab="memory"]').dispatchEvent(new b.window.Event('click', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 20));
+  assert.ok(pending.length >= 1, '进入记忆页应发起分层请求');
+  b.doc.querySelector('[data-memmode="search"]').dispatchEvent(new b.window.Event('click', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 20));
+  assert.match(b.text('#mem-out'), /输入关键词后回车检索/, '切到检索模式后应先显示空检索提示');
+  pending[0].resolve({ ok: true, data: { counts: { L1: 999 }, total: 999 } });
+  await new Promise((r) => setTimeout(r, 30));
+  assert.match(b.text('#mem-out'), /输入关键词后回车检索/, '旧分层响应不能覆盖空检索提示');
+  b.doc.querySelector('#mem-q').value = '新';
+  b.doc.querySelector('[data-act="memory-search"]').dispatchEvent(new b.window.Event('click', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 30));
+  assert.match(b.text('#mem-out'), /新检索结果/, '最新检索结果应先显示');
+  await new Promise((r) => setTimeout(r, 30));
+  assert.match(b.text('#mem-out'), /新检索结果/, '旧分层响应返回后不能覆盖当前检索结果');
 });
 
 /* ---------- 运行 ---------- */

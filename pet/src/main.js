@@ -356,7 +356,8 @@ function refreshSessions(reason) {
   if (sessionScanRunning) return { ok: true, skipped: true, files: lastSessionScan.files, total: lastSessionScan.total };
   sessionScanRunning = true;
   try {
-    const r = sessionsMod.scanSessions({ limit: 40 });
+    // 会话页自己按 40 条分页；主进程保留完整扫描结果，避免用户只能看到前 40 条。
+    const r = sessionsMod.scanSessions({ limit: 0 });
     lastSessionScan = r;
     lastCursor = sessionsMod.cursorStats();
     for (const s of r.sessions) metrics.touchSession(s);

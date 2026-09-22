@@ -185,21 +185,42 @@
 
   <!-- ====== 记忆 ====== -->
   <section data-page="memory" class="page">
-    <div class="toolbar glass">
-      <div class="memtabs" role="tablist">
-        <button class="memtab active" data-memmode="search" role="tab">关键词检索</button>
-        <button class="memtab" data-memmode="layers" role="tab">分层浏览</button>
+    <div class="memory-head glass">
+      <div>
+        <span class="eyebrow">MEMORY STORE</span>
+        <h2>记忆库</h2>
+        <p>按关键词找内容，或从分层结构进入原文和抽取记忆。</p>
       </div>
-      <input id="mem-q" placeholder="检索对话记忆…（回车即检索）">
-      <select id="mem-layer"><option value="">全部层</option><option>L0</option><option>L1</option><option>L2</option><option>L3</option></select>
-      <button data-act="memory-search" class="btn-primary">检索</button>
-      <button data-act="memory-layers" class="btn-ghost">刷新</button>
+      <div class="memory-summary" aria-live="polite">
+        <span id="mem-summary-mode">分层概览</span>
+        <b id="mem-summary-total">—</b>
+      </div>
+    </div>
+    <div class="memory-controls glass">
+      <div class="mem-control-main">
+        <div class="memtabs" role="tablist" aria-label="记忆视图">
+          <button class="memtab" data-memmode="search" role="tab" aria-selected="false">关键词检索</button>
+          <button class="memtab active" data-memmode="layers" role="tab" aria-selected="true">分层浏览</button>
+        </div>
+        <div id="mem-search-controls" class="mem-search-controls" hidden>
+          <input id="mem-q" placeholder="输入关键词，回车检索" aria-label="记忆关键词">
+          <select id="mem-layer" aria-label="检索记忆层"><option value="">全部层</option><option>L0</option><option>L1</option><option>L2</option><option>L3</option></select>
+          <button data-act="memory-search" class="btn-primary">检索</button>
+          <button id="mem-clear" class="btn-ghost" type="button">清空</button>
+        </div>
+        <div id="mem-layer-controls" class="mem-layer-controls">
+          <span id="mem-breadcrumb">全部记忆 · 分层概览</span>
+          <button id="mem-layer-back" class="btn-ghost" type="button" hidden>返回分层</button>
+          <button data-act="memory-layers" class="btn-ghost">刷新</button>
+        </div>
+      </div>
       <button data-act="backfill-start" class="btn-ghost" id="bf-btn">回传历史会话</button>
     </div>
     <div id="b-backfill" class="banner"></div>
     <div class="mem-wrap glass">
+      <div id="mem-busy" class="mem-busy" hidden>正在同步记忆…</div>
       <div id="mem-out" class="mem-body">
-        <div class="empty">输入关键词后回车检索，或切到「分层浏览」查看记忆分层结构。</div>
+        <div class="empty">正在加载记忆分层…</div>
       </div>
       <div id="mem-pager" class="mem-pager"></div>
     </div>
@@ -218,7 +239,9 @@
         </div>
         <div id="sess-warn" class="banner warn"></div>
         <div id="sess-list" class="sess-list"><div class="empty">扫描中…</div></div>
+        <div id="sess-pager" class="sess-pager" hidden></div>
       </div>
+      <div class="sess-scope" id="sess-scope">已加载全部扫描结果 · 每页 40 条</div>
     </div>
     <div class="card glass">
       <h3>会话来源统计 <span class="hd-note">动态识别，无需手动配置</span></h3>
@@ -368,7 +391,9 @@
             <span id="up-status">当前版本</span>
           </div>
         </div>
-        <div id="up-progress" class="up-progress"><i style="width:0%"></i></div>
+        <div id="up-progress" class="update-progress" role="progressbar" aria-label="下载进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+          <i class="update-progress-fill"></i>
+        </div>
         <div id="up-message" class="up-message"></div>
         <div class="up-actions">
           <button id="up-check" class="btn-primary">检查更新</button>
@@ -439,7 +464,7 @@
       <div class="up-list" id="upm-list"><div class="empty">加载中…</div></div>
 
       <!-- 回传进度 -->
-      <div class="up-progress" id="upm-progress" hidden>
+      <div class="upload-progress" id="upm-progress" hidden>
         <div class="up-pbar"><i id="upm-pfill"></i></div>
         <div class="up-ptext" id="upm-ptext"></div>
       </div>

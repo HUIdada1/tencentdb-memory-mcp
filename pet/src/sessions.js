@@ -179,15 +179,17 @@ function sqliteStatus() {
   };
 }
 
-let _sqliteCache = { at: 0, rows: null, error: null };
+let _sqliteCache = { at: 0, limit: null, rows: null, error: null };
 
 // 读 session 表：拿会话元信息 + 末次消息时间 + 轮次 + 末条摘要。
 // 一次 SQL 拿全，避免 N+1（426 个会话逐个查会明显卡顿）。
-function readSqliteSessions() {
+function readSqliteSessions(limit) {
   const now = Date.now();
-  if (_sqliteCache.rows && now - _sqliteCache.at < SQLITE_TTL) return _sqliteCache.rows;
+  const cap = Number.isFinite(Number(limit)) && Number(limit) > 0
+    ? Math.min(Math.floor(Number(limit)), 5000) : 0;
+  if (_sqliteCache.rows && _sqliteCache.limit === cap && now - _sqliteCache.at < SQLITE_TTL) return _sqliteCache.rows;
   const mod = sqliteMod();
-  if (!mod) { _sqliteCache = { at: now, rows: [], error: 'node:sqlite 不可用' }; return []; }
+  if (!mod) { _sqliteCache = { at: now, limit: cap, rows: [], error: 'node:sqlite 不可用' }; return []; }
   let db;
   try {
     // readOnly + 不设 WAL：这是别人正在写的库，只读打开最安全
@@ -206,12 +208,11 @@ function readSqliteSessions() {
                 WHERE p.session_id = s.id AND json_extract(p.data, '$.type') = 'text'
                 ORDER BY p.time_created DESC LIMIT 1) AS last_part
       FROM session s
-      ORDER BY upd DESC
-      LIMIT 200`;
+      ORDER BY upd DESC${cap ? `\n      LIMIT ${cap}` : ''}`;
     const rows = db.prepare(sql).all();
-    _sqliteCache = { at: now, rows: rows || [], error: null };
+    _sqliteCache = { at: now, limit: cap, rows: rows || [], error: null };
   } catch (e) {
-    _sqliteCache = { at: now, rows: [], error: (e && e.message) || String(e) };
+    _sqliteCache = { at: now, limit: cap, rows: [], error: (e && e.message) || String(e) };
   } finally {
     try { if (db) db.close(); } catch (_) { }
   }
@@ -267,8 +268,8 @@ function noteFromRow(r) {
 }
 
 // sqlite → 统一的会话行（与 scanOne 的输出结构对齐）
-function sqliteSessions() {
-  const rows = readSqliteSessions();
+function sqliteSessions(limit) {
+  const rows = readSqliteSessions(limit);
   const out = [];
   for (const r of rows) {
     const lastTs = Number(r.last_ms) || Number(r.upd) || 0;
@@ -459,12 +460,14 @@ function scanOne(entry) {
 //   同一个 sessionId 在两边都出现时，取 lastTs 更大的那份元信息。
 function scanSessions(opts) {
   const o = opts || {};
-  const limit = Math.max(1, Math.min(Number(o.limit) || 40, 500));
+  // limit=0 表示不截断；UI 会在渲染层按 40 条分页，避免把“前 40 条”误当成全部。
+  const requested = Number(o.limit);
+  const limit = Number.isFinite(requested) && requested > 0 ? Math.min(Math.floor(requested), 5000) : 0;
 
   const byKey = new Map();   // sessionKey -> 会话行
   const rank = (s) => (s.fromDb ? 1e15 : 0) + (Number(s.lastTs) || 0);  // 时间相同时优先 sqlite
 
-  for (const s of sqliteSessions()) {
+  for (const s of sqliteSessions(limit || undefined)) {
     byKey.set(String(s.id).replace(/^zcode-db:/, ''), s);
   }
 
@@ -486,7 +489,8 @@ function scanSessions(opts) {
   out.sort((a, b) => b.lastTs - a.lastTs);
   // sqliteHealth 一并回传：UI 据此在降级时显示明确警告，而不是静默少显示会话
   const sqlite = sqliteStatus();
-  const res = { ok: true, files: all.length, total: out.length, sessions: out.slice(0, limit) };
+  const res = { ok: true, files: all.length, total: out.length, sessions: limit ? out.slice(0, limit) : out };
+  if (limit && out.length > limit) res.truncated = true;
   if (sqlite.degraded) res.warnings = [{ code: 'sqlite', source: 'zcode', ...sqlite }];
   return res;
 }
