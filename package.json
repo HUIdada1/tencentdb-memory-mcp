@@ -1,6 +1,6 @@
 {
   "name": "tencentdb-memory-mcp",
-  "version": "0.5.8",
+  "version": "0.5.9",
   "private": true,
   "description": "TD 记忆守护：MCP server + 后台记忆守护进程（采集上传 + 本地 recall 服务）",
   "bin": {
@@ -18,12 +18,13 @@
     "test:register": "node test/register.test.js",
     "test:ui": "node test/ui.test.js",
     "test:takeover": "node --no-warnings test/takeover.test.js",
+    "test:guardoff": "node --no-warnings test/guard-off.test.js",
     "test:preview": "node scripts/make-preview.cjs && node test/preview-verify.js",
     "test:proto": "node scripts/verify-proto.cjs",
     "test:tokens": "node scripts/check-tokens.cjs",
     "test:skin": "node scripts/verify-v3-skin.cjs",
     "preview": "node scripts/make-preview.cjs",
-    "test:all": "node test/functional.test.js && node test/metrics-smoke.js && node test/flow-integration.js && node test/e2e-live.js && node test/renderer-dom.js && node test/console-structure.js && node test/console-behavior.js && node test/register.test.js && node test/ui.test.js && node --no-warnings test/takeover.test.js && node scripts/verify-v3-skin.cjs && node scripts/make-preview.cjs && node test/preview-verify.js",
+    "test:all": "node test/functional.test.js && node test/metrics-smoke.js && node test/flow-integration.js && node test/e2e-live.js && node test/renderer-dom.js && node test/console-structure.js && node test/console-behavior.js && node test/register.test.js && node test/ui.test.js && node --no-warnings test/takeover.test.js && node --no-warnings test/guard-off.test.js && node scripts/verify-v3-skin.cjs && node scripts/make-preview.cjs && node test/preview-verify.js",
     "daemon": "node daemon/tdai-daemon.js",
     "pet": "cd pet && npm start"
   }

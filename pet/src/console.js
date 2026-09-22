@@ -7,7 +7,7 @@
   const fmt = (v) => (v === null || v === undefined || v === '' ? '—' : String(v));
   const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-  const S = { snap: null, appInfo: null, sessTimer: null, latencyHist: [], lastLogSeq: 0, logPaused: false, logClearSeq: 0, scanAnchor: 0, scanInterval: 120, guardEnabled: true };
+  const S = { snap: null, appInfo: null, sessTimer: null, latencyHist: [], lastLogSeq: 0, logPaused: false, logClearSeq: 0, scanAnchor: 0, scanInterval: 120, guardEnabled: true, stoppedExternal: false };
 
   /* ---------- 数值格式化 ---------- */
   function fmtBytes(n) {
@@ -114,7 +114,9 @@
     const b = $('#btn-theme');
     if (b) b.innerHTML = t === 'dark' ? IC_SUN : IC_MOON;
   }
-  tdai.prefsLoad().then((p) => {
+  // 偏好首次加载：**必须先完成**再渲染总览（见文件末尾的启动段）。
+  // 抽成命名变量，让末尾的启动段能 await 同一份 Promise，不会重复请求。
+  const prefsReady = tdai.prefsLoad().then((p) => {
     applyTheme(p.ui.theme === 'auto' ? (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light') : p.ui.theme);
     const st = $('#set-theme'); if (st) st.value = p.ui.theme || 'dark';
     const sa = $('#set-autostart'); if (sa) sa.checked = !!p.system.autoStart;
@@ -122,11 +124,14 @@
     // 守护服务开关状态（右上角 pill 点击切换）：持久化在应用偏好里
     if (p.system && p.system.guardEnabled === false) {
       S.guardEnabled = false;
-      const pill = $('#health-pill');
-      if (pill) { pill.classList.remove('on', 'err', 'wait'); pill.classList.add('off'); }
-      const ht = $('#health-text'); if (ht) ht.textContent = '守护已停止';
+      // 走统一的 setHealthPill，别手写 classList：
+      // 它同时维护 HEALTH.connected（总览「连接状态」卡的权威源）与 pill 的 title，
+      // 早先只改了 pill 的两个类名，导致首帧连接状态卡仍按旧判据走一遍。
+      setHealthPill('off', '守护已停止', '守护服务已手动停止：采集上传与本地 recall 服务暂停。点击此按钮重新开启。');
     }
+    return p;
   });
+  prefsReady.catch(() => { });   // 偏好读不到也要让启动段继续（避免总览永远空白）
   tdai.on('theme', (t) => applyTheme(t));
   $('#btn-theme').addEventListener('click', async () => {
     const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
@@ -157,23 +162,39 @@
   /* ---------- 右上角连接状态 pill ----------
    * 以前这个 pill 是纯静态 HTML（永远写死"检测中"），console.js 从未引用它。
    * 现在按「面板可达性」实时切换，并作为权威状态源同步给总览的「连接状态」卡。
-   * 判定口径（三者都满足才算已连接）：
-   *   ① 已配置面板地址
-   *   ② 主进程报告面板未被标记为不可达（snap.panelOk !== false）
-   *   ③ 至少有过一次成功的往返（latency > 0）或守护探活成功
+   * 判定口径（按优先级）：
+   *   ⓪ 守护被手动停止 → 一律"未连接"（采集上传链路已断，面板再通也没意义）
+   *   ① 未配置面板地址     → 未配置
+   *   ② panelOk === false → 连接失败（最近一次真实往返失败）
+   *   ③ 延迟样本新鲜（latency>0 且未过期）→ 已连接
+   *   ④ 守护探活成功       → 已连接（尚无延迟样本）
+   *   ⑤ 延迟样本已过期     → 待确认（不能继续举着"已连接"）
    */
   const HEALTH = { connected: null, text: '检测中', detail: '' };
+
+  /* ---------- 守护是否真的在跑：连接判定的第一道闸 ----------
+   * 2026-09-22 修复。用户点「停止守护」后，pill 与连接状态卡反而显示"已连接"：
+   *   停止 → 采集循环停摆 → 最后一批 /health 探活的延迟样本留在 30s TTL 内
+   *   → refreshHealthPill 的 `m.latency > 0` 分支命中 → 点亮"已连接"。
+   * 界面说"连着呢"，实际一个字节都没在上传 —— 这是最误导人的一种状态。
+   * 现在：守护被手动停止（S.guardEnabled === false）时，连接判定直接置为"未连接"，
+   * 总览的「连接状态」卡随之显示"离线"，与右上角 pill 口径完全一致。
+   */
+  function daemonStopped() { return S.guardEnabled === false; }
 
   function setHealthPill(state, text, detail) {
     const pill = $('#health-pill');
     const label = $('#health-text');
-    HEALTH.connected = state === 'ok' ? true : (state === 'err' ? false : null);
+    // 守护已停止：无论面板能不能通，都不算"已连接"（采集上传这条链路已经断了）
+    HEALTH.connected = daemonStopped() ? false : (state === 'ok' ? true : (state === 'err' ? false : null));
     HEALTH.text = text;
     HEALTH.detail = detail || '';
     if (label) label.textContent = text;
     if (pill) {
       pill.classList.remove('on', 'err', 'off', 'wait');
-      pill.classList.add(state === 'ok' ? 'on' : (state === 'err' ? 'err' : 'wait'));
+      // 守护已停止 → 用 off 类（灰色），别再用 wait（那是"正在检测"的语义）
+      const cls = daemonStopped() ? 'off' : (state === 'ok' ? 'on' : (state === 'err' ? 'err' : 'wait'));
+      pill.classList.add(cls);
       pill.title = detail || text;
     }
   }
@@ -194,7 +215,17 @@
       const r = await tdai.guardSet(next);
       if (r && r.ok) {
         S.guardEnabled = next;
-        pushLocal(next ? 'ok' : 'warn', next ? '守护服务已开启' : '守护服务已停止');
+        // 外部守护进程不是本应用能结束的：停止后端口 8100 仍由它服务。
+        // 记下来，让"已停止"文案不至于谎报"本地服务已暂停"。
+        S.stoppedExternal = !next && !!r.stoppedExternal;
+        // 立刻清空旧的探活/倒计时残留，别等 15s 定时器：
+        // 否则停止后这一段时间里界面还挂着"运行中 / 即将采集…"的旧值，
+        // 用户以为守护还在偷偷上传（本机实测就是这个现象）。
+        S.scanAnchor = 0;
+        const ns = $('#d-nextscan'); if (ns) { ns.textContent = '—'; setCls(ns, ''); }
+        if (!next) { const dn = $('#d-since'); if (dn) dn.textContent = '—'; }
+        pushLocal(next ? 'ok' : 'warn', next ? '守护服务已开启'
+          : (r.stoppedExternal ? '本应用已退出守护角色（外部守护进程仍在提供服务）' : '守护服务已停止'));
       } else {
         pushLocal('err', '守护开关操作失败：' + ((r && r.error) || '未知错误'));
       }
@@ -231,12 +262,21 @@
     }
     const host = sanitizePanel(panelUrl);
     const m = snap.metrics || {};
+    // 延迟是 30s TTL 的滑窗样本：刚停止守护时最后一次探活仍有值，
+    // 不能拿它当"还连着"的证据（守护停止 = 面板往返链路已停）。
+    const latencyFresh = m.latency > 0 && !m.latencyStale;
     if (snap.panelOk === false) {
       setHealthPill('err', '连接失败', `${host} 不可达${snap.panelError ? '：' + snap.panelError : ''}`);
-    } else if (m.latency > 0) {
+    } else if (latencyFresh) {
       setHealthPill('ok', '已连接', `${host} · 延迟 ${m.latency}ms`);
     } else if (snap.daemonOk) {
       setHealthPill('ok', '已连接', `${host} · 守护在线（尚未发请求，暂无延迟）`);
+    } else if (m.latency > 0) {
+      // 有过往返但样本已过期（>30s 无新样本）。
+      // 注意：守护在线时这个分支**不该出现** —— 10s 探活会持续刷新延迟。
+      // 真正会走到这里的是"守护还开但探活一路失败"，说明本地服务已不可达，
+      // 此时既不能举着"已连接"，也不该像面板挂了那样喊"连接失败"（面板可能好好的）。
+      setHealthPill('wait', '待确认', `${host} · 本地守护探活失败，最近一次成功的往返已过期`);
     } else {
       setHealthPill('wait', '检测中', `${host} · 已配置，等待首次成功往返…`);
     }
@@ -395,6 +435,11 @@
     setArc('up-arc', m.upSpeed, Math.max(m.uploadPeak || 0, m.upSpeed || 0));
     renderTask('up', m.upTask);
     drawBars('up-bars', series && series.up, Math.max(m.uploadPeak || 0, m.upSpeed || 0));
+    // 守护已停止：上行卡文案要直说"不会再上传"，否则用户盯着一个静止的 0 B/s 猜原因
+    const unote = $('#up-bytes-note');
+    if (unote) unote.textContent = daemonStopped()
+      ? '守护已停止 · 不会发起任何上传'
+      : '真实 socket 计量 · 近 2s 窗口';
 
     // 下行
     const dt = $('#down-total'); if (dt) dt.textContent = fmtBytes(m.downloadBytes);
@@ -408,8 +453,7 @@
 
     // 当前在传的任务名（有则覆盖标签）
     if (m.currentUp) { const e = $('#up-task-name'); if (e && (!m.upTask || m.upTask.state !== 'pending')) e.title = '当前：' + m.currentUp; }
-    const note = $('#up-bytes-note');
-    if (note) note.textContent = `真实 socket 计量 · 近 2s 窗口`;
+    // 上行卡文案已在上面按守护状态设置（守护停止时直说"不会发起上传"）
   }
 
   /* ============================================================
@@ -492,6 +536,8 @@
   function renderScanCountdown() {
     const el = $('#d-nextscan');
     if (!el) return;
+    // 守护已停止：没有"下次采集"这回事，别让它停在"即将采集…"（那是假的）
+    if (S.guardEnabled === false) { el.textContent = '—'; setCls(el, ''); return; }
     if (!S.scanAnchor) { el.textContent = '—'; setCls(el, ''); return; }
     const left = Math.round((S.scanAnchor + S.scanInterval * 1000 - Date.now()) / 1000);
     if (left <= 0) { el.textContent = '即将采集…'; setCls(el, 'warn'); return; }
@@ -505,9 +551,24 @@
     // 一旦因字段缺失抛错，整个 15s 定时器就会持续抛未捕获异常。
     // 守护被手动停止时不探活：直接显示"已停止"，探活只会得到失败噪音。
     if (S.guardEnabled === false) {
+      // 与右上角 pill 用同一套文案：两处都写"已停止"，用户不会以为是两种状态。
+      // ⚠️ 外部守护模式的例外：外部进程本应用停不掉，端口 8100 仍由它提供服务，
+      //    这时写"已停止"是谎报（会让用户以为本地 recall 挂了）。据实区分文案。
+      const ext = !!S.stoppedExternal;
       const mode = $('#d-mode');
-      if (mode) { mode.textContent = '已手动停止'; setCls(mode, 'warn'); }
+      if (mode) { mode.textContent = ext ? '已退出（外部守护在跑）' : '已停止'; setCls(mode, 'warn'); }
+      const up = $('#d-upload');
+      if (up) { up.textContent = ext ? '由外部守护决定' : '已停止'; setCls(up, 'warn'); }
       const ns = $('#d-nextscan'); if (ns) { ns.textContent = '—'; setCls(ns, ''); }
+      // 顶部三个体征字段也要清：否则"守护探活 4ms""运行时长 3:12:45"会一直挂着，
+      // 看起来守护还活着（这两个值最后一次写入后没人再更新，是纯粹的陈旧残留）。
+      const hb = $('#h-beat'); if (hb) hb.textContent = ext ? '外部守护' : '已停止';
+      const hu = $('#h-uptime'); if (hu) hu.textContent = '—';
+      // 本地服务地址与守护无关（端口是配置常量），停止时也该照常显示，
+      // 否则整张卡片一排"—"看起来像渲染坏了。
+      const port = $('#d-port');
+      if (port && S.appInfo) port.textContent = `127.0.0.1:${S.appInfo.port}（${ext ? '外部守护提供服务' : '已停止'}）`;
+      S.scanAnchor = 0;
       return;
     }
     try {
@@ -517,6 +578,17 @@
       const p = r.payload;
       if (mode) { mode.textContent = '运行中'; setCls(mode, 'ok'); }
       const since = $('#d-since'); if (since) since.textContent = p.uptimeSince ? localTime(p.uptimeSince) : '—';
+      // 这一行就是"到底还在不在上传"的答案：守护在线但采集关了 = 零上行。
+      // 早先只有绿色的"运行中"，用户看到流量不动也不知道是被哪一层关了。
+      const up = $('#d-upload');
+      if (up) {
+        // 老版本守护不上报 enabledSources：字段缺失时不臆断，显示"—"
+        const srcs = p.uploadSources && typeof p.uploadSources === 'object' ? p.uploadSources : null;
+        const on = srcs ? Object.keys(srcs).filter((k) => srcs[k]) : null;
+        if (on && on.length) { up.textContent = '开启（' + on.length + ' 个来源）'; setCls(up, 'ok'); }
+        else if (on) { up.textContent = '已关闭'; setCls(up, 'warn'); }
+        else { up.textContent = '—'; setCls(up, ''); }
+      }
       const lp = $('#d-lastpush'); if (lp) lp.textContent = p.lastPush ? fmtAgo(Date.parse(p.lastPush)) : '尚未上传';
       const q = p.queueLen || 0;
       const qe = $('#d-queue'); if (qe) { qe.textContent = q + ' 项'; setCls(qe, q > 0 ? 'warn' : 'ok'); }
@@ -531,6 +603,7 @@
       if (announce) pushLocal('ok', `守护探活成功 · ${r.ms}ms · 队列 ${q}`);
     } else {
       if (mode) { mode.textContent = '未运行（点「探活」重试）'; setCls(mode, 'err'); }
+      const up = $('#d-upload'); if (up) { up.textContent = '未采集'; setCls(up, 'err'); }
       const hb = $('#h-beat'); if (hb) hb.textContent = '超时';
       S.scanAnchor = 0;
       renderScanCountdown();
@@ -583,7 +656,14 @@
     S.snap = snap;
     const m = snap.metrics;
 
-    const up = $('#h-uptime'); if (up) up.textContent = fmtUptime(snap.uptime);
+    // 守护已停止：顶部"运行时长"不再按推送值刷新。
+    // 它由 1s 心跳推送驱动，而心跳在停止后仍在发（metrics 是应用级累计量），
+    // 早先照写 → 停止后时长照样从 1:00 往前走，用户以为守护还活着。
+    if (daemonStopped()) {
+      const hu = $('#h-uptime'); if (hu) hu.textContent = '—';
+    } else {
+      const up = $('#h-uptime'); if (up) up.textContent = fmtUptime(snap.uptime);
+    }
     const hp = $('#h-panel');
     if (hp) hp.textContent = String(snap.panelUrl || '').replace(/^https?:\/\//, '') || '未配置';
 
@@ -701,6 +781,8 @@
   }, 1000);
   // 运行时长独立刷新：不依赖 metrics 推送，切页面时也不会停在旧值
   setInterval(() => {
+    // 守护已停止：停止推进（否则秒数照走，看着像守护还在后台跑）
+    if (S.guardEnabled === false) return;
     if (!S.snap) return;
     // 用本地时钟推进，避免推送中断导致数字冻结
     const up = $('#h-uptime');
@@ -1430,7 +1512,12 @@
     },
     async 'reload-layers'() { await loadOverview(); },
     async 'sess-refresh'() { await refreshSessions(true); pushLocal('info', '已手动刷新会话列表'); },
-    async 'guard-ping'() { await refreshDaemon(true); },
+    async 'guard-ping'() {
+      // 守护被手动停止时探活只会得到 ECONNREFUSED，白白刷一条"连接失败"日志。
+      // 直接给出可操作结论，不打探。
+      if (S.guardEnabled === false) { pushLocal('warn', '守护服务已停止，探活已跳过（点击右上角状态按钮可重新开启）'); return; }
+      await refreshDaemon(true);
+    },
     async 'agent-refresh'() { await loadAgents(); await refreshAgentCore(); },
     async 'agent-copy-cmd'() {
       const info = S.appInfo || {};
@@ -1772,7 +1859,16 @@
     }, { passive: true });
   })();
 
-  /* ---------- 启动 ---------- */
-  onHomeShown();
-  loadOverview();
+  /* ---------- 启动 ----------
+   * ⚠️ 必须先等偏好加载完再渲染总览。
+   * `S.guardEnabled` 的初值是 true，真实值由异步的 prefsLoad() 回填；
+   * 早先这里同步直跑 onHomeShown()，于是"守护已停止"的用户在首帧会看到
+   * 守护卡片走了一遍"运行中/超时"的逻辑（顶部「守护探活」被写成"超时"且不再纠正，
+   * 「运行时长」也开始走秒），看起来就像守护还在跑。
+   * 现在把首屏渲染挂到偏好就绪之后，从第一帧起就是正确的停止态。
+   */
+  prefsReady.catch(() => { }).then(() => {
+    onHomeShown();
+    loadOverview();
+  });
 })();

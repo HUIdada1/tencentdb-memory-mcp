@@ -168,12 +168,13 @@
     <div class="row two-col">
       <div class="card glass">
         <h3>守护状态
-          <button class="mini" data-act="backfill-start" title="把本地各 Agent 的全部历史会话一次性上传到记忆库（已传过的自动跳过）">一键上传本地记忆</button>
+          <button class="mini" data-act="backfill-start" title="扫描本机各 Agent 的历史会话文件，把去重后的增量交给守护上传到记忆库（纯本地扫描，已传过的自动跳过）">一键上传本地记忆</button>
           <button class="mini" data-act="guard-ping">探活</button>
         </h3>
         <div class="kv-list">
           <div class="kv"><span>进程模式</span><b id="d-mode">—</b></div>
           <div class="kv"><span>守护启动于</span><b id="d-since">—</b></div>
+          <div class="kv"><span>采集上传</span><b id="d-upload">—</b></div>
           <div class="kv"><span>最近上传</span><b id="d-lastpush">—</b></div>
           <div class="kv"><span>待传队列</span><b id="d-queue">—</b></div>
           <div class="kv"><span>hook 调用</span><b id="d-hooks">—</b></div>

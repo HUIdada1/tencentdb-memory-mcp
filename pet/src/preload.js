@@ -77,11 +77,19 @@ function classify(method, url) {
   const m = String(method || 'GET').toUpperCase();
   const u = String(url || '');
   if (m === 'GET' || m === 'HEAD') return 'down';
-  // POST 里的**纯读**端点按下行语义计（检索/列表/读取不产生写入流量）
-  // 注意正则要锚定路径段，早先 /get/i 会误伤 /forget、/budget 之类的写入端点。
+  // POST 里哪些算"纯读"（不产生写入流量）→ 按下行计。
+  // 判据是**完整的路径**，不是路径里出现过的子串：
+  //   早先的正则只要求路径里含 search/list/get…，于是本应用最频繁的
+  //   POST /chat-memory/search（带 query 的上行请求体）被整笔记成"下行"，
+  //   上行累计与请求数长期偏低 —— 这类误判在界面上无法察觉，只能靠代码审计发现。
+  // 现在用白名单精确匹配归一化后的路径；未列出的 POST 一律按上行（写入）计。
   try {
-    const p = u.replace(/^https?:\/\/[^/]+/, '').split('?')[0];
-    if (/\/(search|recall|query|list|get|read|layers|assets|status|health)(\/|$)/i.test(p)) return 'down';
+    const p = u.replace(/^https?:\/\/[^/]+/, '').replace(/^\/api\/v\d+/, '').split('?')[0].replace(/\/+$/, '');
+    const READ_POSTS = new Set([
+      '/skill/list',            // 技能目录（只读）
+      '/knowledge/wiki/page/read',   // Wiki 页读取（只读）
+    ]);
+    if (READ_POSTS.has(p)) return 'down';
   } catch (_) { }
   return 'up';
 }

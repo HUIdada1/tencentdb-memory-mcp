@@ -10,7 +10,7 @@ const readline = require('readline');
 const core = require(path.join(__dirname, '..', 'core', 'tdai-core.js'));
 
 const SERVER_NAME = 'tdai-memory';
-const SERVER_VER = '0.5.8';   // 与 package.json / daemon APP_VER 同步（发版流水线会校验）
+const SERVER_VER = '0.5.9';   // 与 package.json / daemon APP_VER 同步（发版流水线会校验）
 
 /* ---------- 工具目录（inputSchema 用 JSON Schema） ---------- */
 
@@ -79,51 +79,69 @@ const TOOLS = [
   },
   {
     name: 'tdai.skill_get',
-    description: '读取单个技能正文与资源。',
+    description: '读取单个技能正文与资源。skill_id 与 name 至少给一个。',
     inputSchema: {
       type: 'object',
       properties: { skill_id: { type: 'string' }, name: { type: 'string' } },
       additionalProperties: false,
+      anyOf: [{ required: ['skill_id'] }, { required: ['name'] }],
     },
     run: (c, a) => c.skillGet(a),
   },
   {
     name: 'tdai.wiki_search',
-    description: '检索团队 Wiki 文档。',
+    description: '检索团队 Wiki 文档。必须先指定 wiki_id（形如 wiki-…，可在面板「知识库 → Wiki」查看）。',
     inputSchema: {
       type: 'object',
-      properties: { query: { type: 'string' }, top_k: { type: 'number', default: 5 } },
-      required: ['query'], additionalProperties: false,
+      properties: {
+        query: { type: 'string' },
+        wiki_id: { type: 'string', description: 'Wiki ID（必填，形如 wiki-…）' },
+        top_k: { type: 'number', default: 5 },
+      },
+      required: ['query', 'wiki_id'], additionalProperties: false,
     },
     run: (c, a) => c.wikiSearch(a),
   },
   {
     name: 'tdai.wiki_read',
-    description: '读取 Wiki 单页正文。',
+    description: '读取 Wiki 单页正文。必须指定 wiki_id（形如 wiki-…），并给出 page_id 或 refs 之一。',
     inputSchema: {
       type: 'object',
-      properties: { page_id: { type: 'string' } },
-      required: ['page_id'], additionalProperties: false,
+      properties: {
+        wiki_id: { type: 'string', description: 'Wiki ID（必填，形如 wiki-…）' },
+        page_id: { type: 'string', description: '页面 ID' },
+        refs: { type: 'array', items: { type: 'string' }, description: '页面引用列表（与 page_id 至少给一个）' },
+      },
+      required: ['wiki_id'], additionalProperties: false,
+      anyOf: [{ required: ['page_id'] }, { required: ['refs'] }],
     },
     run: (c, a) => c.wikiRead(a),
   },
   {
     name: 'tdai.codegraph_search',
-    description: '检索代码图谱节点（函数/类/文件级符号）。',
+    description: '检索代码图谱节点（函数/类/文件级符号）。必须先指定 code_graph_id（形如 cg-…，可在面板「知识库 → 代码图谱」查看）。',
     inputSchema: {
       type: 'object',
-      properties: { query: { type: 'string' }, top_k: { type: 'number', default: 5 } },
-      required: ['query'], additionalProperties: false,
+      properties: {
+        query: { type: 'string' },
+        code_graph_id: { type: 'string', description: '代码图谱 ID（必填，形如 cg-…）' },
+        top_k: { type: 'number', default: 5 },
+      },
+      required: ['query', 'code_graph_id'], additionalProperties: false,
     },
     run: (c, a) => c.codegraphSearch(a),
   },
   {
     name: 'tdai.codegraph_explore',
-    description: '从某节点出发探索邻域（调用/被调用/引用）。',
+    description: '从某节点出发探索邻域（调用/被调用/引用）。必须先指定 code_graph_id（形如 cg-…）。',
     inputSchema: {
       type: 'object',
-      properties: { node_id: { type: 'string' }, depth: { type: 'number', default: 1 } },
-      additionalProperties: false,
+      properties: {
+        code_graph_id: { type: 'string', description: '代码图谱 ID（必填，形如 cg-…）' },
+        node_id: { type: 'string' },
+        depth: { type: 'number', default: 1 },
+      },
+      required: ['code_graph_id'], additionalProperties: false,
     },
     run: (c, a) => c.codegraphExplore(a),
   },
@@ -216,13 +234,32 @@ async function runCLI(argv) {
     return;
   }
   if (cmd === 'probe') {
-    // Phase 0 探针：全工具一遍，冻结响应样例
+    // Phase 0 探针：全工具一遍，冻结响应样例。
+    // 占位值按**参数名**推导（早先是硬编码的 page_id/node_id 三元表达式，
+    // schema 一改就悄悄喂错参数，探针结果失去意义）。
+    const placeholder = (k) => {
+      if (k === 'query') return '测试';
+      if (k === 'wiki_id') return 'wiki-probe';
+      if (k === 'code_graph_id') return 'cg-probe';
+      if (k === 'skill_id') return 'skill-probe';
+      if (k === 'name') return 'probe';
+      if (k === 'block_id' || k === 'agent_id' || k === 'team_id' || k === 'page_id' || k === 'node_id') return 'probe';
+      if (Array.isArray(k)) return [];
+      return 'probe';
+    };
     const results = {};
     for (const t of TOOLS) {
-      const args = t.inputSchema.required
-        ? Object.fromEntries(t.inputSchema.required.map((k) => [k, k === 'query' ? '测试' : k === 'page_id' ? 'test' : k === 'node_id' ? '' : 'probe']))
-        : {};
-      results[t.name] = await t.run(client, args);
+      const sch = t.inputSchema || {};
+      const required = (sch.required || []).slice();
+      // anyOf 里的"至少给一个"字段也要喂占位值，否则探针会拿到
+      // "缺少 X" 这类参数校验错误，看起来像接口坏了（实际是探针没给参数）。
+      for (const branch of (sch.anyOf || [])) {
+        const r = (branch && branch.required) || [];
+        if (r.length && !r.some((k) => required.includes(k))) required.push(r[0]);
+      }
+      const args = Object.fromEntries(required.map((k) => [k, placeholder(k)]));
+      try { results[t.name] = await t.run(client, args); }
+      catch (e) { results[t.name] = { ok: false, error: (e && e.message) || String(e) }; }
     }
     console.log(JSON.stringify(results, null, 2));
     return;

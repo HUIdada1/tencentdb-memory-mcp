@@ -23,7 +23,7 @@ const QUEUE_DIR = path.join(DATA_DIR, 'queue');
 const LOG_PATH = path.join(DATA_DIR, 'daemon.log');
 
 const RECALL_PORT = Number(process.env.TDAI_DAEMON_PORT) || 8100;
-const APP_VER = '0.5.8';         // 与 package.json 同步；SEA exe 的版本号
+const APP_VER = '0.5.9';         // 与 package.json 同步；SEA exe 的版本号
 const REPO_API = 'https://api.github.com/repos/HUIdada1/tencentdb-memory-mcp/releases/latest';
 const RECALL_TIMEOUT_MS = 800;   // hook 链路硬超时：超时返回空，绝不阻塞对话
 const SCAN_INTERVAL_MS = 2 * 60 * 1000;  // 采集循环 2 分钟
@@ -470,6 +470,15 @@ async function uploadBatch(cfg, api, payload, state) {
 
 async function scanAndUpload(cfg, api, state) {
   const miss = missingConfig(cfg);
+  // 采集开关状态与下轮采集时刻都要如实回填给 /health：
+  // 控制台守护卡片的「采集上传」行**只**依赖 uploadSources（"开启 N 个来源 / 已关闭"），
+  // 早先 /health 不返回该字段 → 该行永远显示 "—"，用户没法判断"守护在线但采集关了 = 零上行"。
+  try {
+    state.uploadSources = Object.assign({}, (cfg.upload && cfg.upload.enabledSources) || {});
+    // 本轮结束后隔一个采集周期再跑下一轮（守护进程与进程内兜底共用同一口径）
+    state.nextScanAt = new Date(Date.now() + (SCAN_INTERVAL_MS || 120000)).toISOString();
+    saveStatus({ nextScanAt: state.nextScanAt });
+  } catch (_) { }
   if (miss) { log(`config incomplete: ${miss}`); return { pushed: 0 }; }
   // user_id 兜底：配置未填 userId 时，先解析一次（conversation/add 契约要求非空）
   await ensureUserId(cfg, api, state);
@@ -698,6 +707,18 @@ async function buildRecall(cfg, api, cache, query) {
 
 /* ---------- 控制台 API：配置读写 / 连接测试 / Agent 接入状态 / 更新检查 ---------- */
 
+// UserPromptSubmit hook 检测（与 pet/src/register.js 的 hookState 同口径）。
+// 返回 { present, legacy }：present = 确实挂了本工具的 hook（新旧写法都算）；
+// legacy = 旧写法（tdai-daemon.js/.cjs + node.exe），建议关→开切到本应用。
+function hookStateOf(file) {
+  let s = null;
+  try { s = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (_) { return { present: false, legacy: false }; }
+  const arr = (s && s.hooks && s.hooks.UserPromptSubmit) || [];
+  const text = JSON.stringify(arr);
+  const present = text.includes('tdai-hook.cmd') || text.includes('tdai-daemon.js') || text.includes('tdai-daemon.cjs');
+  return { present, legacy: present && !text.includes('tdai-hook.cmd') };
+}
+
 // agent 接入状态：fs 检测各客户端配置（installed=已接入 / absent=客户端未安装 / missing=未接入）
 function agentStatus() {
   const home = os.homedir();
@@ -705,19 +726,23 @@ function agentStatus() {
   const readText = (f) => { try { return fs.readFileSync(f, 'utf8'); } catch (_) { return null; } };
   const items = [];
 
-  // ZCode CLI
+  // ZCode CLI（MCP + hook）—— hook 状态此前只对 Claude Code 检查，
+  // ZCode 明明同样支持 UserPromptSubmit hook 却从不显示，两端口径不一致。
   let f = path.join(home, '.zcode', 'cli', 'config.json');
   let c = readJSON(f);
-  items.push({ name: 'ZCode CLI', status: c == null ? 'absent' : (c.mcp && c.mcp.servers && c.mcp.servers.tdai ? 'installed' : 'missing') });
+  const zcSt = hookStateOf(path.join(home, '.zcode', 'cli', 'config.json'));
+  items.push({
+    name: 'ZCode CLI',
+    status: c == null ? 'absent' : (c.mcp && c.mcp.servers && c.mcp.servers.tdai ? 'installed' : 'missing'),
+    detail: zcSt.present ? (zcSt.legacy ? 'hook 已注入（旧写法，建议切换）' : 'hook 已注入') : undefined,
+  });
 
   // Claude Code（MCP + hook）
   f = path.join(home, '.claude.json');
   c = readJSON(f);
   const ccMcp = c != null && c.mcpServers && c.mcpServers.tdai ? 'installed' : (c == null ? 'absent' : 'missing');
-  f = path.join(home, '.claude', 'settings.json');
-  const s = readJSON(f);
-  const ccHook = s != null && s.hooks && JSON.stringify(s.hooks.UserPromptSubmit || []).includes('tdai-daemon');
-  items.push({ name: 'Claude Code', status: ccMcp, detail: ccHook ? 'hook 已注入' : undefined });
+  const ccSt = hookStateOf(path.join(home, '.claude', 'settings.json'));
+  items.push({ name: 'Claude Code', status: ccMcp, detail: ccSt.present ? (ccSt.legacy ? 'hook 已注入（旧写法，建议切换）' : 'hook 已注入') : undefined });
 
   // Cursor
   f = path.join(home, '.cursor', 'mcp.json');
@@ -841,7 +866,15 @@ function jsonRes(res, code, obj) {
 function mkState() {
   // lastPush 优先从持久化的 status.json 恢复（守护重启/升级后，"最近上传"不能归零）
   const saved = loadStatus();
-  return { startedAt: new Date().toISOString(), hookCalls: 0, lastPush: saved.lastPush || '', nextScanAt: saved.nextScanAt || '', agentCreated: {}, queue: 0, nas: null };
+  return {
+    startedAt: new Date().toISOString(), hookCalls: 0,
+    lastPush: saved.lastPush || '', nextScanAt: saved.nextScanAt || '',
+    agentCreated: {}, queue: 0, nas: null,
+    // 下轮采集时刻的权威来源：由采集循环每轮结束写入（见 scanAndUpload / markNextScan）。
+    // 早先只有 main() 内的定时器回调写它，而 main() 里 setInterval 第一次触发要等满
+    // 一个 SCAN_INTERVAL_MS，期间 /health 一直在吐 status.json 里的陈旧值。
+    uploadSources: null,
+  };
 }
 
 function startServer(cfg, api, cache, state) {
@@ -882,7 +915,11 @@ function startServer(cfg, api, cache, state) {
             const r = await api('/skill/list', { method: 'POST', body: { team_id: cfg.teamId || undefined }, timeout: 8000 });
             nas = r.status >= 200 && r.status < 300;
             auth = nas;
-            if (!nas && r.status === 401 || r.status === 403) { auth = false; hint = 'userKey 可能失效'; }
+            // 括号不可省：早先写成 `!nas && r.status === 401 || r.status === 403`，
+            // && 优先级高于 ||，实际语义是 `(!nas && 401) || 403` —— 任何 403 都会跳过
+            // else 分支的通用提示。今天两种写法结论恰好一致（403 时 nas 必为 false），
+            // 但只要上面几行改一下就会被误判，属于埋在连接测试里的隐性坑。
+            if (!nas && (r.status === 401 || r.status === 403)) { auth = false; hint = 'userKey 可能失效'; }
             else if (!nas) hint = `面板返回 HTTP ${r.status}`;
           } catch (e) { hint = `面板不可达 (${e.message})`; }
         } else hint = '请先填写 panelUrl 和 userKey';
@@ -910,7 +947,18 @@ function startServer(cfg, api, cache, state) {
             nas = !!(r && r.status >= 200 && r.status < 300);
           } catch (_) { nas = false; }
         }
-        jsonRes(res, 200, { local: true, nas, configOk: !missingConfig(cfg), version: APP_VER, hookCalls: state.hookCalls, lastPush: state.lastPush, queueLen, uptimeSince: state.startedAt, nextScanAt: state.nextScanAt || '' });
+        // uploadSources：控制台守护卡片「采集上传」行的唯一依据。
+        // 优先用 state 里由采集循环回填的值（反映真实运行态）；state 尚未回填时
+        // 直接从当前配置现算 —— 老守护不返回该字段、这里也绝不返回 undefined。
+        const uploadSources = state.uploadSources
+          || Object.assign({}, (cfg.upload && cfg.upload.enabledSources) || {});
+        // nextScanAt：优先 state（采集循环每轮回填），退回持久化值；都没有则按"现在 + 一个周期"估算
+        const nextScanAt = state.nextScanAt || loadStatus().nextScanAt || '';
+        jsonRes(res, 200, {
+          local: true, nas, configOk: !missingConfig(cfg), version: APP_VER,
+          hookCalls: state.hookCalls, lastPush: state.lastPush, queueLen,
+          uptimeSince: state.startedAt, nextScanAt, uploadSources,
+        });
         return;
       }
       if (u.pathname === '/recall') {
@@ -924,6 +972,12 @@ function startServer(cfg, api, cache, state) {
       if (u.pathname === '/push' && req.method === 'POST') {
         const r = await scanAndUpload(cfg, api, state);
         const q = await flushQueue(cfg, api, state);
+        // 手动 push 也算"刚采集过"：把下轮采集时刻顺延一个周期，
+        // 否则控制台倒计时会停在 push 之前的旧值上（看起来像卡住）。
+        try {
+          state.nextScanAt = new Date(Date.now() + (SCAN_INTERVAL_MS || 120000)).toISOString();
+          saveStatus({ nextScanAt: state.nextScanAt });
+        } catch (_) { }
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(JSON.stringify({ pushed: r.pushed, queueFlushed: q }));
         return;

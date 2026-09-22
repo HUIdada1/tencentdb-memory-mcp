@@ -63,7 +63,8 @@ function createMetrics() {
     upTotal: 0, downTotal: 0,
     upReqs: 0, downReqs: 0,
     upCommits: 0, upFails: 0, downFails: 0, reqFailed: 0,
-    upPeak: 0, downPeak: 0,
+    upPeak: 0, downPeak: 0,          // 峰值**速率**（bytes/s），只由 sample() 抬高
+    upPeakBytes: 0, downPeakBytes: 0, // 单笔最大字节数（另一套量纲，不参与速率展示/量程）
     reqTotal: 0,
     downloadMsSum: 0, downloadMsCount: 0,
     latency: 0,
@@ -111,13 +112,22 @@ function createMetrics() {
     const t = nowMs();
 
     if (dir === 'up') {
-      state.upTotal += bytes;
+      // bytesSource:'none' = 请求根本没发出去（连接被拒/超时），**不计入流量**。
+      // 早先探活失败也照记 240B"请求头开销"，守护掉线时上行累计值会凭空增长
+      // （这些字节从未离开过本机），是"明明没上传却有流量"的第二个来源。
+      // 请求计数与失败计数照记 —— 那才是判断"探活还通不通"所需的语义。
+      const counted = o.bytesSource === 'none' ? 0 : bytes;
+      state.upTotal += counted;
       state.upReqs++;
-      if (bytes > state.upPeak) state.upPeak = bytes;
+      // ⚠️ 这里记的是**单笔字节数**，量纲是 bytes；绝不能用它抬高 upPeak
+      //（upPeak 的量纲是 bytes/s，只由 sample() 的速率抬高）。早先两者混用，
+      // 界面「峰值速率」会把一次大请求的字节数当成速度显示（如 5MB → 显示 4.77 MB/s），
+      // 而且仪表量程 ref=upPeak 被抬到 5e6，指针永远贴在 0 附近，看起来像坏了。
+      if (counted > state.upPeakBytes) state.upPeakBytes = counted;
     } else {
       state.downTotal += bytes;
       state.downReqs++;
-      if (bytes > state.downPeak) state.downPeak = bytes;
+      if (bytes > state.downPeakBytes) state.downPeakBytes = bytes;
       if (ms != null) { state.downloadMsSum += ms; state.downloadMsCount++; }
     }
     state.reqTotal++;
@@ -130,7 +140,7 @@ function createMetrics() {
       state.upCommits++;
     }
 
-    win[dir].push({ t, bytes });
+    win[dir].push({ t, bytes: dir === 'up' && o.bytesSource === 'none' ? 0 : bytes });
     trimWin(win[dir], t);
 
     // 延迟样本必须**显式声明**（latencySample: true）才写入：
@@ -313,6 +323,8 @@ function createMetrics() {
         uploadRequests: state.upReqs, downloadRequests: state.downReqs,
         uploadCommits: state.upCommits, uploadFails: state.upFails, downloadFails: state.downFails,
         uploadPeak: state.upPeak, downloadPeak: state.downPeak,
+        // 单笔最大字节数（量纲 bytes）：仅用于"最大单笔"这类展示，**不要**拿它当速率量程
+        uploadPeakBytes: state.upPeakBytes, downloadPeakBytes: state.downPeakBytes,
         reqTotal: state.reqTotal, reqFailed: state.reqFailed,
         downloadAvgMs: state.downloadMsCount ? Math.round(state.downloadMsSum / state.downloadMsCount) : 0,
         latency: state.latency,

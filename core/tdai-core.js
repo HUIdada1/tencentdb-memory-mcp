@@ -174,15 +174,24 @@ function create(overrides) {
     cfg,
 
     // 健康检查：面板可达性 + 检索面探活（真实端点，不再用 404 的 /meta/auth/verify）
+    // 判据与另外两处**保持同一口径**（daemon /api/test-connection、pet main.js testConn）：
+    //   nas  = HTTP 2xx
+    //   auth = nas
+    // 早先这里多写了一个 `!(a.data && a.data.code === 401)`，是**永远不生效的死条件**——
+    // api() 已把 HTTP 401/403 收敛成 err()（a.ok=false），根本走不到这里；
+    // 而实测面板认证失败返回的是 HTTP 401，不会用「HTTP 200 + 业务 code:401」表达。
+    // 留着它只会让人误以为存在业务码分支，且一旦面板改成 200 内嵌 code，
+    // 三处实现就会给出互相矛盾的结论。故统一为"2xx 即可达且认证通过"。
     async health() {
       const t0 = Date.now();
       const miss = missingConfig(cfg);
       if (miss) return ok({ nas: false, auth: false, panelUrl: cfg.panelUrl, hint: miss });
       const a = await api('/skill/list', { method: 'POST', body: { team_id: cfg.teamId || undefined }, timeout: 8000 });
+      const nas = !!a.ok;
       return ok({
         panelUrl: cfg.panelUrl,
-        nas: a.ok,
-        auth: a.ok && !(a.data && a.data.code === 401),
+        nas,
+        auth: nas,
         latencyMs: Date.now() - t0,
         hint: a.ok ? '' : (a.error || ''),
       });

@@ -27,8 +27,20 @@ const INSTR = [
   '',
 ].join('\n');
 
-const INSTR_FILES = ['AGENTS.md', 'CLAUDE.md'];
+const INSTR_MARK = 'tdai-memory:begin';
+// 全局指令文件的**唯一真源**：写入与检测必须用同一份清单。
+// 早先写入集合是 ['.zcode/AGENTS.md', '.claude/CLAUDE.md']，
+// 而检测集合是 INSTR_FILES(['AGENTS.md','CLAUDE.md']) 全部挂到 .claude 下、
+// 再补一个 .zcode/AGENTS.md —— 于是多出一个从未被写入的 `.claude/AGENTS.md`。
+// 本机恰好没有该文件所以没暴露；但 Claude Code 用户普遍有 .claude/AGENTS.md（写着别的内容），
+// 一旦存在就会被误判成"tdai 指令块已写入"，是**假阳性**式的 Agent 接入状态错报。
+// 现在只保留一份清单，读写同源，从结构上杜绝再次跑偏。
+const INSTR_TARGETS = [['.zcode', 'AGENTS.md'], ['.claude', 'CLAUDE.md']];
 const HOOK_MARK = 'tdai-hook.cmd';
+// 历史版本的 hook 写法：直接把 daemon 脚本交给 node.exe 跑（没有 .cmd 包装）。
+// 它**确实在生效**，只是指向源码目录/node.exe —— 升级到 exe 版后会失效，
+// 所以必须认出来并提示"切换"，而不是当成"没注入"。
+const HOOK_LEGACY_MARKS = ['tdai-daemon.js', 'tdai-daemon.cjs'];
 
 /* ---------- 小工具 ---------- */
 
@@ -45,6 +57,26 @@ function writeJson(file, obj) { ensureDir(path.dirname(file)); fs.writeFileSync(
 function samePath(a, b) {
   if (!a || !b) return false;
   try { return path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase(); } catch (_) { return false; }
+}
+
+/* ---------- UserPromptSubmit hook 检测（桌面端与网页端共用同一口径） ----------
+ * 返回 { present, legacy }：
+ *   present=true 表示配置里确实挂了一个本工具的 hook（新旧写法都算）
+ *   legacy=true  表示是旧写法（tdai-daemon.js + node.exe），建议关→开切到本应用
+ * 抽成导出函数的原因：daemon 的 /api/agents-status 也要报 hook 状态，
+ * 早先两处各写一套判据（一处查 'tdai-hook.cmd'、一处查 'tdai-daemon'），
+ * 同一台机器上桌面端说"未注入"、网页端说"已注入"，用户完全无法判断该信谁。
+ */
+function hookState(home, which) {
+  const file = which === 'claude-code'
+    ? path.join(home, '.claude', 'settings.json')
+    : path.join(home, '.zcode', 'cli', 'config.json');
+  const s = readJson(file);
+  const arr = (s && s.hooks && s.hooks.UserPromptSubmit) || [];
+  const text = JSON.stringify(arr);
+  const present = text.includes(HOOK_MARK) || HOOK_LEGACY_MARKS.some((m) => text.includes(m));
+  const legacy = present && !text.includes(HOOK_MARK);
+  return { present, legacy };
 }
 
 /* ---------- 注册内容（MCP 条目 / hook 脚本） ---------- */
@@ -134,24 +166,24 @@ function status({ home = os.homedir(), exePath = '' } = {}) {
   }
 
   // UserPromptSubmit hook（Claude Code 与 ZCode）
-  const hookOf = (file) => {
-    const s = readJson(file);
-    return !!(s && JSON.stringify(s.hooks && s.hooks.UserPromptSubmit || []).includes(HOOK_MARK));
+  const hookOf = (which) => hookState(home, which);
+  const hookDetail = (st, isAbsent) => {
+    if (st.present) return st.legacy ? 'hook 已注入（旧写法，建议关→开切换）' : 'hook 已注入';
+    return isAbsent ? '' : 'hook 未注入';
   };
   const cc = items.find((x) => x.key === 'claude-code');
   if (cc) {
-    const hasHook = hookOf(path.join(home, '.claude', 'settings.json'));
-    cc.detail = [cc.detail, hasHook ? 'hook 已注入' : (cc.status === 'absent' ? '' : 'hook 未注入')].filter(Boolean).join(' · ');
+    cc.detail = [cc.detail, hookDetail(hookOf('claude-code'), cc.status === 'absent')].filter(Boolean).join(' · ');
   }
   const zc = items.find((x) => x.key === 'zcode');
   if (zc) {
-    const hasHook = hookOf(path.join(home, '.zcode', 'cli', 'config.json'));
-    zc.detail = [zc.detail, hasHook ? 'hook 已注入' : (zc.status === 'absent' ? '' : 'hook 未注入')].filter(Boolean).join(' · ');
+    zc.detail = [zc.detail, hookDetail(hookOf('zcode'), zc.status === 'absent')].filter(Boolean).join(' · ');
   }
 
   // 全局指令文件（MCP 没生效时的兜底硬规则）
-  const instrFiles = INSTR_FILES.map((n) => path.join(home, '.claude', n)).concat([path.join(home, '.zcode', 'AGENTS.md')]);
-  const instrHit = instrFiles.filter((f) => (readText(f) || '').includes('tdai-memory:begin'));
+  // 与 register() 的写入清单同源（INSTR_TARGETS），避免"检测面"与"写入面"不一致。
+  const instrFiles = INSTR_TARGETS.map(([d, n]) => path.join(home, d, n));
+  const instrHit = instrFiles.filter((f) => (readText(f) || '').includes(INSTR_MARK));
   items.push({
     key: 'instructions',
     name: '全局指令文件',
@@ -245,13 +277,14 @@ function register({ home = os.homedir(), exePath, mcpJs, daemonJs } = {}) {
   } catch (e) { rec('UserPromptSubmit hook', '失败', e.message); }
 
   // 3. 全局指令文件（档 B 兜底：告诉模型何时调 tdai 工具）
-  for (const rel of [['.zcode', 'AGENTS.md'], ['.claude', 'CLAUDE.md']]) {
+  // 清单来自 INSTR_TARGETS（与 status() 检测同源），别再在这里另写一份字面量。
+  for (const rel of INSTR_TARGETS) {
     const dir = path.join(home, rel[0]);
     const f = path.join(dir, rel[1]);
     if (!exists(dir)) { rec(rel[1], '跳过', `无 ${rel[0]} 目录（未安装对应客户端）`); continue; }
     try {
       const text = readText(f) || '';
-      if (text.includes('tdai-memory:begin')) { rec(rel[1], '跳过', '指令块已存在'); continue; }
+      if (text.includes(INSTR_MARK)) { rec(rel[1], '跳过', '指令块已存在'); continue; }
       backup(f);
       ensureDir(dir);
       fs.appendFileSync(f, INSTR);
@@ -367,24 +400,30 @@ function unregisterOneClient(key, { home = os.homedir() } = {}) {
         const text = readText(f) || '';
         if (!text.includes('dsh-mcp-client')) continue;
         backup(f);
-        // 移除 tdai-memory 注入块（含其上的注释行）：按行过滤掉注释+insert 块
+        // 精确移除 tdai-memory 注入块。
+        // 早先按"命中区间内任何 - 开头的行都跳过"过滤，会连带吞掉用户在
+        // 本块之后写的其它 insert 条目（那些条目也是 `- insert:` / `- resolve:` 开头）。
+        // 现在改为**结构化定位**：从 `# tdai-memory:begin` 注释行开始，到本块
+        // 自身的 `ELECTRON_RUN_AS_NODE` 行为止（那是注入块的最后一行），
+        // 整段删掉；块外内容一行不动。
         const lines = text.split('\n');
         const out = [];
-        let skip = false;
+        let inBlock = false;
+        let sawBegin = false;
         for (const l of lines) {
-          if (/tdai-memory:begin/.test(l)) { skip = true; continue; }
-          if (skip) {
-            if (l.trim().startsWith('- insert:')) continue;
-            if (l.trim().startsWith('- resolve:')) continue;
-            if (/dsh-mcp-client/.test(l)) continue;
-            if (l.trim().startsWith('config:') || l.trim().startsWith('transport:') || l.trim().startsWith('serverName:')
-              || l.trim().startsWith('command:') || l.trim().startsWith('args:') || l.trim().startsWith('- ')
-              || l.trim().startsWith('ELECTRON_RUN_AS_NODE') || l.trim() === '') continue;
-            skip = false;
+          const trimmed = l.trim();
+          if (!inBlock && /tdai-memory:begin/.test(l)) { inBlock = true; sawBegin = true; continue; }
+          if (inBlock) {
+            // 注入块以 env 那行收尾（见 dshPatchBlock）：命中即结束本块
+            if (/ELECTRON_RUN_AS_NODE/.test(l)) { inBlock = false; continue; }
+            // 防御：块内若出现下一段注释分节，说明结构已被人工改动，就此收尾避免误删
+            if (/^#/.test(trimmed) && !/tdai-memory/.test(l)) { inBlock = false; out.push(l); continue; }
+            continue;   // 块内其它行（insert/resolve/config/transport/serverName/command/args/env/空行）一并删除
           }
           out.push(l);
         }
-        fs.writeFileSync(f, out.join('\n').replace(/\n{3,}/g, '\n\n'));
+        if (!sawBegin) continue;
+        fs.writeFileSync(f, out.join('\n').replace(/\n{3,}/g, '\n\n').replace(/\s*$/, '\n'));
         removed++;
       }
       results.push({ target: cls.name, action: removed ? '移除' : '跳过', detail: removed ? `${removed} 个 profile 移除 insert 条目` : '无 tdai 条目' });
@@ -415,4 +454,4 @@ function unregisterOneClient(key, { home = os.homedir() } = {}) {
   return results;
 }
 
-module.exports = { status, register, registerOneClient, unregisterOneClient, mcpEntry, hookScript, hookCmdPath, dshPatchBlock, INSTR, CLIENTS, HOOK_MARK };
+module.exports = { status, register, registerOneClient, unregisterOneClient, mcpEntry, hookScript, hookCmdPath, dshPatchBlock, hookState, INSTR, INSTR_TARGETS, INSTR_MARK, CLIENTS, HOOK_MARK, HOOK_LEGACY_MARKS };

@@ -116,7 +116,15 @@ function checkInstalled() {
   if (!app.isPackaged) { setState('up-to-date', { message: '开发模式不检查' }); return status; }
   if (!autoUpdater) { setState('error', { message: '更新组件缺失' }); return status; }
   setState('checking');
-  autoUpdater.checkForUpdates().catch(() => {});
+  // checkForUpdates() 的 promise 拒绝**未必**伴随 'error' 事件（网络层静默中断时
+  // 两者都可能不触发）。一旦发生，status 会永远停在 'checking'，
+  // 而 check() 开头就是 `status === 'checking' → return`，
+  // 于是自动与手动检查会**被永久锁死**，用户再也查不到更新。
+  // 这里补一条兜底：拒绝即置错误态，把状态机从 'checking' 里放出来。
+  autoUpdater.checkForUpdates().catch((e) => {
+    if (status.status !== 'checking') return;   // 已由 'error' 事件处理过，不覆盖更具体的结论
+    onError(e);
+  });
   return status;
 }
 

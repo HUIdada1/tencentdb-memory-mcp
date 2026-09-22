@@ -23,6 +23,10 @@ let lastError = '';
 let startedAt = '';
 let lastLoopAt = '';
 let takeover = null;     // 最近一次接管的结果（供控制台展示）
+// 上一次 stop() 时是否处于"外部守护模式"。
+// 外部守护由别的进程提供服务，本应用停不掉它 —— 这个标记让调用方能如实说明
+// "本应用已退出守护角色，但 8100 上的服务仍在（由外部进程提供）"。
+let stoppedExternal = false;
 
 function port() { return (mod && mod.RECALL_PORT) || 8100; }
 // 版本号来自注入的 daemon 模块；selfVerOverride 仅用于测试注入（生产环境恒为 null）
@@ -35,6 +39,9 @@ function localStatus() {
   return {
     running: !!server,
     external,
+    // "本应用是否已停止但外部守护仍在服务"：控制台据此给出准确文案，
+    // 避免外部模式下点停止后误报"服务已暂停"（其实 8100 还活着）。
+    stoppedExternal,
     port: port(),
     startedAt,
     lastLoopAt,
@@ -68,6 +75,7 @@ async function loop() {
 
 async function start(daemonModule) {
   if (server) return localStatus();
+  stoppedExternal = false;   // 重新接管守护角色，上一轮"外部仍在服务"的标记作废
   if (daemonModule) mod = daemonModule;
   if (!mod) { lastError = '守护模块未提供'; return localStatus(); }
   // 全程兜底：loadConfig / mkApi / mkCache 任一抛错都不能让应用主进程挂掉
@@ -233,6 +241,17 @@ function stop() {
   if (timer) { clearInterval(timer); timer = null; }
   if (server) { try { server.close(); } catch (_) { } server = null; }
   startedAt = '';
+  // external / lastError 必须一起清：早先只清 startedAt，停止后 localStatus() 仍带着
+  // 上一次的 external=true（"外部守护模式"）与旧 lastError。
+  // ⚠️ 但 external 的清理有个**例外语义**，改这里前务必读懂：
+  //    内置模式 → 停掉 server 就真的没服务了，external=false 正确。
+  //    外部模式 → 本应用**没有能力**结束外部进程，端口 8100 仍由它提供服务。
+  //               此时把 external 清成 false，会让控制台把"外部守护仍在服务"误报成"已停止"。
+  // 所以这里记下 stoppedExternal：用于让调用方如实区分两种"停止"形态，
+  // 而不是简单地把信息抹平（那属于"修一处露一处"）。
+  stoppedExternal = external;
+  external = false;
+  lastError = '';
 }
 
 // 配置保存后重启：daemon 模块的 cfg 是启动快照，换配置必须重建服务

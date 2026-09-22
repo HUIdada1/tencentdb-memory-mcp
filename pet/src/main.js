@@ -242,7 +242,20 @@ async function pollHealth() {
     return lastHealth;
   }
 }
-function startPolling() { stopPolling(); pollHealth(); healthTimer = setInterval(pollHealth, 30000); }
+// 启动健康轮询。**停止态下直接空转**：早先无条件先跑一轮 pollHealth()，
+// 而应用启动序列里 startPolling() 排在 guardEnabled 判断之前 ——
+// 结果用户点了「停止守护」再重启应用，启动瞬间仍会打一发必然失败的 /health，
+// 日志里照样留下一条"上行 连接失败 · /health"（噪音就是这么漏出来的）。
+function startPolling() {
+  stopPolling();
+  if (prefs && prefs.system && prefs.system.guardEnabled === false) return;
+  pollHealth();
+  healthTimer = setInterval(pollHealth, 30000);
+}
+// 守护被手动停止时不再做 30s 健康轮询：它只会得到 ECONNREFUSED，
+// 把"上行 连接失败 · /health"刷满实时日志（用户看到的就是这条噪音）。
+// 重新开启守护时会再 startPolling()，恢复轮询。
+function pausePolling() { stopPolling(); }
 function stopPolling() { if (healthTimer) { clearInterval(healthTimer); healthTimer = null; } }
 
 /* ---------- 实时心跳（1s）----------
@@ -265,8 +278,15 @@ function startTick() {
   stopTick();
   metrics.pushLog('info', `控制台已启动 · 守护端口 ${guard.port()}`);
   // 首帧立刻探活一次，避免右上角 pill 长时间停在"检测中"
-  daemonPing().catch(() => { });
-  pingTimer = setInterval(() => { daemonPing().catch(() => { }); }, 10000);
+  // 注意：停止态下连这一发都不打 —— 否则停止后仍会留下一条"连接失败"日志。
+  if (prefs.system.guardEnabled !== false) daemonPing().catch(() => { });
+  pingTimer = setInterval(() => {
+    // 守护被手动停止时不再每 10s 打一发 /health：那是必然失败的本地请求，
+    // 会以"上行 连接失败 · /health"的形式污染实时日志与流量统计。
+    // 停止态下 daemonOk 已由 guard-set 显式置 false，无需靠探活维持。
+    if (prefs.system.guardEnabled === false) return;
+    daemonPing().catch(() => { });
+  }, 10000);
   tickTimer = setInterval(() => {
     try {
       metrics.sample();
@@ -325,12 +345,14 @@ function daemonPing() {
     // done 守卫：timeout 与 error 可能先后触发，保证只结算一次
     let done = false;
     const settle = (v) => { if (done) return; done = true; resolve(v); };
-    // 统一的"探活失败"计量：**上下行对称各记一笔**。
+    // 探活失败计量：**上下行对称各记一笔**，但字节数为 0。
     // 早先成功路径记两笔（up+down），失败路径只记一笔 up、超时路径一笔都不记，
     // 导致 reqTotal / 上速率在守护掉线时失真，且 up 失败数被人为放大。
+    // 现在两侧都记（计数与失败数正确），且 bytesSource:'none' 让 metrics **不累加流量** ——
+    // 连接被拒时这 240B 根本没发出去，早先照记会让"上行累计"在掉线期间凭空增长。
     const meterFail = (errorText, ms) => {
-      metrics.meter({ dir: 'up', bytes: HTTP_HDR_UP, ms, status: 0, url, method: 'GET', error: errorText });
-      metrics.meter({ dir: 'down', bytes: 0, ms, status: 0, url, method: 'GET', error: errorText });
+      metrics.meter({ dir: 'up', bytes: HTTP_HDR_UP, bytesSource: 'none', ms, status: 0, url, method: 'GET', error: errorText });
+      metrics.meter({ dir: 'down', bytes: 0, bytesSource: 'none', ms, status: 0, url, method: 'GET', error: errorText });
     };
     let req;
     try {
@@ -384,6 +406,13 @@ function daemonPing() {
 // 守护重启空窗期会连续探活失败，早先每 5s 就打一条 WARN，日志很快被噪音淹没；
 // 现在只在"由好变坏"时告警一次，恢复时给一条 ok，中间不再重复。
 let daemonWasOk = null;
+// 去抖状态复位：**开启与停止两条路径都必须调**。
+// 早先只在 guard-set 的开启分支复位 daemonWasOk，且从未复位 pingOkLogged，
+// 于是"停止→再开启"后：探活恢复了却一条日志都不打（pingOkLogged 仍是 true），
+// 用户在最需要确认的时候反而看不到任何"守护活了"的回执；
+// 且若停止时最后一次探活恰好是失败的（daemonWasOk=false），
+// 重启后首次失败会被当成"已知的坏"而静默吞掉。
+function resetProbeDebounce() { daemonWasOk = null; pingOkLogged = false; }
 function metricFailLog(errorText, port, ms) {
   if (daemonWasOk === false) return;
   daemonWasOk = false;
@@ -521,14 +550,34 @@ ipcMain.handle('guard-set', async (_e, enabled) => {
   savePrefs();
   if (enabled) {
     const st = await guard.start(dm);
+    resetProbeDebounce();        // 重置去抖：开启后重新探到成功会给一条基线"探活正常"
     metrics.pushLog('ok', '守护服务已手动开启');
     logTakeover(st && st.takeover);
+    // 两种开启路径都要覆盖：
+    //   a) 应用以"守护已停止"启动 → 当时没建窗口、没起心跳 → 这里必须补起来
+    //   b) 停止后再开启 → 循环还在，重启一次即可保证周期干净
+    // startTick() 自己会清掉旧定时器，重复调用安全（stopTick 打头）。
+    if (!consoleWin || consoleWin.isDestroyed()) { if (!HIDDEN_BOOT) createConsole(); }
+    startTick();
+    startPolling();
     return { ok: true, running: !!st.running, external: !!st.external, enabled: true };
   }
   guard.stop();
+  pausePolling();              // 停掉 30s 健康轮询（否则日志里会一直刷"上行 连接失败 · /health"）
+  stopTick();                  // 停掉 10s 探活 + 1s 心跳：停止态下两者都是纯噪音/空转
+  resetProbeDebounce();        // 同时清去抖：避免"停止时恰好探活失败"把状态带到下次开启
   daemonOk = false; daemonOkAt = Date.now();
-  metrics.pushLog('warn', '守护服务已手动停止（采集上传与本地 recall 服务已暂停）');
-  return { ok: true, running: false, external: false, enabled: false };
+  // 文案必须区分两种停止形态：外部守护进程不是本应用能结束的，
+  // 端口 8100 仍由它提供服务；此时说"服务已暂停"是错的，会让用户以为本地 recall 挂了。
+  const st0 = guard.localStatus();
+  if (st0.stoppedExternal) {
+    metrics.pushLog('warn', '本应用已退出守护角色（外部守护进程仍在 :' + st0.port + ' 提供服务；采集上传是否继续取决于它）');
+  } else {
+    metrics.pushLog('warn', '守护服务已手动停止（采集上传与本地 recall 服务已暂停）');
+  }
+  // stoppedExternal 如实回传：外部守护进程不受本应用控制，不能一律报 external:false，
+  // 否则控制台会把"外部守护仍在服务"渲染成"已停止"。
+  return { ok: true, running: false, external: false, enabled: false, stoppedExternal: !!st0.stoppedExternal };
 });
 
 /* ---------- 历史会话回传（转发到守护进程 /api/backfill，任务在守护进程内异步跑） ---------- */
@@ -561,7 +610,7 @@ function daemonHttp(method, apiPath, body) {
  * 进程内直接跑同一份 startBackfill 实现（daemon 模块已 require 进主进程），
  * 多机部署场景不再卡"守护进程版本过旧"。进程内回传状态通过 'backfill' 频道推送。
  */
-const localBackfill = { state: null, timer: null };
+const localBackfill = { state: null, timer: null, startedAtMs: 0 };
 function startLocalBackfill(opts) {
   if (localBackfill.state && dm.backfillStatus().running) return { ok: false, error: '已有回传任务在进行中，请等它跑完' };
   const cfg = dm.loadConfig();
@@ -571,12 +620,21 @@ function startLocalBackfill(opts) {
   const r = dm.startBackfill(cfg, api, localBackfill.state, opts || {});
   if (r && r.ok) {
     if (localBackfill.timer) clearInterval(localBackfill.timer);
+    // 上限兜底：正常路径下 runBackfill 一定会在收尾把 running 置 false，
+    // 单笔请求也各有 timeout，所以这个 interval 本该很快自清。
+    // 但只要有一处 await 因故永不 settle（上游 socket 半开、系统级挂起），
+    // running 就会一直是 true，这个 1s 定时器便**永久存活** —— 无人可观测的泄漏。
+    // 加一个远大于合理回传时长的硬上限（30 分钟）强制收尾，只兜底、不改正常行为。
+    const HARD_CAP_MS = 30 * 60 * 1000;
+    localBackfill.startedAtMs = Date.now();
     localBackfill.timer = setInterval(() => {
       try { broadcast('backfill', dm.backfillStatus()); } catch (_) { }
       const st = dm.backfillStatus();
-      if (!st.running) {
+      const timedOut = Date.now() - localBackfill.startedAtMs > HARD_CAP_MS;
+      if (!st.running || timedOut) {
         clearInterval(localBackfill.timer); localBackfill.timer = null;
-        metrics.pushLog('ok', `历史回传完成：${st.filesDone}/${st.files} 个文件 · 共 ${st.msgs} 条`);
+        if (!st.running) metrics.pushLog('ok', `历史回传完成：${st.filesDone}/${st.files} 个文件 · 共 ${st.msgs} 条`);
+        else metrics.pushLog('warn', `历史回传超时（>${HARD_CAP_MS / 60000} 分钟）已停止跟踪：${st.filesDone}/${st.files} 个文件。任务可能仍在后台跑，可稍后重试。`);
       }
     }, 1000);
   }
@@ -781,16 +839,22 @@ else {
   app.whenReady().then(async () => {
     loadPrefs();
     rebuildCore();
-    if (!HIDDEN_BOOT) createConsole();     // 开机自启时只驻托盘
+    // 守护被手动停止：不建控制台窗口、不起任何探活/心跳。
+    // 早先无条件 createConsole() + startTick()，停止态启动后仍会立刻打一发
+    // 必然失败的 /health（"上行 连接失败"的来源），且 1s 心跳在没人看时纯属空转。
+    const guardOn = prefs.system.guardEnabled !== false;
+    if (!HIDDEN_BOOT && guardOn) createConsole();   // 开机自启 / 停止态时只驻托盘
     createTray();
     applyAutoStart();
     applyTheme();
     updater.init();
     updater.setAutoCheck(prefs.update.autoCheck);
-    startPolling();
-    startTick();
-    startSessionScan();
-    if (prefs.system.guardEnabled === false) {
+    if (guardOn) {
+      startPolling();
+      startTick();
+    }
+    startSessionScan();      // 会话扫描与守护无关，两种情况都跑（总览要有会话可看）
+    if (!guardOn) {
       // 用户已手动停止守护：不自动启动，界面保持"已停止"状态
       metrics.pushLog('info', '守护服务处于停止状态（右上角可重新开启）');
     } else {
