@@ -57,6 +57,73 @@ function runtimeInfo() {
   };
 }
 
+// 「数值化版本比较」—— 千万别用字符串比较：'9.0.0' > '22.16.0' 是 true。
+// 只取前两段（Electron 的主版本决定内嵌 Node 的 Node 大版本，够用了），
+// 非数字段一律当 0，缺段补齐，保证 'v34.0.0' / '34.0' / '34' 都能比。
+function verNum(s) {
+  const p = String(s || '').replace(/^v/, '').split('.');
+  const a = parseInt(p[0], 10) || 0;
+  const b = parseInt(p[1], 10) || 0;
+  return a * 1000 + b;
+}
+
+// Electron 主版本 → 其内嵌 Node 的 Node 版本（仅列到我们已知的门槛区间）。
+// 依据：Electron 33 → Node 20.18.3（无 node:sqlite）；
+//       Electron 34 → Node 20.18.x 上**已编译 node:sqlite**（本项目实测口径，见 CHANGELOG）。
+// 门槛是"内嵌 Node ≥ 22.16.0"，故 34 起为可用下限。若将来 Electron 调整内嵌 Node 版本，
+// 只需改这一张表 —— 它同时被 pet 与测试消费，单一真源。
+const ELECTRON_EMBEDDED_NODE = {
+  33: '20.18.3',
+  34: '20.18.3',   // 但该构建已编译 node:sqlite
+  35: '22.14.0',
+  36: '22.15.0',
+  37: '22.16.0',
+};
+const ELECTRON_MIN = 34;   // 最低可用 Electron 主版本（内嵌 Node 需 ≥22.16.0）
+const ELECTRON_MIN_LABEL = '34';
+
+// 打包形态自检：**发布出去的应用**必须跑在够新的 Electron 上。
+// 为什么必须显式检查（真实故障，2026-09-22）：
+//   开发机上 `node -v` 是 22.x，很容易让"打包时 Electron 还是 33"这件事滑过去；
+//   直到用户侧发现「ZCode 会话库来源不可用、线上对话不再上传」才暴露。
+//   electron 依赖在 pet/package.json 里升了，本函数是**运行期的最后一道闸**。
+// 返回 { kind:'ok'|'electron-too-old'|'node-too-old', needed, actual, message }
+function runtimeGate() {
+  const rt = runtimeInfo();
+  if (rt.isElectron) {
+    const major = parseInt(String(rt.electron).split('.')[0], 10) || 0;
+    if (major < ELECTRON_MIN) {
+      const embedded = ELECTRON_EMBEDDED_NODE[major] || '未知';
+      return {
+        kind: 'electron-too-old', ok: false,
+        actual: rt.electron, needed: ELECTRON_MIN_LABEL,
+        message: `本应用打包所用 Electron ${rt.electron} 过低（内嵌 Node ${embedded}，`
+          + `不含 node:sqlite）。需重新用 Electron ≥${ELECTRON_MIN_LABEL} 打包发布，`
+          + '否则 ZCode 会话库既无法展示、也无法采集上传。',
+      };
+    }
+    // Electron 版本够新，仍要确认内嵌 Node 真的带了 node:sqlite（防"表里假设"失真）
+    if (verNum(rt.node) < verNum(SQLITE_MIN_NODE) && !sqliteMod()) {
+      return {
+        kind: 'node-too-old', ok: false,
+        actual: rt.node, needed: SQLITE_MIN_NODE,
+        message: `Electron ${rt.electron} 的内嵌 Node ${rt.node} 仍不含 node:sqlite`
+          + `（需 ≥${SQLITE_MIN_NODE}），请改用更高版本的 Electron 打包。`,
+      };
+    }
+    return { kind: 'ok', ok: true, actual: rt.electron, needed: ELECTRON_MIN_LABEL, message: '' };
+  }
+  // 纯 Node 形态：门槛就是 node:sqlite 本身的版本要求
+  const nodeOk = verNum(rt.node) >= verNum(SQLITE_MIN_NODE) || !!sqliteMod();
+  return {
+    kind: nodeOk ? 'ok' : 'node-too-old', ok: nodeOk,
+    actual: rt.node, needed: SQLITE_MIN_NODE,
+    message: nodeOk ? ''
+      : `当前 Node ${rt.node} 不含 node:sqlite（需 ≥${SQLITE_MIN_NODE}），`
+        + 'ZCode 会话库无法读取。',
+  };
+}
+
 // 降级原因：分「模块缺失」「库文件缺失」「查询失败」三种 —— 用户能据此自助修复。
 // kind: 'ok' | 'no-module' | 'no-db' | 'query-error'
 function sqliteStatus() {
@@ -441,5 +508,10 @@ module.exports = {
   sqliteSessions,       // sqlite 权威源（守护进程上传侧也要用它）
   sqliteStatus,         // 降级状态（UI 警告用）：kind/degraded/message/hint
   runtimeInfo,          // 运行时识别（Electron 内嵌 Node vs 系统 Node），文案据此分流
+  runtimeGate,          // 打包形态自检：Electron 主版本够不够新（发布闸门）
+  verNum,               // 数值化版本比较（字符串比较会误判，见实现注释）
+  SQLITE_MIN_NODE,      // node:sqlite 最低 Node 版本（与 daemon 的 ZDB_MIN_NODE 必须一致）
+  ELECTRON_MIN,         // 最低可用 Electron 主版本
+  ELECTRON_MIN_LABEL,
   SQLITE,
 };

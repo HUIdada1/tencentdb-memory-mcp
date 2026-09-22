@@ -185,6 +185,62 @@ function load(breakSqlite, opts) {
     !/推荐 Node ≥18/.test(README));
 }
 
+/* ---------- ⑤ 打包形态闸门：Electron 主版本必须 ≥34（真实故障的根治） ----------
+ * 承接 ②b 的那个故障。②b 只保证"降级可见"，但用户要的是**别再降级**。
+ * 根因是发布出去的应用打包时用的是 Electron 33（内嵌 Node 20.18.3，无 node:sqlite）。
+ * ⚠️ 这个坑特别阴：开发机 `node -v` 是 22.x，很容易让"打包用的 Electron 是 33"滑过去。
+ * 本组把三件事钉死：
+ *   (a) pet/package.json 的 electron 依赖主版本 ≥ 34；
+ *   (b) 运行时闸门 runtimeGate() 能在 Electron 过老时明确报错（不静默）；
+ *   (c) 版本比较必须是**数值**比较（'9.0.0' 与 '22.16.0' 的字符串比较是反的）。
+ */
+{
+  const fs = require('fs');
+  const petPkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'pet', 'package.json'), 'utf8'));
+  const dep = (petPkg.devDependencies || {}).electron || '';
+  const depMajor = parseInt(String(dep).replace(/^[^\d]*/, '').split('.')[0], 10) || 0;
+  chk('⑤ pet/package.json 的 electron 依赖主版本 ≥34（内嵌 Node 才带 node:sqlite）',
+    depMajor >= 34, dep);
+
+  // 用受控的 process.versions.electron 驱动 runtimeGate 的四条分支
+  const { mod: s, release } = load(true, { electron: '33.4.11' });
+  const g33 = s.runtimeGate();
+  chk('⑤ Electron 33 → 闸门判定 electron-too-old', g33.kind === 'electron-too-old' && g33.ok === false, g33.kind);
+  chk('⑤ 过老时的文案点明"内嵌 Node 不含 node:sqlite"与影响面',
+    /不含 node:sqlite/.test(g33.message) && /重新用 Electron/.test(g33.message), g33.message);
+  chk('⑤ 过老时给出所需版本号（needed=34）', g33.needed === '34', String(g33.needed));
+  release();
+
+  const { mod: s34, release: rel34 } = load(false, { electron: '34.0.0' });
+  const g34 = s34.runtimeGate();
+  rel34();
+  chk('⑤ Electron 34 → 闸门放行（ok=true，不再是 electron-too-old）',
+    g34.ok === true && g34.kind === 'ok', g34.kind + '/' + g34.message);
+
+  // 版本比较必须数值化：字符串比较下 '9.0.0' > '22.16.0' 成立（经典误判）
+  chk('⑤ verNum 是数值比较（9.0.0 不高于 22.16.0）',
+    s.verNum('9.0.0') < s.verNum('22.16.0'),
+    s.verNum('9.0.0') + ' vs ' + s.verNum('22.16.0'));
+  chk('⑤ verNum 容忍 v 前缀与缺段',
+    s.verNum('v34.0.0') === s.verNum('34') && s.verNum('v34') === s.verNum('34.0'),
+    s.verNum('v34') + '/' + s.verNum('34.0'));
+  chk('⑤ 导出的 ELECTRON_MIN 与 pet 依赖门槛同源（避免两处漂移）',
+    s.ELECTRON_MIN === 34 && String(s.ELECTRON_MIN_LABEL) === '34',
+    s.ELECTRON_MIN + '/' + s.ELECTRON_MIN_LABEL);
+
+  // 纯 Node 形态闸门：本机 Node 22 应放行
+  const { mod: sNode, release: relNode } = load(false);
+  const gNode = sNode.runtimeGate();
+  relNode();
+  chk('⑤ 纯 Node 形态闸门按 node:sqlite 门槛判定（本机 Node22 放行或明确报 node-too-old）',
+    gNode.ok === true || gNode.kind === 'node-too-old', gNode.kind);
+  chk('⑤ 闸门结果恒带 kind/ok/actual/needed/message 五要素（UI 可直接消费）',
+    typeof gNode.kind === 'string' && typeof gNode.ok === 'boolean'
+    && typeof gNode.actual === 'string' && typeof gNode.needed === 'string'
+    && typeof gNode.message === 'string',
+    JSON.stringify(gNode).slice(0, 140));
+}
+
 console.log('\n---------- 会话权威源降级可见性验证：通过 ' + ok.length + ' / 失败 ' + bad.length + ' ----------');
 ok.forEach((x) => console.log('  ✓ ' + x));
 if (bad.length) { bad.forEach((x) => console.log('  ✗ ' + x)); process.exit(1); }
