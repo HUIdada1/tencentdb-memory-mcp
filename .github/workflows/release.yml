@@ -102,11 +102,36 @@ jobs:
         run: |
           if [ ! -d pet/node_modules ]; then npm ci --prefix pet; else echo "pet/node_modules 已就绪，跳过重复安装"; fi
 
+      - name: 生成更新说明（build/release-notes.md）
+        # electron-builder 会在 buildResources（build/）下找 release-notes.md，
+        # 读到的内容写进 latest.yml 的 releaseNotes 字段，electron-updater 把它作为
+        # info.releaseNotes 抛给主进程，应用「更新中心」的 #up-notes 据此渲染。
+        # 此前该文件不存在 → latest.yml 无 releaseNotes → 更新说明恒为空。
+        run: node scripts/make-release-notes.cjs
+
       - name: 打包并发布 Electron 控制台应用（NSIS + 便携版 + latest.yml）
         run: npx electron-builder --win --publish always
         working-directory: pet
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 回填 Release 页面说明
+        # electron-publish 的 createRelease() 只发 tag_name/name/draft 三个字段，
+        # **不含 body** —— 所以 releaseInfo.releaseNotes 只进 latest.yml，不进 Release 页面。
+        # 这里用 gh 单独把同一份说明写到 Release body，让网页端也能看到更新内容。
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="$(node -p "require('./pet/package.json').version")"
+          if [ -s build/release-notes.md ]; then
+            gh release edit "v${VERSION}" \
+              --notes-file build/release-notes.md \
+              --title "TD记忆守护 v${VERSION}"
+            echo "已回填 Release v${VERSION} 的说明"
+          else
+            echo "::warning::build/release-notes.md 缺失或为空，Release 页面将没有说明"
+          fi
 
       - name: 上传守护进程 exe 到同一 Release
         shell: bash

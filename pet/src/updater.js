@@ -168,11 +168,39 @@ async function checkPortable() {
     if (!m) throw new Error('版本信息格式异常');
     const latest = m[1].trim();
     if (compareVersions(latest, app.getVersion()) > 0) {
-      setState('available', { latestVersion: latest, message: '' });
+      // latest.yml 里的 releaseNotes 由 electron-builder 从 build/release-notes.md 写入，
+      // 与安装版走 autoUpdater 时拿到的 info.releaseNotes 同源。
+      // 便携版此前只取了 version，导致同一次发布「安装版有说明、便携版没有」。
+      setState('available', { latestVersion: latest, notes: readYmlNotes(text), message: '' });
       if (!currentCheckIsManual) notifyAvailable(latest);
     } else setState('up-to-date', { latestVersion: '', notes: '', percent: 0, message: '' });
   } catch (e) { onError(e); }
   return status;
+}
+
+// 从 latest.yml 取 releaseNotes。该字段是 electron-builder 用 YAML 序列化写入的，
+// 可能是块标量（`releaseNotes: |` / `releaseNotes: >`）或单行字符串，两种都要认。
+function readYmlNotes(text) {
+  const lines = String(text).split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(/^releaseNotes:\s*(.*)$/);
+    if (!m) continue;
+    const inline = m[1].trim();
+    // 单行形式：releaseNotes: '...' 或 releaseNotes: "..."
+    if (inline && inline !== '|' && inline !== '>' && !/^[|>][-+]?\d*$/.test(inline)) {
+      return htmlToText(inline.replace(/^['"]|['"]$/g, ''));
+    }
+    // 块形式：收集后续缩进行，直到遇到不缩进的键
+    const block = [];
+    for (let j = i + 1; j < lines.length; j++) {
+      const line = lines[j];
+      if (line.trim() === '') { block.push(''); continue; }
+      if (!/^\s/.test(line)) break;          // 回到顶层键，块结束
+      block.push(line.replace(/^\s{2}/, '')); // 去掉 YAML 块缩进
+    }
+    return htmlToText(block.join('\n'));
+  }
+  return '';
 }
 
 function check(manual) {
