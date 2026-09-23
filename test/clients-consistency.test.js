@@ -163,11 +163,31 @@ const REG_JS_BARE = strip(REG_JS);
     clients.HOOK_LEGACY_MARKS.join(','));
   chk('⑥ register.js 不再本地定义 HOOK_MARK',
     !/^const HOOK_MARK =/m.test(REG_JS_BARE), '');
-  // hook 目标也应在清单里声明（两端共用）
-  for (const k of ['zcode', 'claude-code']) {
-    const h = clients.byKey(k).hook;
-    chk(`⑥ 「${k}」声明了 hook 目标文件`, !!(h && typeof h.file === 'function'), String(h));
+  // hook 目标也应在清单里声明（两端共用）。
+  // 两类 scope 的"目标位置"表达方式不同，断言也要分开（别再用统一的 h.file 判据）：
+  //   global    → h.file(home) 给出用户级配置文件
+  //   workspace → h.eventsPath 给出**工作区根下**的分段（需运行时才知道工作区）
+  {
+    const h = clients.byKey('claude-code').hook;
+    chk('⑥ 「claude-code」是用户级 hook 且给出配置文件', !!(h && h.scope !== 'workspace' && typeof h.file === 'function'), String(h));
   }
+  {
+    const h = clients.byKey('zcode').hook;
+    chk('⑥ 「zcode」是工作区级 hook 且给出 eventsPath',
+      !!(h && h.scope === 'workspace' && Array.isArray(h.eventsPath) && h.eventsPath.length > 0), String(h));
+    chk('⑥ 「zcode」的 hook 不能再有 file()（避免误当用户级写）', !(h && typeof h.file === 'function'), '');
+  }
+  chk('⑥ hookConfigFile 能按 scope 解析出两种目标',
+    clients.hookConfigFile(clients.byKey('claude-code'), '/h', '/ws') === path.join('/h', '.claude', 'settings.json')
+    && clients.hookConfigFile(clients.byKey('zcode'), '/h', '/ws') === path.join('/ws', '.zcode', 'config.json'),
+    String(clients.hookConfigFile(clients.byKey('zcode'), '/h', '/ws')));
+  chk('⑥ hookEventList 对 ZCode 生成 events 容器、对 CC 直挂',
+    (() => {
+      const a = {}; clients.hookEventList(a, clients.byKey('zcode').hook, true);
+      const b = {}; clients.hookEventList(b, clients.byKey('claude-code').hook, true);
+      return !!(a.hooks && a.hooks.events && a.hooks.events.UserPromptSubmit)
+        && !!(b.hooks && b.hooks.UserPromptSubmit) && !b.hooks.events;
+    })(), '');
 }
 
 /* ---------- ⑦ 指令文件清单：写入面 = 检测面 ---------- */
@@ -210,16 +230,38 @@ const REG_JS_BARE = strip(REG_JS);
   chk('⑨ daemon 的 HOOK_LEGACY_MARKS 与清单一致',
     JSON.stringify(legList) === JSON.stringify(clients.HOOK_LEGACY_MARKS),
     JSON.stringify(legList));
-  // hook 配置文件路径：daemon 里内联的两条必须与清单的 hook.file 指向同一文件。
+  // hook 配置路径：daemon 里内联的必须与清单指向同一位置。
   // daemon 用 path.join(home, ...) 构造，所以不能拿固定字符串去 includes —— 改为
-  // 从 daemon 源码里提取 ".zcode', 'cli', 'config.json' 这类分段字面量做比对。
+  // 从 daemon 源码里提取 ".zcode', 'cli', 'config.json" 这类分段字面量做比对。
   const segOf = (abs) => abs.split(/[\\/]/).filter(Boolean).slice(1);  // 去掉盘符/home 首段
-  for (const k of ['zcode', 'claude-code']) {
+  // 用户级 hook（Claude Code）：路径来自 hook.file()
+  {
+    const k = 'claude-code';
     const segs = segOf(clients.byKey(k).hook.file('/probe'));
-    // daemon 里应出现形如 'cli', 'config.json' 的相邻分段（顺序一致）
     const pattern = new RegExp(segs.map((s) => `['"]${s.replace(/\./g, '\\.')}['"]`).join('[\\s,]+'));
     chk(`⑨ daemon 内联的 ${k} hook 路径分段与清单一致`,
       pattern.test(DAEMON), segs.join('/'));
+  }
+  // 工作区级 hook（ZCode）：hook.file 不存在，路径来自 hook.eventsPath。
+  // daemon 无法枚举工作区，所以它不该内联这条路径作为 hookFile，而应标记 hookWorkspace。
+  {
+    const zc = clients.byKey('zcode');
+    chk('⑨ ZCode 的 hook 是工作区级（scope=workspace）',
+      zc.hook.scope === 'workspace', String(zc.hook.scope));
+    chk('⑨ ZCode 的 hook 带 events 容器（hooks.events.UserPromptSubmit）',
+      zc.hook.eventsContainer === 'events', String(zc.hook.eventsContainer));
+    chk('⑨ ZCode 的用户级配置被标记为「禁止出现 hooks」',
+      zc.hook.forbiddenAtUserConfig === true, String(zc.hook.forbiddenAtUserConfig));
+    // eventsPath 的分段必须在 daemon 的提示文案里出现（保证两边描述同一个位置）
+    const segs = zc.hook.eventsPath;
+    const pattern = new RegExp(segs.map((s) => s.replace(/\./g, '\\.')).join('[\\\\/]+'));
+    chk('⑨ daemon 内联的 ZCode hook 位置说明与清单一致',
+      pattern.test(DAEMON), segs.join('/'));
+    chk('⑨ daemon 标记了 ZCode 的 hookWorkspace',
+      DAEMON.includes('hookWorkspace'), '');
+    // 事件层级名也要出现在 daemon 的检测实现里
+    chk('⑨ daemon 的 hook 检测支持 events 层级',
+      DAEMON.includes('hooksArrOf') && DAEMON.includes('container'), '');
   }
   // toml 段名与 dsh 标记
   chk('⑨ daemon 用的 toml 段名与清单一致',

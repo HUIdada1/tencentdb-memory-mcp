@@ -109,7 +109,7 @@ node register-all.cjs --no-hook --no-instructions  # 只注册 MCP
 
 | 目标 | 动作 |
 |---|---|
-| ZCode CLI | `~/.zcode/cli/config.json` 的 `mcp.servers.tdai` |
+| ZCode CLI | `~/.zcode/cli/config.json` 的 `mcp.servers.tdai`；hook 在工作区级 `<项目根>/.zcode/config.json` 的 `hooks.events.UserPromptSubmit` |
 | Claude Code | `~/.claude.json` 的 `mcpServers.tdai` + `settings.json` 的 `UserPromptSubmit` hook |
 | Cursor | `~/.cursor/mcp.json` |
 | Codex | `~/.codex/config.toml` 的 `[mcp_servers.tdai]` |

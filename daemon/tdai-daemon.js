@@ -23,7 +23,7 @@ const QUEUE_DIR = path.join(DATA_DIR, 'queue');
 const LOG_PATH = path.join(DATA_DIR, 'daemon.log');
 
 const RECALL_PORT = Number(process.env.TDAI_DAEMON_PORT) || 8100;
-const APP_VER = '0.5.17';         // 与 package.json 同步；SEA exe 的版本号
+const APP_VER = '0.5.18';         // 与 package.json 同步；SEA exe 的版本号
 const REPO_API = 'https://api.github.com/repos/HUIdada1/tencentdb-memory-mcp/releases/latest';
 const RECALL_TIMEOUT_MS = 800;   // hook 链路硬超时：超时返回空，绝不阻塞对话
 const SCAN_INTERVAL_MS = 2 * 60 * 1000;  // 采集循环 2 分钟
@@ -1100,13 +1100,54 @@ async function buildRecall(cfg, api, cache, query) {
 // 专门断言 daemon 的 HOOK 常量与 core/clients.js 完全一致；改一处必须改三处。
 const HOOK_MARK = 'tdai-hook.cmd';
 const HOOK_LEGACY_MARKS = ['tdai-daemon.js', 'tdai-daemon.cjs'];
-function hookStateOf(file) {
+// ZCode 3.14+ 的 hook 在**工作区级** `.zcode/config.json`，且多一层 events 容器：
+//   hooks.events.UserPromptSubmit  （Claude Code 是 hooks.UserPromptSubmit，无 events 层）
+// 用户级 ~/.zcode/cli/config.json 里出现 hooks 会被 Zod 判为 Unrecognized key，
+// 导致**整份用户配置作废**（插件开关点不动）。检测时要把"非法残留"单列出来。
+function hooksArrOf(config, container) {
+  const h = config && config.hooks;
+  if (!h || typeof h !== 'object') return [];
+  const host = container ? h[container] : h;
+  const arr = host && host.UserPromptSubmit;
+  return Array.isArray(arr) ? arr : [];
+}
+function hasTdaiHook(arr) {
+  const text = JSON.stringify(arr);
+  return text.includes(HOOK_MARK) || HOOK_LEGACY_MARKS.some((m) => text.includes(m));
+}
+function hookStateOf(file, container) {
   let s = null;
   try { s = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (_) { return { present: false, legacy: false }; }
-  const arr = (s && s.hooks && s.hooks.UserPromptSubmit) || [];
+  const arr = hooksArrOf(s, container);
+  const present = hasTdaiHook(arr);
   const text = JSON.stringify(arr);
-  const present = text.includes(HOOK_MARK) || HOOK_LEGACY_MARKS.some((m) => text.includes(m));
   return { present, legacy: present && !text.includes(HOOK_MARK) };
+}
+// 用户级配置里留下了非法的 hooks 段（ZCode 会拒收整份配置）→ 返回 true，界面需提示"需清理"
+function hasForbiddenUserHooks(file) {
+  let s = null;
+  try { s = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (_) { return false; }
+  return !!(s && typeof s === 'object' && s.hooks && typeof s.hooks === 'object');
+}
+
+// 自愈：把用户级 config.json 里的非法 hooks 段删掉（先备份，只删这一个键）。
+// 触发点：daemon 的 hook 子命令（每次提问都跑，必然发生）。
+// 返回被清理的文件路径；无需清理或失败返回 null。
+//
+// 边界（刻意保守）：
+//   - 只删 `hooks` 一个键，plugins / mcp / features 等一律不动
+//   - 备份失败就不动手，宁可保持现状也不要制造不可逆损失
+//   - 任何异常都吞掉 —— hook 是对话主链路上的，绝不能因为清理失败影响注入
+function healForbiddenUserHooks() {
+  const f = path.join(os.homedir(), '.zcode', 'cli', 'config.json');
+  let s = null;
+  try { s = JSON.parse(fs.readFileSync(f, 'utf8')); } catch (_) { return null; }
+  if (!s || typeof s !== 'object' || !s.hooks || typeof s.hooks !== 'object') return null;
+  const bak = f + '.bak.tdai-heal-hooks.' + new Date().toISOString().replace(/[:.]/g, '-');
+  try { fs.copyFileSync(f, bak); } catch (_) { return null; }
+  delete s.hooks;
+  try { fs.writeFileSync(f, JSON.stringify(s, null, 2)); } catch (_) { return null; }
+  return f;
 }
 
 // agent 接入状态：fs 检测各客户端配置（installed=已接入 / absent=客户端未安装 / missing=未接入）
@@ -1170,7 +1211,12 @@ function agentStatus() {
   //    改一边必须改另一边 —— `test/clients-consistency.test.js` ⑨ 会拦漂移。
   //    路径分段用 CLIENT_PATHS 的同一种写法（'x/y/z' 正斜杠），方便逐字比对。
   const CLIENTS_MIN = [
-    { key: 'zcode', name: 'ZCode CLI', source: 'zcode', injection: { kinds: ['mcp', 'hook', 'instructions'], label: 'MCP + 提问前 hook + 全局指令', requiresRestart: true, recall: true, capture: true }, kind: 'json-nested', probe: path.join(home, '.zcode'), file: path.join(home, '.zcode', 'cli', 'config.json'), pointer: '/mcp/servers/tdai', hookFile: path.join(home, '.zcode', 'cli', 'config.json') },
+    // ZCode：MCP 在用户级 ~/.zcode/cli/config.json（mcp.servers.tdai）；
+    // 但 hook 在**工作区级** <工作区>/.zcode/config.json，且多一层 events 容器。
+    // 工作区级路径随项目变，daemon 侧无法枚举 → hookFile 留空，改由 hookWorkspace:true
+    // 标记，并给出 hook 应处的位置说明（见 hookFileHint）。
+    // ⚠️ 同时要盯住 userHookFile：用户级里残留 hooks 会让 ZCode **整份配置作废**（插件开关失效）。
+    { key: 'zcode', name: 'ZCode CLI', source: 'zcode', injection: { kinds: ['mcp', 'hook', 'instructions'], label: 'MCP + 提问前 hook + 全局指令', requiresRestart: true, recall: true, capture: true }, kind: 'json-nested', probe: path.join(home, '.zcode'), file: path.join(home, '.zcode', 'cli', 'config.json'), pointer: '/mcp/servers/tdai', hookWorkspace: true, hookEventsContainer: 'events', userHookFile: path.join(home, '.zcode', 'cli', 'config.json'), hookFileHint: '<工作区>/.zcode/config.json 的 hooks.events.UserPromptSubmit' },
     { key: 'claude-code', name: 'Claude Code', source: 'claude-code', injection: { kinds: ['mcp', 'hook', 'instructions'], label: 'MCP + UserPromptSubmit hook + 全局指令', requiresRestart: true, recall: true, capture: true }, kind: 'json', probe: path.join(home, '.claude.json'), file: path.join(home, '.claude.json'), pointer: '/mcpServers/tdai', hookFile: path.join(home, '.claude', 'settings.json') },
     { key: 'cursor', name: 'Cursor', source: 'cursor', injection: { kinds: ['mcp'], label: 'MCP 配置', requiresRestart: true, recall: true, capture: true }, kind: 'json', probe: path.join(home, '.cursor'), file: path.join(home, '.cursor', 'mcp.json'), pointer: '/mcpServers/tdai' },
     { key: 'codex', name: 'Codex', source: 'codex', injection: { kinds: ['mcp'], label: 'TOML MCP 服务器', requiresRestart: true, recall: true, capture: true }, kind: 'toml', probe: path.join(home, '.codex', 'config.toml'), file: path.join(home, '.codex', 'config.toml'), tomlSection: 'mcp_servers.tdai' },
@@ -1202,6 +1248,20 @@ function agentStatus() {
       if (hs.present) rec.detail = hs.legacy ? 'hook 已注入（脚本写法，exe 用户建议关→开切换）' : 'hook 已注入';
       rec.checks.hook = hs.present;
       if (!hs.present) rec.effective = false;
+    }
+    // ZCode 特例：hook 在工作区级，daemon 侧无法枚举工作区 → hook 状态记为"待在工作区确认"。
+    // 但用户级配置里的**非法 hooks 残留**必须报出来：它会让 ZCode 丢弃整份用户配置，
+    // 表现为插件开关点击无效（真实故障）。宁可明说，也不要让用户自己去猜。
+    if (cl.hookWorkspace) {
+      rec.checks.hook = null;
+      rec.hookScope = 'workspace';
+      rec.hookHint = cl.hookFileHint;
+      if (cl.userHookFile && hasForbiddenUserHooks(cl.userHookFile)) {
+        rec.detail = '用户配置含非法 hooks 段 → ZCode 会丢弃整份配置（插件开关失效），需清理';
+        rec.checks.hook = false;
+        rec.effective = false;
+        rec.warning = 'forbidden_user_hooks';
+      }
     }
     items.push(rec);
   }
@@ -1513,6 +1573,15 @@ function startServer(cfg, api, cache, state) {
 /* ---------- hook 子命令：stdin / --q → /recall → stdout ---------- */
 
 async function runHook() {
+  // 自愈：顺手清掉用户级 config.json 里的非法 hooks 残留（旧版写进去的）。
+  //
+  // 为什么放在 hook 里：hook 每次提问都会跑，是**唯一必然发生**的时机。
+  // 该残留会让 ZCode 3.14+ 丢弃整份用户配置 → plugins.enabledPlugins 读不到
+  // → 插件开关点击无效（真实故障）。而用户往往在"插件坏了"之后才会去找原因，
+  // 那时 hook 早就跑过了 —— 所以让它自己修，而不是等用户来点"接入"。
+  // 必须极轻：只读一个小 JSON，报错一律吞掉，绝不阻塞对话主流程。
+  try { healForbiddenUserHooks(); } catch (_) { /* 静默 */ }
+
   let q = '';
   const argv = process.argv.slice(3);
   const qi = argv.indexOf('--q');

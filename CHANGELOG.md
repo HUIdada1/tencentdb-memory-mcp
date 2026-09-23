@@ -11,6 +11,42 @@
 
 ## [Unreleased]
 
+## [0.5.18] - 2026-09-23
+
+### Fixed
+- **修复 ZCode 插件开关失效（点了就弹回、无法启用/禁用）**。根因不在 ZCode，在本工具：
+  它把 `UserPromptSubmit` hook 写进了**用户级** `~/.zcode/cli/config.json` 的
+  `hooks.UserPromptSubmit`，而 ZCode 3.14 起该文件的 schema 是 `.strict()` 的
+  `hooks = { enabled?, timeoutMs?, maxOutputBytes?, events? }` —— 多出的键被判
+  `Unrecognized key`，**整份用户配置因此作废**。后果是 `plugins.enabledPlugins`
+  读不出来、也写不回去，UI 只能按默认值渲染，于是开关点一下就被回滚（启用与禁用两个
+  方向都这样）。日志里表现为 `config.file.invalid` 刷屏（本机升级到 ZCode 3.14.3 后
+  一天内出现 586 次）。
+  修复要点：
+  1. ZCode 的 hook 改写到**工作区级** `<项目根>/.zcode/config.json`（`zcode.json` 亦可），
+     层级为 `hooks.events.UserPromptSubmit` —— 这是 3.14 认的唯一形态（从 app.asar 的
+     zod schema 逐字核对，见 `test/zcode-hook-schema.test.js`）。
+  2. 接入时会**自动清理**用户级 config.json 里遗留的非法 `hooks` 段（先备份），
+     只删这一个键，`plugins` / `mcp` 等其余配置分毫不动。
+  3. 状态检测会主动把该残留报成"用户配置含非法 hooks 段 → 插件开关失效，需清理"，
+     不再让用户自己去猜。
+  4. Claude Code 不受影响：它的 hook 本来就在用户级 `~/.claude/settings.json`，
+     且**没有** `events` 层 —— 两种客户端从此在清单里用 `hook.scope` 显式区分，
+     杜绝"按 CC 的写法套给 ZCode"再犯。
+
+### Added
+- `register-all.cjs` 新增 `--workspace <项目根>`：ZCode 的 hook 是工作区级的，
+  需显式指定要接入的项目；未指定时给出明确提示（MCP 照常注册，不受影响）。
+- 新增 `test/zcode-hook-schema.test.js`：按 ZCode 3.14.3 的官方 schema 校验写出的
+  hook 配置，并含"旧写法必须被判非法"的反例自检，防止旧写法被改回来。
+
+### Changed
+- `core/clients.js` 的 hook 声明支持 `scope`（`global` / `workspace`）、
+  `eventsContainer`、`eventsPath`、`forbiddenAtUserConfig`，
+  并新增 `hookEventList()` / `hookConfigFile()` / `stripForbiddenUserHooks()` 三个
+  共用函数 —— "事件名挂在哪一层、写到哪个文件、用户级该不该出现"从此只有一处真源，
+  `pet/src/register.js`、`daemon/tdai-daemon.js`、`register-all.cjs` 全部走它。
+
 ## [0.5.17] - 2026-09-23
 
 ### Added

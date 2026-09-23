@@ -38,9 +38,33 @@ const CLIENTS = [
     // ZCode 的 MCP 条目位置：mcp.servers.tdai（不是顶层 mcpServers）
     pointer: '/mcp/servers/tdai',
     // hook 的展示名沿用历史标签（UI 文案与既有测试都按它断言，别顺手改）
-    // scope 只表示"写在哪一层配置"（用户级 vs 项目级），**与 hook 的触发时机无关**：
-    // 这里写的是 ZCode 的全局配置文件，但 hook 类型仍是 UserPromptSubmit（每次提问前触发）。
-    hook: { file: (h) => path.join(h, '.zcode', 'cli', 'config.json'), scope: 'global', label: 'ZCode hook' },
+    //
+    // ⚠️ ZCode 的 hook 与 Claude Code **不同构**，别按 CC 的写法套（2026-09-23 踩过）：
+    //   1. 位置：CC 写在用户级 ~/.claude/settings.json；
+    //      ZCode 只从**工作区**读 hook —— `~/.zcode/cli/config.json` 的 hooks 段会被
+    //      zod 判为 `Unrecognized key`，**整份用户配置随之作废**（plugins.enabledPlugins
+    //      读不到 → 插件开关点了就弹回）。所以绝不能往用户级 config.json 写 hooks。
+    //   2. 层级：CC 是 `hooks.UserPromptSubmit`；
+    //      ZCode 是 `hooks.events.UserPromptSubmit`（多了 events 这一层）。
+    //   3. ZCode 的 hook 需用户信任授权后执行（trustState/workspaceHookReview）。
+    //
+    // ZCode 3.14 的 hooks schema（从 app.asar 提取，见 test/clients-consistency.test.js）：
+    //   hooks = { enabled?, timeoutMs?, maxOutputBytes?, events?: { <Event>: Matcher[] } }
+    //   Matcher = { matcher?, hooks: [{ type:'command'|'process', command, ... }] }.strict()
+    // 事件集：SessionStart / UserPromptSubmit / PreToolUse / PermissionRequest /
+    //         PostToolUse / PostToolUseFailure / Stop
+    //
+    // scope='workspace' 表示写在**工作区**（`<项目>/.zcode/config.json`）而非用户主目录。
+    // hookEventsPath 是相对工作区根的分段，供 workspaceHookFile() 拼接。
+    hook: {
+      scope: 'workspace',
+      label: 'ZCode hook',
+      eventsPath: ['.zcode', 'config.json'],
+      // 工作区级配置里 hooks 的容器层级：ZCode 需要 events 中转，CC 不需要（undefined=直接挂事件名）
+      eventsContainer: 'events',
+      // 用户级 config.json 里**不允许**出现 hooks —— 出现即整份配置作废，需清理
+      forbiddenAtUserConfig: true,
+    },
   },
   {
     key: 'claude-code',
@@ -198,6 +222,62 @@ const HOOK_MARK = 'tdai-hook.cmd';
 // 所以必须认出来并提示"切换"，而不是当成"没注入"。
 const HOOK_LEGACY_MARKS = ['tdai-daemon.js', 'tdai-daemon.cjs'];
 
+// ---- hook 配置的层级读写（唯一真源，三处共用） ----
+//
+// 各家 hook 的"容器层级"不一样，早先所有客户端共用同一句
+// `c.hooks.UserPromptSubmit`，ZCode 3.14 因此被判为非法 key（整份用户配置作废）。
+// 这里把"事件名在哪一层"收敛成两个函数，杜绝再出现"按 CC 的写法套给 ZCode"。
+//
+// 层级约定（容器名取自客户端清单的 hook.eventsContainer）：
+//   无 container → 事件直接挂 hooks 下：hooks.UserPromptSubmit           （Claude Code）
+//   有 container → 事件挂 hooks[container] 下：hooks.events.UserPromptSubmit（ZCode 3.14+）
+function hookEventList(config, hook, create) {
+  const c = config;
+  if (!c || typeof c !== 'object') return null;
+  if (!create && (!c.hooks || typeof c.hooks !== 'object')) return null;
+  if (create) { c.hooks = (c.hooks && typeof c.hooks === 'object') ? c.hooks : {}; }
+  const container = hook && hook.eventsContainer;
+  let host = c.hooks;
+  if (container) {
+    if (create) { host[container] = (host[container] && typeof host[container] === 'object') ? host[container] : {}; }
+    host = host[container];
+    if (!host || typeof host !== 'object') return null;
+  }
+  const list = host.UserPromptSubmit;
+  if (Array.isArray(list)) return list;
+  if (!create) return null;
+  host.UserPromptSubmit = [];
+  return host.UserPromptSubmit;
+}
+
+// hook 该写进哪个文件：工作区级（ZCode）需由调用方给出工作区根；用户级直接用清单的 file()。
+// 返回 null 表示"该客户端没有可写 hook 的目标"（未配置 hook 或缺少必要入参）。
+function hookConfigFile(cls, home, workspaceRoot) {
+  if (!cls || !cls.hook) return null;
+  if (cls.hook.scope === 'workspace') {
+    if (!workspaceRoot) return null;
+    return path.join(workspaceRoot, ...(cls.hook.eventsPath || []));
+  }
+  return cls.hook.file ? cls.hook.file(home) : null;
+}
+
+// 用户级配置里**不该出现**的 hooks 段（出现即整份配置作废）。
+// 返回被清理掉的备份路径；无风险返回 null。调用方负责日志。
+function stripForbiddenUserHooks(cls, home) {
+  const c = cls && cls.hook;
+  if (!c || !c.forbiddenAtUserConfig) return null;
+  const f = cls.file(home);
+  let raw = null;
+  try { raw = JSON.parse(require('fs').readFileSync(f, 'utf8')); } catch (_) { return null; }
+  if (!raw || typeof raw !== 'object' || !raw.hooks) return null;
+  const fsMod = require('fs');
+  const bak = f + '.bak.tdai-strip-hooks.' + new Date().toISOString().replace(/[:.]/g, '-');
+  try { fsMod.copyFileSync(f, bak); } catch (_) { /* 备份失败则不写，宁可不修 */ return null; }
+  delete raw.hooks;
+  try { fsMod.writeFileSync(f, JSON.stringify(raw, null, 2)); } catch (_) { return null; }
+  return bak;
+}
+
 /** 按 key 取客户端定义 */
 function byKey(key) {
   return CLIENTS.find((c) => c.key === key) || null;
@@ -234,4 +314,5 @@ const CLIENT_PATHS = CLIENTS.map((c) => ({
 module.exports = {
   CLIENTS, CLIENT_PATHS, INSTR, INSTR_MARK, INSTR_TARGETS, HOOK_MARK, HOOK_LEGACY_MARKS,
   byKey, clientKeys, nameOf,
+  hookEventList, hookConfigFile, stripForbiddenUserHooks,
 };

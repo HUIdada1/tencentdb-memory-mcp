@@ -47,7 +47,9 @@ check('空 HOME：客户端全部「未装客户端」', KEYS.every((k) => find(
 check('空 HOME：无 hook 标注误报', !(find(sEmpty, 'claude-code').detail || '').includes('hook 已注入'));
 
 /* ---------- 2. 一键接入 ---------- */
-const r1 = register.register({ home: HOME, exePath: EXE, mcpJs: MCP_JS, daemonJs: DAEMON_JS });
+// ZCode 的 hook 是**工作区级**的，register 需要显式指定工作区根（WS）
+const WS = fs.mkdtempSync(path.join(os.tmpdir(), 'tdai-ws-'));
+const r1 = register.register({ home: HOME, exePath: EXE, mcpJs: MCP_JS, daemonJs: DAEMON_JS, workspaceRoot: WS });
 check('注册：6 个客户端均写入', CLIENTS.every((n) => r1.some((x) => x.target === n && ['新增', '追加', '覆盖'].includes(x.action))));
 check('注册：无失败项', !r1.some((x) => x.action === '失败'));
 check('注册：未安装客户端不造配置', !fs.existsSync(path.join(HOME, '.gemini')) && !fs.existsSync(path.join(HOME, '.windsurf')));
@@ -57,6 +59,9 @@ check('ZCode：条目指向本应用 exe', zc.mcp.servers.tdai.command === EXE &
 check('ZCode：以 ELECTRON_RUN_AS_NODE 运行（不依赖 node）', zc.mcp.servers.tdai.env.ELECTRON_RUN_AS_NODE === '1');
 check('ZCode：原有配置与其它 server 未被破坏', zc.model === 'keep-me' && !!zc.mcp.servers.other);
 check('ZCode：写入前生成备份', fs.readdirSync(path.join(HOME, '.zcode', 'cli')).some((f) => f.includes('.bak.')));
+// ⚠️ 用户级 config.json 里**绝不能**出现 hooks —— ZCode 3.14+ 会因此作废整份配置，
+// 导致 plugins.enabledPlugins 读不到、插件开关点不动（真实故障，2026-09-23 定位并修复）。
+check('ZCode：用户级 config.json 不含 hooks（否则插件开关失效）', !('hooks' in zc));
 
 const cc = readJson('.claude.json');
 check('Claude Code：mcpServers.tdai 已写入且保留其它 server', !!cc.mcpServers.tdai && !!cc.mcpServers.existing);
@@ -80,8 +85,19 @@ check('dsh：模板注释保留', dshDesk.includes('# Your patch layer'));
 
 const st = readJson('.claude/settings.json');
 check('Claude Code：hook 已注入且原 hooks 保留', JSON.stringify(st.hooks.UserPromptSubmit).includes('tdai-hook.cmd') && Array.isArray(st.hooks.PreToolUse) && st.theme === 'dark');
-const zcHook = readJson('.zcode/cli/config.json');
-check('ZCode：hook 已注入且 mcp/model 保留', JSON.stringify(zcHook.hooks.UserPromptSubmit).includes('tdai-hook.cmd') && !!zcHook.mcp.servers.tdai && zcHook.model === 'keep-me');
+
+// ---- ZCode：hook 必须落在**工作区级** .zcode/config.json，且层级是 hooks.events.UserPromptSubmit ----
+const zcWs = JSON.parse(fs.readFileSync(path.join(WS, '.zcode', 'config.json'), 'utf8'));
+check('ZCode：hook 写入工作区级 .zcode/config.json',
+  JSON.stringify(zcWs.hooks && zcWs.hooks.events && zcWs.hooks.events.UserPromptSubmit || []).includes('tdai-hook.cmd'));
+check('ZCode：hook 层级为 hooks.events（不是 hooks 直挂）',
+  !!(zcWs.hooks && zcWs.hooks.events) && !Array.isArray(zcWs.hooks.UserPromptSubmit));
+check('ZCode：hook 条目结构符合 ZCode schema（matcher + hooks[].type=command）',
+  zcWs.hooks.events.UserPromptSubmit[0].matcher === '*' && zcWs.hooks.events.UserPromptSubmit[0].hooks[0].type === 'command');
+// 用户级配置被清理后，原有 model / mcp 必须完好（不能因为清理 hooks 而误删别的键）
+const zcUser = readJson('.zcode/cli/config.json');
+check('ZCode：清理 hooks 后用户级配置的其它键完好', zcUser.model === 'keep-me' && !!zcUser.mcp.servers.tdai && !('hooks' in zcUser));
+
 const hookCmd = read('.zcode/tdai-daemon/tdai-hook.cmd');
 check('hook 脚本：设 env 后调用 daemon hook 子命令', hookCmd.includes('ELECTRON_RUN_AS_NODE=1') && hookCmd.includes(DAEMON_JS) && /hook\s*\r?\n?$/.test(hookCmd.replace(/\r\n/g, '\n')));
 
@@ -93,14 +109,15 @@ const s1 = register.status({ home: HOME, exePath: EXE });
 check('接入后：6 个客户端均「已接入」', KEYS.every((k) => find(s1, k).status === 'installed'));
 check('接入后：标注「本应用接入」', find(s1, 'zcode').detail.includes('本应用'));
 check('接入后：Claude Code 标注 hook 已注入', /hook 已注入/.test(find(s1, 'claude-code').detail || ''));
-check('接入后：ZCode 标注 hook 已注入', /hook 已注入/.test(find(s1, 'zcode').detail || ''));
 check('接入后：dsh 标注已写入 patch', /cordis\.patch/.test(find(s1, 'deepseek-harness').detail || ''));
 check('接入后：指令文件「已接入」', find(s1, 'instructions').status === 'installed');
 
 /* ---------- 4. 幂等 ---------- */
-const r2 = register.register({ home: HOME, exePath: EXE, mcpJs: MCP_JS, daemonJs: DAEMON_JS });
+const r2 = register.register({ home: HOME, exePath: EXE, mcpJs: MCP_JS, daemonJs: DAEMON_JS, workspaceRoot: WS });
 check('再跑一次：MCP 客户端全部「跳过」', CLIENTS.every((n) => r2.find((x) => x.target === n).action === '跳过'));
 check('再跑一次：hook 跳过（脚本仍更新）', r2.find((x) => x.target === 'Claude Code hook').action === '跳过' && r2.find((x) => x.target === 'ZCode hook').action === '跳过');
+check('再跑一次：ZCode 工作区 hook 不重复追加',
+  JSON.parse(fs.readFileSync(path.join(WS, '.zcode', 'config.json'), 'utf8')).hooks.events.UserPromptSubmit.length === 1);
 check('再跑一次：指令文件全部「跳过」', r2.filter((x) => x.target.endsWith('.md')).every((x) => x.action === '跳过'));
 
 /* ---------- 5. 由其它程序接入时的来源标注 ---------- */

@@ -13,6 +13,7 @@ const path = require('path');
 // 不依赖用户机器上的 node 与源码目录，这是 exe 用户唯一可行的接入路径。
 const {
   CLIENTS, INSTR, INSTR_MARK, INSTR_TARGETS, HOOK_MARK, HOOK_LEGACY_MARKS,
+  hookEventList, hookConfigFile, stripForbiddenUserHooks,
 } = require(path.join(__dirname, '..', '..', 'core', 'clients.js'));
 
 /* ---------- 小工具 ---------- */
@@ -43,17 +44,40 @@ function samePath(a, b) {
 // hook 配置文件位置：来自清单的 cls.hook.file（唯一真源）。
 // 早先这个映射在本文件里被硬编码了 4 遍（hookState / register / registerOne / unregister），
 // 任何一处漏改都会造成"写这里、查那里"的不一致。现在全部走 hookTargets()。
+//
+// ⚠️ scope='workspace' 的客户端（ZCode）hook 写在**工作区**里，位置随项目变，
+// 无法用一个固定的 home 相对路径表达，因此不进 hookTargets —— 由 workspaceHookTarget()
+// 按具体工作区解析。把它混进来会让"检测"退化成"永远查不到"。
 function hookTargets(home) {
   return CLIENTS
-    .filter((c) => c.hook)
+    .filter((c) => c.hook && c.hook.scope !== 'workspace')
     .map((c) => ({ key: c.key, name: c.hook.label || `${c.name} hook`, file: c.hook.file(home), cls: c }));
 }
 
-function hookState(home, which) {
-  const t = hookTargets(home).find((x) => x.key === which);
+// 工作区级 hook 目标（ZCode）：需要显式给工作区根。
+// 返回 { key, name, file, cls } 或 null。
+function workspaceHookTarget(cls, workspaceRoot) {
+  if (!cls || !cls.hook || cls.hook.scope !== 'workspace') return null;
+  const file = hookConfigFile(cls, null, workspaceRoot);
+  if (!file) return null;
+  return { key: cls.key, name: cls.hook.label || `${cls.name} hook`, file, cls };
+}
+
+// 读某个 hook 目标文件里的事件列表（层级由清单的 eventsContainer 决定）。
+// 兼容旧写法：ZCode 曾把 hooks.UserPromptSubmit 写在用户级 config.json（非法位置），
+// 这里不主动读旧位置 —— 旧位置由 stripForbiddenUserHooks 清理，见 migrateZCodeUserHooks。
+function readHookEventList(file, cls) {
+  const c = readJson(file);
+  if (!c) return [];
+  return hookEventList(c, cls && cls.hook, false) || [];
+}
+
+function hookState(home, which, workspaceRoot) {
+  const cls = CLIENTS.find((c) => c.key === which);
+  if (!cls || !cls.hook) return { present: false, legacy: false };
+  const t = cls.hook.scope === 'workspace' ? workspaceHookTarget(cls, workspaceRoot) : hookTargets(home).find((x) => x.key === which);
   if (!t) return { present: false, legacy: false };
-  const s = readJson(t.file);
-  const arr = (s && s.hooks && s.hooks.UserPromptSubmit) || [];
+  const arr = readHookEventList(t.file, cls);
   const text = JSON.stringify(arr);
   const present = text.includes(HOOK_MARK) || HOOK_LEGACY_MARKS.some((m) => text.includes(m));
   const legacy = present && !text.includes(HOOK_MARK);
@@ -249,7 +273,8 @@ function entryOf(cls, home) {
 }
 
 // 每个客户端的接入状态：installed=已接入 / missing=装了未接入 / absent=未装客户端
-function status({ home = os.homedir(), exePath = '' } = {}) {
+// workspaceRoot：可选。ZCode 的 hook 是工作区级的，给了才能判定它注入与否。
+function status({ home = os.homedir(), exePath = '', workspaceRoot } = {}) {
   const items = [];
   for (const cls of CLIENTS) {
     const installed = exists(cls.probe(home));
@@ -300,9 +325,24 @@ function status({ home = os.homedir(), exePath = '' } = {}) {
   }
   const zc = items.find((x) => x.key === 'zcode');
   if (zc) {
-    const hs = hookOf('zcode');
-    zc.checks.hook = hs.present;
-    zc.detail = [zc.detail, hookDetail(hs, zc.status === 'absent')].filter(Boolean).join(' · ');
+    // ZCode 的 hook 在**工作区级**：不给 workspaceRoot 就没法判定它注入与否
+    // （用户可能装了多个项目、只有一个配了 hook）。
+    // 但**用户级配置里的非法 hooks 残留**必须无条件报出来 —— 它会让 ZCode 丢弃
+    // 整份用户配置（插件开关失效），这是活跃故障，不能等用户选项目才发现。
+    const zcCls = CLIENTS.find((x) => x.key === 'zcode');
+    const bakCheck = zcCls && zcCls.hook && zcCls.hook.forbiddenAtUserConfig
+      ? readJson(zcCls.file(home)) : null;
+    if (bakCheck && bakCheck.hooks && zc.status !== 'absent') {
+      zc.checks.hook = false;
+      zc.detail = [zc.detail, '用户配置含非法 hooks 段 → ZCode 会丢弃整份配置（插件开关失效），需清理'].filter(Boolean).join(' · ');
+      zc.warning = 'forbidden_user_hooks';
+    } else if (workspaceRoot) {
+      const hs = hookState(home, 'zcode', workspaceRoot);
+      zc.checks.hook = hs.present;
+      zc.detail = [zc.detail, hookDetail(hs, zc.status === 'absent')].filter(Boolean).join(' · ');
+    } else {
+      zc.detail = [zc.detail, 'hook 为工作区级（选项目后可见状态）'].filter(Boolean).join(' · ');
+    }
   }
 
   // 全局指令文件（MCP 没生效时的兜底硬规则）
@@ -343,7 +383,9 @@ function status({ home = os.homedir(), exePath = '' } = {}) {
 
 /* ---------- 一键接入 ---------- */
 
-function register({ home = os.homedir(), exePath, mcpJs, daemonJs } = {}) {
+// workspaceRoot：ZCode 的 hook 是**工作区级**的（写在 <工作区>/.zcode/config.json），
+// 传入当前项目根即可一并接入；不传则只接 MCP、hook 记为"待选项目"。
+function register({ home = os.homedir(), exePath, mcpJs, daemonJs, workspaceRoot } = {}) {
   if (!exePath) throw new Error('缺少 exePath（接入目标）');
   const results = [];
   const rec = (target, action, detail) => results.push({ target, action, detail });
@@ -419,7 +461,15 @@ function register({ home = os.homedir(), exePath, mcpJs, daemonJs } = {}) {
     } catch (e) { rec(cls.name, '失败', e.message); }
   }
 
-  // 2. UserPromptSubmit hook（提问前自动注入记忆，不依赖模型主动调用）：Claude Code 与 ZCode
+  // 2. UserPromptSubmit hook（提问前自动注入记忆，不依赖模型主动调用）
+  //
+  // ⚠️ 两类客户端的 hook **不同构**，必须分开处理（2026-09-23 踩过 ZCode 的坑）：
+  //   - 用户级（Claude Code）：~/.claude/settings.json 的 hooks.UserPromptSubmit
+  //   - 工作区级（ZCode 3.14+）：<工作区>/.zcode/config.json 的 hooks.events.UserPromptSubmit
+  // ZCode 的用户级 ~/.zcode/cli/config.json **不接受** hooks 字段：ZCode 会报
+  // `Unrecognized key: "hooks"` 并把**整份用户配置**判为无效 —— 后果是
+  // plugins.enabledPlugins 读不到，插件开关点了就弹回（真实故障，已修）。
+  // 所以这里先做一次迁移清理，再按各自的层级写。
   try {
     for (const t of hookTargets(home)) {
       const dir = t.cls.probe(home);
@@ -428,17 +478,52 @@ function register({ home = os.homedir(), exePath, mcpJs, daemonJs } = {}) {
       ensureDir(path.dirname(cmdFile));
       fs.writeFileSync(cmdFile, hookScript({ exePath, daemonJs }));
       const c = readJson(t.file) || {};
-      c.hooks = c.hooks || {};
-      c.hooks.UserPromptSubmit = c.hooks.UserPromptSubmit || [];
-      if (JSON.stringify(c.hooks.UserPromptSubmit).includes(HOOK_MARK)) {
+      const list = hookEventList(c, t.cls.hook, true);
+      if (JSON.stringify(list).includes(HOOK_MARK)) {
         rec(t.name, '跳过', 'hook 已存在（脚本已更新）');
       } else {
-        c.hooks.UserPromptSubmit.push({ matcher: '*', hooks: [{ type: 'command', command: `"${cmdFile}"` }] });
+        list.push({ matcher: '*', hooks: [{ type: 'command', command: `"${cmdFile}"` }] });
         backup(t.file); writeJson(t.file, c);
         rec(t.name, '新增', 'UserPromptSubmit → 本应用');
       }
     }
   } catch (e) { rec('UserPromptSubmit hook', '失败', e.message); }
+
+  // 2b. 清理 ZCode 用户级配置里的非法 hooks 段（会作废整份配置、导致插件开关失效）
+  try {
+    const zc = CLIENTS.find((x) => x.key === 'zcode');
+    const bak = zc ? stripForbiddenUserHooks(zc, home) : null;
+    if (bak) rec('ZCode 用户配置', '清理', '移除非法 hooks 段（修插件开关）');
+    else if (zc && exists(zc.probe(home))) rec('ZCode 用户配置', '跳过', '无非法 hooks 段');
+  } catch (e) { rec('ZCode 用户配置', '失败', e.message); }
+
+  // 2c. 工作区级 hook（ZCode）：写到当前工作区的 .zcode/config.json。
+  // 没有工作区信息时明确报"待接入"，而不是静默跳过 —— 用户需要知道要选个项目才有 hook。
+  try {
+    const zc = CLIENTS.find((x) => x.key === 'zcode');
+    if (zc && zc.hook && exists(zc.probe(home))) {
+      const root = workspaceRoot && path.resolve(workspaceRoot);
+      if (!root) {
+        rec(zc.hook.label || 'ZCode hook', '跳过', '未指定工作区（MCP 已接入，hook 需选项目）');
+      } else if (!exists(root)) {
+        rec(zc.hook.label || 'ZCode hook', '跳过', `工作区不存在: ${root}`);
+      } else {
+        const t = workspaceHookTarget(zc, root);
+        const cmdFile = hookCmdPath(home);
+        ensureDir(path.dirname(cmdFile));
+        fs.writeFileSync(cmdFile, hookScript({ exePath, daemonJs }));
+        const c = readJson(t.file) || {};
+        const list = hookEventList(c, zc.hook, true);
+        if (JSON.stringify(list).includes(HOOK_MARK)) {
+          rec(t.name, '跳过', 'hook 已存在（脚本已更新）');
+        } else {
+          list.push({ matcher: '*', hooks: [{ type: 'command', command: `"${cmdFile}"` }] });
+          backup(t.file); writeJson(t.file, c);
+          rec(t.name, '新增', `UserPromptSubmit → 本应用（工作区 ${path.basename(root)}）`);
+        }
+      }
+    }
+  } catch (e) { rec('ZCode hook', '失败', e.message); }
 
   // 3. 全局指令文件（档 B 兜底：告诉模型何时调 tdai 工具）
   // 清单来自 INSTR_TARGETS（与 status() 检测同源），别再在这里另写一份字面量。
@@ -530,6 +615,7 @@ function registerOne(cls, { home, exePath, mcpJs, daemonJs }, results) {
 }
 
 // 接入单个客户端（用户手动开启）：等于 register 的对应子集，返回 results
+// opts.workspaceRoot：ZCode 的工作区级 hook 需要它；不传则该客户端 hook 记为"待选项目"。
 function registerOneClient(key, opts) {
   const cls = CLIENTS.find((x) => x.key === key);
   if (!cls) throw new Error('未知客户端: ' + key);
@@ -540,21 +626,30 @@ function registerOneClient(key, opts) {
   if (cls.hook) {
     try {
       const home = opts.home;
-      const t = hookTargets(home).find((x) => x.key === key);
-      if (t && exists(t.cls.probe(home))) {
-        const cmdFile = hookCmdPath(home);
-        ensureDir(path.dirname(cmdFile));
-        fs.writeFileSync(cmdFile, hookScript({ exePath: opts.exePath, daemonJs: opts.daemonJs }));
-        const c = readJson(t.file) || {};
-        c.hooks = c.hooks || {};
-        c.hooks.UserPromptSubmit = c.hooks.UserPromptSubmit || [];
-        if (JSON.stringify(c.hooks.UserPromptSubmit).includes(HOOK_MARK)) {
-          results.push({ target: t.name, action: '跳过', detail: 'hook 已存在（脚本已更新）' });
-        } else {
-          c.hooks.UserPromptSubmit.push({ matcher: '*', hooks: [{ type: 'command', command: `"${cmdFile}"` }] });
-          backup(t.file); writeJson(t.file, c);
-          results.push({ target: t.name, action: '新增', detail: 'UserPromptSubmit → 本应用' });
-        }
+      if (!exists(cls.probe(home))) return results;
+      // 用户级配置里的非法 hooks 段先清掉（ZCode 特例：不清会让整份配置作废）
+      const bak = stripForbiddenUserHooks(cls, home);
+      if (bak) results.push({ target: 'ZCode 用户配置', action: '清理', detail: '移除非法 hooks 段（修插件开关）' });
+      // 按 scope 解析目标文件：工作区级要显式工作区根，用户级走清单 file()
+      const t = cls.hook.scope === 'workspace'
+        ? workspaceHookTarget(cls, opts.workspaceRoot && path.resolve(opts.workspaceRoot))
+        : hookTargets(home).find((x) => x.key === key);
+      if (!t) {
+        results.push({ target: cls.hook.label || key + ' hook', action: '跳过', detail: '未指定工作区（hook 需选项目）' });
+        return results;
+      }
+      if (!exists(path.dirname(t.file))) { results.push({ target: t.name, action: '跳过', detail: '工作区不存在' }); return results; }
+      const cmdFile = hookCmdPath(home);
+      ensureDir(path.dirname(cmdFile));
+      fs.writeFileSync(cmdFile, hookScript({ exePath: opts.exePath, daemonJs: opts.daemonJs }));
+      const c = readJson(t.file) || {};
+      const list = hookEventList(c, cls.hook, true);
+      if (JSON.stringify(list).includes(HOOK_MARK)) {
+        results.push({ target: t.name, action: '跳过', detail: 'hook 已存在（脚本已更新）' });
+      } else {
+        list.push({ matcher: '*', hooks: [{ type: 'command', command: `"${cmdFile}"` }] });
+        backup(t.file); writeJson(t.file, c);
+        results.push({ target: t.name, action: '新增', detail: 'UserPromptSubmit → 本应用' });
       }
     } catch (e) { results.push({ target: key + ' hook', action: '失败', detail: e.message }); }
   }
@@ -562,7 +657,7 @@ function registerOneClient(key, opts) {
 }
 
 // 断开单个客户端（用户手动关闭）：删除其 MCP 条目 + hook（若有）
-function unregisterOneClient(key, { home = os.homedir() } = {}) {
+function unregisterOneClient(key, { home = os.homedir(), workspaceRoot } = {}) {
   const cls = CLIENTS.find((x) => x.key === key);
   if (!cls) throw new Error('未知客户端: ' + key);
   const results = [];
@@ -643,23 +738,31 @@ function unregisterOneClient(key, { home = os.homedir() } = {}) {
   // 同步移除该客户端的 hook（有 hook 配置的客户端才做，判据来自清单）
   if (cls.hook) {
     try {
-      const t = hookTargets(home).find((x) => x.key === key);
+      const t = cls.hook.scope === 'workspace'
+        ? workspaceHookTarget(cls, opts.workspaceRoot && path.resolve(opts.workspaceRoot))
+        : hookTargets(home).find((x) => x.key === key);
       const f = t ? t.file : null;
       const c = f ? readJson(f) : null;
-      if (c && c.hooks && Array.isArray(c.hooks.UserPromptSubmit)) {
-        const before = c.hooks.UserPromptSubmit.length;
+      const list = (c && hookEventList(c, cls.hook, false)) || null;
+      if (Array.isArray(list)) {
+        const before = list.length;
         // 两种写法都要清：新写法（HOOK_MARK）与旧写法（legacy 标记）
         const hit = (x) => {
           const s = JSON.stringify(x);
           return s.includes(HOOK_MARK) || HOOK_LEGACY_MARKS.some((m) => s.includes(m));
         };
-        c.hooks.UserPromptSubmit = c.hooks.UserPromptSubmit.filter((x) => !hit(x));
-        if (c.hooks.UserPromptSubmit.length !== before) { backup(f); writeJson(f, c); results.push({ target: key + ' hook', action: '移除', detail: 'UserPromptSubmit' }); }
-        else results.push({ target: key + ' hook', action: '跳过', detail: '无 tdai hook' });
+        const kept = list.filter((x) => !hit(x));
+        if (kept.length !== before) {
+          // 就地改数组：保持 hooks[container] 的容器层级不被拍平
+          list.length = 0;
+          list.push(...kept);
+          backup(f); writeJson(f, c);
+          results.push({ target: key + ' hook', action: '移除', detail: 'UserPromptSubmit' });
+        } else results.push({ target: key + ' hook', action: '跳过', detail: '无 tdai hook' });
       }
     } catch (e) { results.push({ target: key + ' hook', action: '失败', detail: e.message }); }
   }
   return results;
 }
 
-module.exports = { status, register, registerOneClient, unregisterOneClient, mcpEntry, hookScript, hookCmdPath, dshPatchBlock, hookState, INSTR, INSTR_TARGETS, INSTR_MARK, CLIENTS, HOOK_MARK, HOOK_LEGACY_MARKS };
+module.exports = { status, register, registerOneClient, unregisterOneClient, mcpEntry, hookScript, hookCmdPath, dshPatchBlock, hookState, workspaceHookTarget, INSTR, INSTR_TARGETS, INSTR_MARK, CLIENTS, HOOK_MARK, HOOK_LEGACY_MARKS };

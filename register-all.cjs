@@ -1,8 +1,9 @@
 // register-all.cjs — 一键把 TD 记忆注册进本机所有 Agent 客户端（幂等，跑前备份）
-// 用法：node register-all.cjs [--no-hook] [--no-instructions] [--autostart]
-//   --no-hook          跳过 Claude Code UserPromptSubmit hook
+// 用法：node register-all.cjs [--no-hook] [--no-instructions] [--autostart] [--workspace <项目根>]
+//   --no-hook          跳过 UserPromptSubmit hook
 //   --no-instructions  跳过全局指令文件（AGENTS.md / CLAUDE.md）
 //   --autostart        同时写启动文件夹 VBS（登录自启守护进程）
+//   --workspace <dir>  ZCode 的 hook 是工作区级的，用它指定要接入的项目根
 'use strict';
 const fs = require('fs');
 const os = require('os');
@@ -13,10 +14,16 @@ const NODE = process.execPath;
 const DAEMON = path.join(REPO, 'daemon', 'tdai-daemon.js');
 const MCP = path.join(REPO, 'mcp', 'tdai-mcp.js');
 const STAMP = new Date().toISOString().replace(/[:.]/g, '-');
-const FLAGS = new Set(process.argv.slice(2));
+const ARGV = process.argv.slice(2);
+const FLAGS = new Set(ARGV);
 const DO_HOOK = !FLAGS.has('--no-hook');
 const DO_INSTR = !FLAGS.has('--no-instructions');
 const DO_AUTOSTART = FLAGS.has('--autostart');
+// --workspace 取值形式：`--workspace <dir>`
+const WORKSPACE = (() => {
+  const i = ARGV.indexOf('--workspace');
+  return i >= 0 && ARGV[i + 1] ? path.resolve(ARGV[i + 1]) : null;
+})();
 
 const results = [];
 
@@ -41,7 +48,7 @@ function escapeForJsonMatch(p) {
 
 /* ---------- 0. 客户端清单（来自 core/clients.js 唯一真源） ---------- */
 
-const { CLIENTS, INSTR, INSTR_MARK, INSTR_TARGETS } = require('./core/clients.js');
+const { CLIENTS, INSTR, INSTR_MARK, INSTR_TARGETS, hookEventList, hookConfigFile, stripForbiddenUserHooks } = require('./core/clients.js');
 
 /* ---------- 1. MCP 注册（各客户端配置文件，表驱动） ---------- */
 
@@ -170,18 +177,39 @@ for (const cls of CLIENTS) {
 
 /* ---------- 2. UserPromptSubmit hook（Claude Code / ZCode） ---------- */
 
-// hook 目标来自 CLIENTS 的 hook 声明（单一真源）：
-// Claude Code 的 hook 写在 ~/.claude/settings.json，ZCode 写在 ~/.zcode/cli/config.json。
-// 早先本文件把这两个路径硬编码在下面两段里，与 pet/src/register.js 各写一份，极易漂移。
+// hook 目标来自 CLIENTS 的 hook 声明（单一真源）。
+//
+// ⚠️ 两类客户端**不同构**，别按同一句写：
+//   - Claude Code（scope=global）：~/.claude/settings.json 的 hooks.UserPromptSubmit
+//   - ZCode（scope=workspace）：<工作区>/.zcode/config.json 的 hooks.events.UserPromptSubmit
+// ZCode 的用户级 ~/.zcode/cli/config.json **不接受** hooks —— 写了会被 Zod 判为
+// Unrecognized key 并作废整份配置（插件开关点不动）。故这里：
+//   ① 先清掉用户级里的非法 hooks 残留（幂等，无残留则不动）
+//   ② Claude Code 按老写法写；ZCode 需 --workspace 指定项目根，未指定则给出提示
 if (DO_HOOK) {
+  // ① 清理非法残留（ZCode 特有）
+  for (const cls of CLIENTS.filter((c) => c.hook && c.hook.forbiddenAtUserConfig)) {
+    const f = cls.file(os.homedir());
+    if (!fs.existsSync(f)) continue;
+    let raw = null;
+    try { raw = JSON.parse(fs.readFileSync(f, 'utf8')); } catch (_) { continue; }
+    if (raw && raw.hooks) {
+      const bak = stripForbiddenUserHooks(cls, os.homedir());
+      record(f, bak ? '清理' : '跳过', bak ? '移除非法 hooks 段（修 ZCode 插件开关）' : '无法备份，未改动');
+    }
+  }
+  // ② 按各自的 scope 写入
   const hookClients = CLIENTS.filter((c) => c.hook);
   for (const cls of hookClients) {
     const dir = cls.probe(os.homedir());
-    const f = cls.hook.file(os.homedir());
-    if (!fs.existsSync(dir)) { record(f, '跳过', '未安装该客户端'); continue; }
+    if (!fs.existsSync(dir)) { record(cls.name, '跳过', '未安装该客户端'); continue; }
+    if (cls.hook.scope === 'workspace' && !WORKSPACE) {
+      record(cls.name, '跳过', `hook 是工作区级，需 --workspace <项目根> 指定（应写 ${cls.hook.eventsPath.join('/')}）`);
+      continue;
+    }
+    const f = hookConfigFile(cls, os.homedir(), WORKSPACE);
     const c = readJSON(f) || {};
-    c.hooks = c.hooks || {};
-    c.hooks.UserPromptSubmit = c.hooks.UserPromptSubmit || [];
+    const list = hookEventList(c, cls.hook, true);
     const cmd = `${NODE} "${DAEMON}" hook`;
     // ⚠️ 幂等判据必须用**已 JSON 转义**的形式去比：
     // Windows 路径里的 `\` 在 JSON 串里是 `\\`，直接 includes(DAEMON) 永远不命中
@@ -189,10 +217,10 @@ if (DO_HOOK) {
     // 早先就是踩了这个坑，这里用 escapeForJsonMatch(DAEMON) 修正。
     const needle = escapeForJsonMatch(DAEMON);
     const hasCommand = (arr) => JSON.stringify(arr).includes(needle);
-    if (hasCommand(c.hooks.UserPromptSubmit)) {
+    if (hasCommand(list)) {
       record(f, '跳过', 'hook 已存在');
     } else {
-      c.hooks.UserPromptSubmit.push({ matcher: '*', hooks: [{ type: 'command', command: cmd }] });
+      list.push({ matcher: '*', hooks: [{ type: 'command', command: cmd }] });
       backup(f); writeJSON(f, c);
       record(f, '新增', `UserPromptSubmit → daemon hook（${cls.name}）`);
     }

@@ -169,7 +169,7 @@ node register-all.cjs --no-hook --no-instructions   # 只注册 MCP
 | OpenClaw | `~/.openclaw/openclaw.json` | `mcp.servers.tdai` |
 | Pi | `~/.pi/agent/mcp.json` | `mcpServers.tdai` |
 | Claude Code hook | `~/.claude/settings.json` | `hooks.UserPromptSubmit` |
-| ZCode hook | `~/.zcode/cli/config.json` | `hooks.UserPromptSubmit` |
+| ZCode hook | `<项目根>/.zcode/config.json` | `hooks.events.UserPromptSubmit`（**工作区级**） |
 | 全局指令文件 | `~/.zcode/AGENTS.md`、`~/.claude/CLAUDE.md` | `tdai-memory:begin` 标记块 |
 
 > **三个形态差异要点**（写错了客户端会直接不认这个服务器）：
@@ -179,6 +179,17 @@ node register-all.cjs --no-hook --no-instructions   # 只注册 MCP
 >   （它没有独立的 mcp 配置文件）。注意别与 `auxiliary.mcp` 混淆 —— 那是"辅助模型的
 >   MCP 工具调度"设置，不是服务器定义。
 > - **CodeBuddy** 优先写 `~/.codebuddy/.mcp.json`（`mcp.json` 已废弃、`.codebuddy.json` 为旧版）。
+>
+> ⚠️ **ZCode 的 hook 与 Claude Code 不同构，位置和层级都不同**（2026-09-23 踩过）：
+> 1. **位置**：CC 在用户级 `~/.claude/settings.json`；ZCode 只从**工作区**读
+>    `<项目根>/.zcode/config.json`（或 `<项目根>/zcode.json`）。所以 `register-all.cjs`
+>    需要 `--workspace <项目根>` 才能装 ZCode 的 hook。
+> 2. **层级**：CC 是 `hooks.UserPromptSubmit`；ZCode 是 `hooks.events.UserPromptSubmit`
+>    —— 多了 `events` 这一层。
+> 3. **绝不能往 ZCode 的用户级写 hooks**：`~/.zcode/cli/config.json` 的 schema 是
+>    `.strict()` 的，多一个键就报 `Unrecognized key`，并且**整份用户配置作废**。
+>    后果不是"hook 不生效"而已 —— `plugins.enabledPlugins` 也会读不到，
+>    表现为**插件开关点了就弹回、无法启用**。本工具会在接入时自动清理这个非法残留。
 
 ### 5.3 启动守护
 
