@@ -1186,8 +1186,10 @@ function agentStatus() {
 
   const items = [];
   for (const cl of CLIENTS_MIN) {
-    // 客户端目录/文件不存在 → absent（未装该客户端），与桌面端口径一致
-    if (!fs.existsSync(cl.probe)) { items.push({ key: cl.key, name: cl.name, source: cl.source, status: 'absent', injection: cl.injection, config: { kind: cl.kind, file: cl.file, pointer: cl.pointer || cl.tomlSection || (cl.yamlTop && `${cl.yamlTop}.${cl.yamlLeaf || 'tdai'}`) || (cl.kind === 'dsh-patch' ? 'profiles/*/cordis.patch.yml :: insert' : '') }, effective: false }); continue; }
+    // 客户端目录/文件不存在 → absent（未装该客户端），与桌面端口径一致。
+    // checks 必须一起给：下方统一补 instructions 检查时要写 item.checks，
+    // 缺字段会让「用户没装 ZCode/Claude Code」直接抛异常（CI 上实测整轮测试卡死）。
+    if (!fs.existsSync(cl.probe)) { items.push({ key: cl.key, name: cl.name, source: cl.source, status: 'absent', injection: cl.injection, config: { kind: cl.kind, file: cl.file, pointer: cl.pointer || cl.tomlSection || (cl.yamlTop && `${cl.yamlTop}.${cl.yamlLeaf || 'tdai'}`) || (cl.kind === 'dsh-patch' ? 'profiles/*/cordis.patch.yml :: insert' : '') }, checks: { mcp: false, byApp: null, hook: null, instructions: null }, effective: false }); continue; }
     const st = mcpInstalled(cl.kind, cl.file, cl);
     const rec = { key: cl.key, name: cl.name, source: cl.source, status: st, injection: cl.injection, config: { kind: cl.kind, file: cl.file, pointer: cl.pointer || cl.tomlSection || (cl.yamlTop && `${cl.yamlTop}.${cl.yamlLeaf || 'tdai'}`) || (cl.kind === 'dsh-patch' ? 'profiles/*/cordis.patch.yml :: insert' : '') }, checks: { mcp: st === 'installed', byApp: null, hook: null, instructions: null }, effective: st === 'installed' };
     // hook 状态只对有 hook 的客户端显示（ZCode CLI / Claude Code）
