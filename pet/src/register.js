@@ -93,7 +93,11 @@ function mcpEntry({ exePath, mcpJs }) {
 
 // hook 包装脚本：Claude Code 的 hook 不支持 env 字段，用 .cmd 设好 env 再调 daemon hook 子命令
 function hookScript({ exePath, daemonJs }) {
-  return ['@echo off', 'set "ELECTRON_RUN_AS_NODE=1"', `"${exePath}" "${daemonJs}" hook`, ''].join('\r\n');
+  // chcp 65001 必须在写 exe 路径之前：exe 文件名本身是中文（TD记忆守护.exe），
+  // 而此脚本是 UTF-8 落盘的，cmd 默认按系统代码页（GBK）逐行解析会把中文读成
+  // 乱码 → 找不到 exe，hook 静默失败。cmd 逐行解析批处理，chcp 之后的行才按
+  // UTF-8 读，所以它必须排在含中文的行前面。文件保持无 BOM（BOM 会让 @echo off 报错）。
+  return ['@echo off', 'chcp 65001 >nul', 'set "ELECTRON_RUN_AS_NODE=1"', `"${exePath}" "${daemonJs}" hook`, ''].join('\r\n');
 }
 
 function hookCmdPath(home) { return path.join(home, '.zcode', 'tdai-daemon', HOOK_MARK); }

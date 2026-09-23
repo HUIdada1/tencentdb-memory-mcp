@@ -100,6 +100,11 @@ check('ZCode：清理 hooks 后用户级配置的其它键完好', zcUser.model 
 
 const hookCmd = read('.zcode/tdai-daemon/tdai-hook.cmd');
 check('hook 脚本：设 env 后调用 daemon hook 子命令', hookCmd.includes('ELECTRON_RUN_AS_NODE=1') && hookCmd.includes(DAEMON_JS) && /hook\s*\r?\n?$/.test(hookCmd.replace(/\r\n/g, '\n')));
+// exe 文件名含中文，脚本是 UTF-8 落盘：cmd 默认按 GBK 逐行解析会把中文路径读成乱码、
+// 找不到 exe。chcp 65001 必须在含中文的行之前（cmd 逐行解析，chcp 后的行才按 UTF-8 读）。
+const chcpAt = hookCmd.indexOf('chcp 65001');
+const zhAt = hookCmd.indexOf('\u8bb0\u5fc6'); // 「记忆」首个中文字符
+check('hook 脚本：chcp 65001 在中文路径之前（防 GBK 解析乱码）', chcpAt !== -1 && zhAt !== -1 && chcpAt < zhAt);
 
 check('指令文件：AGENTS.md 追加指令块', read('.zcode/AGENTS.md').includes('tdai-memory:begin'));
 check('指令文件：CLAUDE.md 追加指令块', read('.claude/CLAUDE.md').includes('tdai-memory:begin'));

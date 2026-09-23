@@ -396,6 +396,15 @@ function startSessionScan() {
 }
 function stopSessionScan() { if (sessionScanTimer) { clearInterval(sessionScanTimer); sessionScanTimer = null; } }
 
+// 最近活跃的 ZCode 工作区（ZCode hook 是工作区级 <工作区>/.zcode/config.json，
+// pet 没有"选项目"交互，统一接到用户最近用过 ZCode 的那个项目）。
+// 只认 sqlite 权威源的行（fromDb=true 时 file=会话的 directory，即工作区绝对路径）：
+// 实时文件来源的 file 是 transcript.jsonl 路径，不能当工作区用。
+function recentZcodeWorkspace() {
+  const rows = (lastSessionScan.sessions || []).filter((s) => s.source === 'zcode' && s.fromDb && s.file);
+  return rows.length ? path.resolve(rows[0].file) : '';
+}
+
 /* ---------- 守护探活（计入真实流量：这是本机 HTTP，但能反映"本地服务在不在"） ---------- */
 
 function daemonPing() {
@@ -782,18 +791,19 @@ ipcMain.handle('backfill-inventory', async () => {
   }
 });
 
-ipcMain.handle('agents-status', () => register.status({ home: HOME, exePath: process.execPath }));
+ipcMain.handle('agents-status', () => register.status({ home: HOME, exePath: process.execPath, workspaceRoot: recentZcodeWorkspace() }));
 ipcMain.handle('agents-register', () => {
-  const results = register.register({ home: HOME, exePath: process.execPath, mcpJs: MCP_JS, daemonJs: DAEMON_JS });
-  return { results, items: register.status({ home: HOME, exePath: process.execPath }) };
+  const results = register.register({ home: HOME, exePath: process.execPath, mcpJs: MCP_JS, daemonJs: DAEMON_JS, workspaceRoot: recentZcodeWorkspace() });
+  return { results, items: register.status({ home: HOME, exePath: process.execPath, workspaceRoot: recentZcodeWorkspace() }) };
 });
 // 单个客户端开关：{ key, enable: true|false } → 接入 / 断开该客户端
 ipcMain.handle('agents-toggle', (_e, { key, enable } = {}) => {
   try {
+    const ws = recentZcodeWorkspace();
     const results = enable
-      ? register.registerOneClient(key, { home: HOME, exePath: process.execPath, mcpJs: MCP_JS, daemonJs: DAEMON_JS })
-      : register.unregisterOneClient(key, { home: HOME });
-    return { ok: true, results, items: register.status({ home: HOME, exePath: process.execPath }) };
+      ? register.registerOneClient(key, { home: HOME, exePath: process.execPath, mcpJs: MCP_JS, daemonJs: DAEMON_JS, workspaceRoot: ws })
+      : register.unregisterOneClient(key, { home: HOME, workspaceRoot: ws });
+    return { ok: true, results, items: register.status({ home: HOME, exePath: process.execPath, workspaceRoot: ws }) };
   } catch (e) {
     return { ok: false, error: (e && e.message) || String(e) };
   }
