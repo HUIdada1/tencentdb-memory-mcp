@@ -11,6 +11,43 @@
 
 ## [Unreleased]
 
+## [0.5.17] - 2026-09-23
+
+### Added
+- **会话采集从 4 个客户端扩到 14 个**。此前只认 ZCode、ZCode 会话库、ZCode Rollout 与
+  Claude Code，用 Codex / Cursor / Trae / DeepSeek Harness / CodeBuddy / WorkBuddy /
+  OpenCode / Hermes / OpenClaw / Pi 的对话在面板上一律不可见。现在每个客户端都有专属
+  发现与解析路径：Codex 扫 `sessions/**/rollout-*.jsonl` 与归档目录并用 `session_index.jsonl`
+  还原会话标题，WorkBuddy 只解析 `conversations/` 下 `method:requests:result` 的
+  `state[].userContent/assistantContent`，DeepSeek Harness 读 `turnOutline`，其余走
+  统一的 JSONL/JSON 兼容解析。目录发现只递归明确的会话目录并跳过
+  cache/node_modules/extensions；VS Code 系的 `workspace/storage/settings/state.vscdb`
+  与 WorkBuddy 的 daemon/sandbox 日志都不再会被误当成会话上传。
+- **Agent 接入页现在回答「注入了什么、写在哪、是否真的生效」**。每个客户端显示注入方式
+  （MCP / mcp-patch / hook / 指令文件）、配置文件与其定位指针，并按三种检查项
+  （`checks.mcp / hook / instructions`）算出是否完全生效 —— 装了但注入不全会显式标
+  「注入未完全生效」，不再只报一个「已接入」。页面顶部新增筛选：全部 / 已接入 /
+  待接入 / 未安装 / 可采集 / 需处理。
+- **实时会话页支持搜索与筛选**：关键词（会话 ID、标题、来源、摘要、文件）、来源与状态
+  三个条件可叠加，「清除筛选」一键复位；来源下拉按当前扫描到的来源动态生成。
+- **记忆页按来源与层级筛选**：检索视图新增来源下拉，条目卡片补上记忆类型（L0~L3）
+  与来源徽章，分层视图新增层级下拉。
+- **设置页新增「关闭窗口时」策略**：可选「隐藏窗口，后台继续运行」或「关闭窗口并停止
+  后台服务」，并显示该策略当前的实际效果；开机自启一栏现在显示系统真实注册状态
+  （是否注册、是否后台隐藏启动、本次是否由自启启动）。
+
+### Fixed
+- **关闭窗口 / 退出应用时后台服务可能残留**。原先只有 `will-quit` 一处清理，托盘退出、
+  关窗退出、彻底退出各走各的路径，重复触发还会重复执行。现在统一到 `shutdown()`
+  单一入口（健康轮询、指标 tick、会话扫描、回传采样、守护进程），有且只执行一次，
+  托盘退出与关窗退出走同一路径，窗口关闭先问 `closeAction` 再决定隐藏还是停机。
+
+### Changed
+- **上传来源默认全开**。新来源默认 `true`；老配置文件里缺的键自动补齐（用户显式写
+  `false` 的仍然尊重），升级后新客户端不会被静默漏采。
+- **回传（backfill）支持整文件 JSON 快照与 `.log` 日志**。此前回传只按行读 JSONL，
+  快照式会话只能靠实时采集；现在 `.json` 走整文件解析，`.log` 也纳入行解析。
+
 ## [0.5.16] - 2026-09-22
 
 ### Fixed

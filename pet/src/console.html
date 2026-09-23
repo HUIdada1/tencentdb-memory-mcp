@@ -205,11 +205,13 @@
         <div id="mem-search-controls" class="mem-search-controls" hidden>
           <input id="mem-q" placeholder="输入关键词，回车检索" aria-label="记忆关键词">
           <select id="mem-layer" aria-label="检索记忆层"><option value="">全部层</option><option>L0</option><option>L1</option><option>L2</option><option>L3</option></select>
+          <select id="mem-source" aria-label="按记忆来源筛选"><option value="">全部来源</option></select>
           <button data-act="memory-search" class="btn-primary">检索</button>
           <button id="mem-clear" class="btn-ghost" type="button">清空</button>
         </div>
         <div id="mem-layer-controls" class="mem-layer-controls">
           <span id="mem-breadcrumb">全部记忆 · 分层概览</span>
+          <select id="mem-layer-filter" aria-label="浏览记忆层"><option value="">全部类型</option><option value="L0">L0 对话原文</option><option value="L1">L1 工作记忆</option><option value="L2">L2 方法记忆</option><option value="L3">L3 长期记忆</option></select>
           <button id="mem-layer-back" class="btn-ghost" type="button" hidden>返回分层</button>
           <button data-act="memory-layers" class="btn-ghost">刷新</button>
         </div>
@@ -233,6 +235,12 @@
         <span class="hd-note" id="sess-count">—</span>
         <button class="mini" data-act="sess-refresh">立即刷新</button>
       </h3>
+      <div class="session-toolbar">
+        <input id="sess-q" type="search" placeholder="搜索会话、来源或摘要" aria-label="搜索实时会话">
+        <select id="sess-source" aria-label="按来源筛选"><option value="">全部来源</option></select>
+        <select id="sess-state" aria-label="按状态筛选"><option value="">全部状态</option><option value="thinking">交互中</option><option value="active">活跃</option><option value="idle">空闲</option><option value="stale">休眠</option></select>
+        <button class="mini" id="sess-clear-filter" type="button">清除筛选</button>
+      </div>
       <div class="sess-wrap">
         <div class="sess-head">
           <span>会话 / 来源</span><span>状态</span><span>轮次</span><span>最近交互</span><span>内容摘要</span>
@@ -332,6 +340,10 @@
 
     <div class="card glass">
       <h3>客户端接入状态 <span class="hd-note">独立开关 · 点击即接入 / 断开</span></h3>
+      <div class="agent-toolbar">
+        <select id="agent-filter" aria-label="筛选接入状态"><option value="all">全部客户端</option><option value="installed">已接入</option><option value="missing">待接入</option><option value="absent">未安装</option><option value="capture">可采集</option><option value="partial">需处理</option></select>
+        <span class="muted" id="agent-filter-note">显示注入方式、配置文件和实际生效条件</span>
+      </div>
       <div class="status-list" id="agent-list"><div class="empty">检测中…</div></div>
       <div id="agent-log" style="display:none"></div>
     </div>
@@ -421,8 +433,10 @@
           <input type="checkbox" class="switch" id="set-autostart"></label>
         <label class="srow"><span>自动检查更新<span class="q">?<span class="tip">每小时静默检查一次新版本，发现更新时弹系统通知；下载与安装始终由你手动确认。</span></span></span>
           <input type="checkbox" class="switch" id="set-autoupdate"></label>
-        <label class="srow"><span>关闭窗口时<span class="q">?<span class="tip">点右上角 × 只关闭窗口，后台守护继续运行（托盘图标可再次打开）。彻底退出请用托盘菜单「退出」。</span></span></span>
-          <span class="muted">守护继续后台运行</span></label>
+        <label class="srow"><span>关闭窗口时<span class="q">?<span class="tip">隐藏模式保留托盘、recall 服务、采集上传和会话扫描；退出模式会停止本应用管理的全部服务。外部守护进程无法由本应用代停。</span></span></span>
+          <select id="set-close-action"><option value="hide">隐藏窗口，后台继续运行</option><option value="quit">关闭窗口并停止后台服务</option></select></label>
+        <div class="hint" id="close-action-status">正在读取关闭策略与服务状态…</div>
+        <div class="hint" id="autostart-status">正在读取开机自启的系统状态…</div>
       </div>
       <div class="card glass">
         <h3>关于</h3>

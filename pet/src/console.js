@@ -9,7 +9,7 @@
 
   // 延迟历史采样已移除：延迟波形（最近 60s）整块删除，不再需要逐拍累积的采样数组。
   // 延迟只以「面板延迟」单个最新值呈现（hero 体征条 + 副标题），不留历史副本。
-  const S = { snap: null, appInfo: null, sessTimer: null, live: { items: [], page: 1, perPage: 40 }, lastLogSeq: 0, logPaused: false, logClearSeq: 0, scanAnchor: 0, scanInterval: 120, guardEnabled: true, stoppedExternal: false, guideOpen: null };
+  const S = { snap: null, appInfo: null, sessTimer: null, live: { items: [], filtered: [], page: 1, perPage: 40, q: '', source: '', state: '' }, lastLogSeq: 0, logPaused: false, logClearSeq: 0, scanAnchor: 0, scanInterval: 120, guardEnabled: true, stoppedExternal: false, guideOpen: null, agents: [] };
 
   /* ---------- 数值格式化 ---------- */
   function fmtBytes(n) {
@@ -123,6 +123,8 @@
     const st = $('#set-theme'); if (st) st.value = p.ui.theme || 'dark';
     const sa = $('#set-autostart'); if (sa) sa.checked = !!p.system.autoStart;
     const su = $('#set-autoupdate'); if (su) su.checked = !!p.update.autoCheck;
+    const ca = $('#set-close-action'); if (ca) ca.value = p.system.closeAction === 'quit' ? 'quit' : 'hide';
+    refreshSystemStatus();
     // 守护服务开关状态（右上角 pill 点击切换）：持久化在应用偏好里
     if (p.system && p.system.guardEnabled === false) {
       S.guardEnabled = false;
@@ -147,6 +149,28 @@
   bindPref('#set-theme', 'change', () => tdai.prefsSave({ ui: { theme: $('#set-theme').value } }));
   bindPref('#set-autostart', 'change', () => tdai.prefsSave({ system: { autoStart: $('#set-autostart').checked } }));
   bindPref('#set-autoupdate', 'change', () => tdai.prefsSave({ update: { autoCheck: $('#set-autoupdate').checked } }));
+  bindPref('#set-close-action', 'change', async () => {
+    const value = $('#set-close-action').value === 'quit' ? 'quit' : 'hide';
+    await tdai.prefsSave({ system: { closeAction: value } });
+    refreshSystemStatus();
+  });
+
+  async function refreshSystemStatus() {
+    if (typeof tdai.systemStatus !== 'function') return;
+    try {
+      const r = await tdai.systemStatus();
+      const ca = $('#set-close-action'); if (ca) ca.value = r.closeAction === 'quit' ? 'quit' : 'hide';
+      const close = $('#close-action-status');
+      if (close) close.textContent = r.closeAction === 'quit'
+        ? '当前：关闭窗口会停止本应用的守护、采集上传、recall 服务和会话扫描。'
+        : '当前：关闭窗口只隐藏控制台，托盘、守护、采集上传、recall 服务和会话扫描继续运行。';
+      const auto = $('#autostart-status');
+      const a = r.autoStart || {};
+      if (auto) auto.textContent = a.supported === false
+        ? '开发模式不会写入系统自启；打包安装版才会注册 Windows 开机启动。'
+        : `系统自启：${a.openAtLogin ? '已注册' : '未注册'} · 启动方式：${a.openAsHidden ? '后台隐藏' : '会显示窗口'}${a.wasOpenedAtLogin ? ' · 本次由自启启动' : ''}`;
+    } catch (_) { }
+  }
 
   /* ============================================================
      ① 连接体征条
@@ -341,7 +365,7 @@
      ============================================================ */
   const ST = { thinking: '交互中', active: '交互中', idle: '空闲', stale: '休眠', err: '异常' };
   // 来源显示名（缺失的来源直接用原始 source 字符串，界面不会显示空白或 "undefined"）
-  const SRC_NAME = { zcode: 'ZCode CLI', 'zcode-rollout': 'ZCode Rollout', 'claude-code': 'Claude Code', cursor: 'Cursor', codex: 'Codex', trae: 'Trae', 'deepseek-harness': 'DeepSeek Harness' };
+  const SRC_NAME = { zcode: 'ZCode CLI', 'zcode-db': 'ZCode 会话库', 'zcode-rollout': 'ZCode Rollout', 'claude-code': 'Claude Code', cursor: 'Cursor', codex: 'Codex', trae: 'Trae', 'deepseek-harness': 'DeepSeek Harness', codebuddy: 'CodeBuddy', workbuddy: 'WorkBuddy', opencode: 'OpenCode', hermes: 'Hermes', openclaw: 'OpenClaw', pi: 'Pi' };
 
   // sqlite 权威源降级警告：必须显示，否则用户只会看到"最新会话停在几个月前"
   // 而误判程序坏了（Node < 22.16 时 node:sqlite 不可用 → 只统计归档文件）
@@ -356,6 +380,28 @@
   }
 
   const LIVE_PAGE_SIZE = 40;
+
+  function renderSessionSourceOptions(list) {
+    const sel = $('#sess-source');
+    if (!sel) return;
+    const current = S.live.source;
+    const keys = Array.from(new Set((list || []).map((x) => x && x.source).filter(Boolean))).sort();
+    sel.innerHTML = '<option value="">全部来源</option>' + keys.map((k) => `<option value="${esc(k)}">${esc(SRC_NAME[k] || srcName(k))}</option>`).join('');
+    sel.value = keys.includes(current) ? current : '';
+  }
+
+  function filteredSessions(list) {
+    const q = S.live.q.trim().toLowerCase();
+    return (list || []).filter((s) => {
+      if (S.live.source && s.source !== S.live.source) return false;
+      if (S.live.state && s.state !== S.live.state) return false;
+      if (q) {
+        const text = [s.id, s.label, s.source, s.lastNote, s.file].filter(Boolean).join(' ').toLowerCase();
+        if (!text.includes(q)) return false;
+      }
+      return true;
+    });
+  }
 
   function renderSessionPager(total) {
     const box = $('#sess-pager');
@@ -378,15 +424,18 @@
     if (!box) return;
     list = Array.isArray(list) ? list : [];
     S.live.items = list;
-    const pages = Math.max(1, Math.ceil(list.length / LIVE_PAGE_SIZE));
+    renderSessionSourceOptions(list);
+    const view = filteredSessions(list);
+    S.live.filtered = view;
+    const pages = Math.max(1, Math.ceil(view.length / LIVE_PAGE_SIZE));
     S.live.page = Math.min(Math.max(S.live.page, 1), pages);
-    const pageItems = list.slice((S.live.page - 1) * LIVE_PAGE_SIZE, S.live.page * LIVE_PAGE_SIZE);
+    const pageItems = view.slice((S.live.page - 1) * LIVE_PAGE_SIZE, S.live.page * LIVE_PAGE_SIZE);
     const cnt = $('#sess-count');
     if (cnt) {
-      const act = list.filter((x) => x.state === 'thinking' || x.state === 'active').length;
-      cnt.textContent = `共 ${list.length} 个 · 当前第 ${S.live.page}/${pages} 页 · 进行中 ${act}`;
+      const act = view.filter((x) => x.state === 'thinking' || x.state === 'active').length;
+      cnt.textContent = `共 ${list.length} 个 · 显示 ${view.length} · 第 ${S.live.page}/${pages} 页 · 进行中 ${act}`;
     }
-    if (!list.length) {
+    if (!view.length) {
       box.innerHTML = '<div class="empty">未扫描到会话文件（与任一 Agent 对话后出现）</div>';
       renderSessionPager(0);
       return;
@@ -398,7 +447,7 @@
       return `<div class="sess-row${stale}" title="${esc(file)}">
         <div class="sess-name">
           <b title="${esc(s.id)}">${esc(s.label || s.id)}</b>
-          <span>${esc(SRC_NAME[s.source] || srcName(s.source))}</span>
+          <span class="source-chip" data-source="${esc(s.source || '')}">${esc(SRC_NAME[s.source] || srcName(s.source))}</span>
           ${file ? `<span class="sess-file">${esc(file)}</span>` : ''}
         </div>
         <span class="badge-st ${esc(s.state || '')}">${esc(state)}</span>
@@ -407,7 +456,7 @@
         <span class="sess-sum" title="${esc(s.lastNote || '')}">${esc(s.lastNote || '—')}</span>
       </div>`;
     }).join('');
-    renderSessionPager(list.length);
+    renderSessionPager(view.length);
   }
 
   async function refreshSessions(force) {
@@ -420,6 +469,24 @@
       }
     } catch (_) { /* 扫描失败不阻塞界面 */ }
   }
+
+  ['#sess-q', '#sess-source', '#sess-state'].forEach((sel) => {
+    const el = $(sel);
+    if (!el) return;
+    el.addEventListener(el.tagName === 'INPUT' ? 'input' : 'change', () => {
+      if (sel === '#sess-q') S.live.q = el.value;
+      if (sel === '#sess-source') S.live.source = el.value;
+      if (sel === '#sess-state') S.live.state = el.value;
+      S.live.page = 1;
+      renderSessions(S.live.items);
+    });
+  });
+  const sessClear = $('#sess-clear-filter');
+  if (sessClear) sessClear.addEventListener('click', () => {
+    S.live.q = ''; S.live.source = ''; S.live.state = ''; S.live.page = 1;
+    ['#sess-q', '#sess-source', '#sess-state'].forEach((sel) => { const el = $(sel); if (el) el.value = ''; });
+    renderSessions(S.live.items);
+  });
 
   /* ============================================================
      ④ 上下行流量
@@ -791,8 +858,19 @@
    */
   const SRC_DESC = {
     'zcode': { name: 'ZCode CLI', dir: '~/.zcode/cli/agents/' },
+    'zcode-db': { name: 'ZCode 会话库', dir: '~/.zcode/cli/db/db.sqlite' },
     'zcode-rollout': { name: 'ZCode Rollout', dir: '~/.zcode/cli/rollout/' },
     'claude-code': { name: 'Claude Code', dir: '~/.claude/projects/' },
+    codex: { name: 'Codex', dir: '~/.codex/sessions/ + archived_sessions/' },
+    cursor: { name: 'Cursor', dir: '~/.cursor/projects/ 或 chats/' },
+    trae: { name: 'Trae', dir: '~/.trae/projects/ 或 sessions/' },
+    'deepseek-harness': { name: 'DeepSeek Harness', dir: '~/.dsh/storages/session_projcache/sessions/' },
+    codebuddy: { name: 'CodeBuddy', dir: '~/.codebuddy/sessions/ 或 conversations/' },
+    workbuddy: { name: 'WorkBuddy', dir: '~/.workbuddy-ai/logs/<日期>/sdk/conversations/' },
+    opencode: { name: 'OpenCode', dir: '~/.local/share/opencode/storage/' },
+    hermes: { name: 'Hermes', dir: '~/.hermes/sessions/ 或 conversations/' },
+    openclaw: { name: 'OpenClaw', dir: '~/.openclaw/sessions/ 或 conversations/' },
+    pi: { name: 'Pi', dir: '~/.pi/agent/sessions/' },
   };
   function srcName(src) { return (SRC_DESC[src] && SRC_DESC[src].name) || src; }
 
@@ -971,6 +1049,7 @@
     summaryTotal: 0,       // 分层概览的真实总量（概览不参与分页）
     items: [],             // 当前页要渲染的条目
     query: '',             // 最近一次检索词（翻页时复用）
+    source: '',             // 来源类型筛选（面板返回 source/agent/source_type 时客户端过滤）
     layer: '',             // 分层模式当前层：'' = 概览，L0~L3 = 明细
     serverPaged: false,    // 该模式是否走服务端分页
     loadedAt: 0,
@@ -1000,6 +1079,9 @@
     if (it.role && String(t) === String(it.role)) return '';
     return String(t);
   }
+  function itemSource(it) {
+    return String(it.source || it.source_type || it.agent || it.agent_name || it.origin || '').trim();
+  }
   // 单条卡片：标题 + 正文 + 标签 + 分值 + 时间
   function itemCard(it) {
     const body = itemBody(it);
@@ -1011,9 +1093,14 @@
       ? Number(it.score) : null;
     const tags = Array.isArray(it.tags) ? it.tags.filter(Boolean) : [];
     const refs = Array.isArray(it.refs) ? it.refs.length : 0;
+    const source = itemSource(it);
+    const layer = it.layer || it.level || MEM.layer || '';
+    const type = layer ? String(layer).replace('_messages', '') : 'memory';
 
     return `<div class="mem-item">
       <div class="mem-itop">
+        <span class="mem-type">${esc(type)}</span>
+        ${source ? `<span class="mem-source">${esc(SRC_NAME[source] || source)}</span>` : ''}
         ${role ? `<span class="mem-role ${roleCls}">${esc(role)}</span>` : ''}
         ${title ? `<span class="mem-title">${esc(title)}</span>` : ''}
         ${score != null ? `<span class="mem-score" title="匹配分值">${score.toFixed(2)}</span>` : ''}
@@ -1082,7 +1169,10 @@
 
     // ① 记忆条目列表（memory_search / memory_layers 传 layer 的典型返回）
     //    形态：{ items:[{id,role,title,body,tags,refs,score,created_at}], total }
-    const list = (d && (d.items || d.list || d.results || d.memories)) || (Array.isArray(d) ? d : null);
+    const rawList = (d && (d.items || d.list || d.results || d.memories)) || (Array.isArray(d) ? d : null);
+    const list = rawList && MEM.source
+      ? rawList.filter((it) => { const s = itemSource(it); return !s || s === MEM.source; })
+      : rawList;
     if (list && list.length) {
       const isLayerDetail = !!(d && d.layer);
       const head = [
@@ -1276,7 +1366,8 @@
     if (o.mark) memLayersBusy(false);
     if (r && r.ok) {
       const d = r.data && (r.data.data || r.data);
-      const all = (d && (d.items || d.list || d.results || d.memories)) || (Array.isArray(d) ? d : []);
+      const raw = (d && (d.items || d.list || d.results || d.memories)) || (Array.isArray(d) ? d : []);
+      const all = MEM.source ? raw.filter((it) => { const s = itemSource(it); return !s || s === MEM.source; }) : raw;
       MEM.serverPaged = false;
       MEM.items = all;
       MEM.total = all.length;
@@ -1376,7 +1467,8 @@
     if (!b || !st) return;
     if (st.running) {
       b.className = 'banner show ok';
-      b.textContent = `回传中：${st.filesDone}/${st.files} 个文件 · 已上传 ${st.msgs} 条` + (st.current ? ` · 当前 ${st.current}` : '');
+      const source = st.source && st.source !== 'all' ? (SRC_LABEL[st.source] || st.source) : '全部来源';
+      b.textContent = `回传中：${source} · ${st.filesDone}/${st.files} 个文件 · 已上传 ${st.msgs} 条` + (st.current ? ` · 当前 ${st.current}` : '');
       return true;
     }
     if (st.doneAt) {
@@ -1416,6 +1508,8 @@
   const SRC_LABEL = {
     'zcode': 'ZCode 会话库', 'zcode-db': 'ZCode 会话库',
     'zcode-rollout': 'ZCode Rollout', 'claude-code': 'Claude Code',
+    codex: 'Codex', cursor: 'Cursor', trae: 'Trae', 'deepseek-harness': 'DeepSeek Harness',
+    codebuddy: 'CodeBuddy', workbuddy: 'WorkBuddy', opencode: 'OpenCode', hermes: 'Hermes', openclaw: 'OpenClaw', pi: 'Pi',
   };
 
   function upEl(id) { return document.getElementById(id); }
@@ -1484,7 +1578,7 @@
           <span class="up-ck">${IC_CHK}</span>
           <div class="up-info">
             <b>${esc(g.name)}</b>
-            <span>${esc(SRC_LABEL[g.source] || g.source)} · ${esc(shortDir(g.dir))}</span>
+            <span><i class="source-chip">${esc(SRC_LABEL[g.source] || g.source)}</i> · ${esc(shortDir(g.dir))}</span>
           </div>
           <div class="up-stat">
             <span class="up-cnt">${g.items} 个会话 · 约 ${(g.msgs || 0).toLocaleString('zh-CN')} 条</span>
@@ -1735,6 +1829,7 @@
     if (q) { q.value = ''; q.focus(); }
     MEM.query = '';
     MEM.layer = '';
+    MEM.source = '';
     MEM.page = 1;
     MEM.items = [];
     MEM.total = 0;
@@ -1743,6 +1838,8 @@
     setMemoryBusy(false);
     const box = $('#mem-out');
     if (box) box.innerHTML = '<div class="empty">输入关键词后回车检索。</div>';
+    const ms = $('#mem-source'); if (ms) ms.value = '';
+    const mf = $('#mem-layer-filter'); if (mf) mf.value = '';
     renderPager();
   });
 
@@ -1754,12 +1851,35 @@
     if (MEM.mode === 'layers') loadMemLayers({ mark: true });
     else if (MEM.query) loadMemSearch({ mark: true });
   });
+  function populateMemorySources() {
+    const sel = $('#mem-source');
+    if (!sel) return;
+    const entries = Object.entries(SRC_NAME).filter(([k]) => !k.endsWith('-db') && !k.endsWith('-rollout'));
+    sel.innerHTML = '<option value="">全部来源</option>' + entries.map(([k, v]) => `<option value="${esc(k)}">${esc(v)}</option>`).join('');
+    sel.value = MEM.source || '';
+  }
+  populateMemorySources();
+  const memSourceSel = $('#mem-source');
+  if (memSourceSel) memSourceSel.addEventListener('change', () => {
+    MEM.source = memSourceSel.value || '';
+    MEM.page = 1;
+    if (MEM.mode === 'layers' && MEM.layer) loadMemLayers({ mark: true });
+    else if (MEM.mode === 'search' && MEM.query) loadMemSearch({ mark: true });
+  });
+  const memLayerFilter = $('#mem-layer-filter');
+  if (memLayerFilter) memLayerFilter.addEventListener('change', () => {
+    MEM.layer = memLayerFilter.value || '';
+    const layerSel = $('#mem-layer'); if (layerSel) layerSel.value = MEM.layer;
+    MEM.page = 1;
+    loadMemLayers({ mark: true });
+  });
 
   /* ============================================================
      应用信息
      ============================================================ */
   tdai.appInfo().then((info) => {
     S.appInfo = info;
+    if (Array.isArray(info.sources)) info.sources.forEach((x) => { if (x && x.key && x.name) SRC_NAME[x.key] = x.name; });
     const set = (id, v) => { const el = $(id); if (el) el.textContent = fmt(v); };
     set('#a-ver', info.version);
     set('#a-exe', info.exePath);
@@ -1850,21 +1970,31 @@
   function renderAgentItems(items) {
     const list = $('#agent-list');
     if (!list) return;
-    if (!items || !items.length) { list.innerHTML = '<div class="empty">未检测到客户端</div>'; return; }
-    list.innerHTML = items.map((it) => {
+    S.agents = Array.isArray(items) ? items : [];
+    const filter = ($('#agent-filter') && $('#agent-filter').value) || 'all';
+    const shown = S.agents.filter((it) => {
+      if (filter === 'capture') return !!(it.injection && it.injection.capture);
+      if (filter === 'partial') return it.status === 'installed' && it.effective === false;
+      return filter === 'all' || it.status === filter;
+    });
+    if (!shown.length) { list.innerHTML = '<div class="empty">当前筛选没有客户端</div>'; return; }
+    list.innerHTML = shown.map((it) => {
       const absent = it.status === 'absent';
       const on = it.status === 'installed';
+      const isInstruction = it.key === 'instructions';
+      const kinds = it.injection && Array.isArray(it.injection.kinds) ? it.injection.kinds.join(' / ') : 'mcp';
+      const configPath = it.config && it.config.file ? it.config.file : '';
+      const readiness = it.status === 'absent' ? '未安装' : (it.effective === false ? '需处理' : (on ? '可用' : '待接入'));
       // 旧路径接入（node.exe）时给切换提示，但开关仍显示"开"（重新点一下即切换到本应用）
       const oldTip = on && it.byApp === false ? '<span class="ar-old">旧接入路径，建议关→开切换</span>' : '';
       return `<div class="agent-row" data-key="${esc(it.key)}">
         <div class="ar-name">
           <b>${esc(it.name)}</b>
-          <span>${esc(it.detail || '')}${oldTip}</span>
+          <span class="agent-meta"><i>${esc(it.injection && it.injection.label || kinds)}</i><i>${esc(readiness)}</i>${it.injection && it.injection.capture ? '<i>可采集</i>' : ''}${it.injection && it.injection.requiresRestart ? '<i>需重启客户端</i>' : ''}</span>
+          <span title="${esc(configPath)}">${esc(it.detail || '')}${configPath ? ` · ${esc(configPath)}` : ''}${oldTip}</span>
         </div>
         <span class="agent-badge ${esc(it.status || '')}">${esc(STATUS_LABEL[it.status] || it.status)}</span>
-        <span class="agent-toggle ${on ? 'on' : ''} ${absent ? 'disabled' : ''}" title="${absent ? '未安装该客户端' : (on ? '点击断开' : '点击接入')}" role="switch" aria-checked="${on ? 'true' : 'false'}" aria-disabled="${absent ? 'true' : 'false'}">
-          <span class="sw"></span>${on ? '已接入' : (absent ? '未安装' : '未接入')}
-        </span>
+        ${isInstruction ? '<span class="muted">由全局指令文件兜底</span>' : `<span class="agent-toggle ${on ? 'on' : ''} ${absent ? 'disabled' : ''}" title="${absent ? '未安装该客户端' : (on ? '点击断开' : '点击接入')}" role="switch" aria-checked="${on ? 'true' : 'false'}" aria-disabled="${absent ? 'true' : 'false'}"><span class="sw"></span>${on ? '已接入' : (absent ? '未安装' : '未接入')}</span>`}
       </div>`;
     }).join('');
     // 事件委托：点整行任意处切换
@@ -1872,7 +2002,7 @@
       row.addEventListener('click', () => {
         const key = row.dataset.key;
         const it = (items || []).find((x) => x.key === key);
-        if (!it || it.status === 'absent') return;   // 未安装的不响应
+        if (!it || it.status === 'absent' || it.key === 'instructions') return;   // 未安装/说明文件不响应
         toggleAgent(key, it.status !== 'installed');
       });
     });
@@ -1899,8 +2029,8 @@
     let items = [];
     try { items = await tdai.agentsStatus(); } catch (_) { items = []; }
     renderAgentItems(items);
-    const installed = (items || []).filter((x) => x.status === 'installed').length;
-    const total = (items || []).length;
+    const installed = (items || []).filter((x) => x.key !== 'instructions' && x.status === 'installed').length;
+    const total = (items || []).filter((x) => x.key !== 'instructions').length;
     const ac = $('#ag-clients'); if (ac) ac.textContent = `${installed} / ${total}`;
     // 首屏默认：已经接入过就收起教程（用户来这页是看状态，不是看说明）；
     // 一个都没接入（或者是新装的）则展开，因为这时说明才是有用的。
@@ -1914,6 +2044,9 @@
     }
     return items;
   }
+
+  const agentFilter = $('#agent-filter');
+  if (agentFilter) agentFilter.addEventListener('change', () => renderAgentItems(S.agents));
 
   async function refreshAgentCore() {
     try {

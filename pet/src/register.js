@@ -215,7 +215,10 @@ function entryOf(cls, home) {
     const mark = cls.patchMark || 'dsh-mcp-client';
     for (const p of profiles) {
       const t = readText(path.join(file, p, 'cordis.patch.yml'));
-      if (t && t.includes(mark)) return { command: 'cordis.patch.yml' };
+      if (t && t.includes(mark)) {
+        const m = t.match(/\n\s*command:\s*'([^']+)'/);
+        return { command: m ? m[1].replace(/''/g, "'") : 'cordis.patch.yml' };
+      }
     }
     return null;
   }
@@ -231,6 +234,7 @@ function entryOf(cls, home) {
     // 块定位检测：与写入侧同源的标记（`  tdai:` 两空格缩进）
     const t = readText(file);
     if (t == null) return null;
+    const top = cls.yamlTop || 'mcp_servers';
     const leaf = cls.yamlLeaf || 'tdai';
     if (!new RegExp('^\\s{2}' + leaf + ':', 'm').test(t)) return null;
     // 取 command 行（引号包裹）作为"由谁接入"的判据
@@ -257,13 +261,29 @@ function status({ home = os.homedir(), exePath = '' } = {}) {
       ? (cls.kind === 'dsh-patch' ? '已写入 cordis.patch'
         : byApp ? '本应用接入' : `由 ${path.basename(entry.command || '')} 接入（旧路径，建议点开关重连）`)
       : '';
-    items.push({
+    const injection = cls.injection || { kinds: ['mcp'], label: 'MCP 配置', requiresRestart: true, recall: true, capture: true };
+    const item = {
       key: cls.key,
       name: cls.name,
       status: !installed ? 'absent' : (entry ? 'installed' : 'missing'),
       detail,
       byApp,
-    });
+      source: cls.source || cls.key,
+      config: {
+        kind: cls.kind,
+        file: cls.file(home),
+        pointer: cls.pointer || cls.tomlSection || (cls.yamlTop && `${cls.yamlTop}.${cls.yamlLeaf || 'tdai'}`) || (cls.kind === 'dsh-patch' ? 'profiles/*/cordis.patch.yml :: insert' : ''),
+      },
+      injection: {
+        kinds: Array.isArray(injection.kinds) ? injection.kinds.slice() : [],
+        label: injection.label || 'MCP 配置',
+        requiresRestart: injection.requiresRestart !== false,
+        recall: injection.recall !== false,
+        capture: injection.capture !== false,
+      },
+      checks: { mcp: !!entry, byApp, hook: null, instructions: null },
+    };
+    items.push(item);
   }
 
   // UserPromptSubmit hook（Claude Code 与 ZCode）
@@ -274,23 +294,49 @@ function status({ home = os.homedir(), exePath = '' } = {}) {
   };
   const cc = items.find((x) => x.key === 'claude-code');
   if (cc) {
-    cc.detail = [cc.detail, hookDetail(hookOf('claude-code'), cc.status === 'absent')].filter(Boolean).join(' · ');
+    const hs = hookOf('claude-code');
+    cc.checks.hook = hs.present;
+    cc.detail = [cc.detail, hookDetail(hs, cc.status === 'absent')].filter(Boolean).join(' · ');
   }
   const zc = items.find((x) => x.key === 'zcode');
   if (zc) {
-    zc.detail = [zc.detail, hookDetail(hookOf('zcode'), zc.status === 'absent')].filter(Boolean).join(' · ');
+    const hs = hookOf('zcode');
+    zc.checks.hook = hs.present;
+    zc.detail = [zc.detail, hookDetail(hs, zc.status === 'absent')].filter(Boolean).join(' · ');
   }
 
   // 全局指令文件（MCP 没生效时的兜底硬规则）
   // 与 register() 的写入清单同源（INSTR_TARGETS），避免"检测面"与"写入面"不一致。
   const instrFiles = INSTR_TARGETS.map(([d, n]) => path.join(home, d, n));
   const instrHit = instrFiles.filter((f) => (readText(f) || '').includes(INSTR_MARK));
-  items.push({
+  const instructionItem = {
     key: 'instructions',
     name: '全局指令文件',
     status: instrHit.length ? 'installed' : 'missing',
     detail: instrHit.length ? `${instrHit.map((f) => path.basename(f)).join(' / ')} 已写入` : '兜底规则未写入',
-  });
+    source: 'instructions',
+    config: { kind: 'markdown', file: instrFiles.join('、'), pointer: 'tdai-memory:begin' },
+    injection: { kinds: ['instructions'], label: '全局指令文件（兜底）', requiresRestart: false, recall: true, capture: false },
+    checks: { mcp: false, byApp: true, hook: null, instructions: instrHit.length > 0 },
+  };
+  items.push(instructionItem);
+
+  for (const item of items) {
+    if (!item.checks) continue;
+    if (item.key !== 'instructions' && item.injection && item.injection.kinds.includes('instructions')) {
+      const target = item.key === 'zcode'
+        ? path.join(home, '.zcode', 'AGENTS.md')
+        : path.join(home, '.claude', 'CLAUDE.md');
+      item.checks.instructions = (readText(target) || '').includes(INSTR_MARK);
+    }
+    const required = item.injection && item.injection.kinds || [];
+    const hookReady = !required.includes('hook') || item.checks.hook === true;
+    const mcpReady = !required.includes('mcp') && !required.some((k) => k === 'mcp-patch' || k === 'mcp-yaml')
+      ? true : item.checks.mcp === true && item.checks.byApp !== false;
+    const instructionReady = !required.includes('instructions') || item.checks.instructions !== false;
+    item.effective = item.status === 'installed' && mcpReady && hookReady && instructionReady;
+    if (item.status === 'installed' && !item.effective && item.detail) item.detail += ' · 注入未完全生效';
+  }
 
   return items;
 }

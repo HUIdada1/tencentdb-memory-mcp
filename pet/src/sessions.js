@@ -6,6 +6,8 @@
 //   ZCode 会话库 : ~/.zcode/cli/db/db.sqlite   ← 权威源，zcode 会在聊完后异步归档写入
 //   ZCode CLI    : ~/.zcode/cli/agents/<sess>/<agent>/transcript.jsonl  （实时落盘，聊完归档进 sqlite）
 //   Claude Code  : ~/.claude/projects/<proj>/<sid>.jsonl
+//   Codex        : ~/.codex/sessions/**/rollout-*.jsonl + archived_sessions/*.jsonl
+//   其它 Agent   : 各自的 sessions/conversations/history 目录（统一 JSONL/JSON 兼容解析）
 //
 // ⚠️ 历史教训（2026-09-22 修复）：
 //   zcode 旧版把会话写在 agents/*/transcript.jsonl，新版改成了 sqlite 数据库。
@@ -334,6 +336,94 @@ function claudeFiles() {
   return out;
 }
 
+// 其它客户端的会话目录没有统一标准，只在明确的会话目录下递归，
+// 不扫描客户端根目录，避免把配置、缓存和扩展包当成会话上传。
+const EXTRA_SOURCE_DIRS = {
+  cursor: ['.cursor/projects', '.cursor/chats'],
+  trae: ['.trae/projects', '.trae/sessions', '.trae/conversations'],
+  'deepseek-harness': ['.dsh/sessions', '.dsh/conversations', '.dsh/storages/session_projcache/sessions'],
+  codebuddy: ['.codebuddy/sessions', '.codebuddy/conversations', '.codebuddy/history'],
+  workbuddy: ['.workbuddy-ai/sessions', '.workbuddy-ai/conversations', '.workbuddy-ai/history', '.workbuddy-ai/logs', '.workbuddy/sessions'],
+  opencode: ['.local/share/opencode/storage/message', '.local/share/opencode/storage/session', '.config/opencode/sessions', '.config/opencode/storage'],
+  hermes: ['.hermes/sessions', '.hermes/conversations', '.hermes/history'],
+  openclaw: ['.openclaw/sessions', '.openclaw/conversations', '.openclaw/history'],
+  pi: ['.pi/agent/sessions', '.pi/agent/conversations', '.pi/agent/history'],
+};
+
+const EXTRA_EXTS = new Set(['.jsonl', '.json', '.log']);
+const EXTRA_SKIP = /(?:\\|\/)(?:cache|caches|node_modules|extensions?|artifacts?)(?:\\|\/)/i;
+function walkSessionFiles(roots, maxDepth = 5) {
+  const out = [];
+  const seen = new Set();
+  const visit = (dir, depth) => {
+    if (depth > maxDepth || out.length >= 5000 || seen.has(dir) || EXTRA_SKIP.test(dir)) return;
+    seen.add(dir);
+    let names; try { names = fs.readdirSync(dir); } catch (_) { return; }
+    for (const name of names) {
+      if (out.length >= 5000) break;
+      const full = path.join(dir, name);
+      let st; try { st = fs.statSync(full); } catch (_) { continue; }
+      if (st.isDirectory()) visit(full, depth + 1);
+      else if (st.isFile() && EXTRA_EXTS.has(path.extname(name).toLowerCase()) && !EXTRA_SKIP.test(full)) out.push(full);
+    }
+  };
+  roots.forEach((r) => visit(r, 0));
+  return out;
+}
+
+function extraFiles(source) {
+  const roots = sourceRoots(source);
+  return walkSessionFiles(roots).filter((file) => isExtraCandidate(source, file))
+    .map((file) => ({ file, source, id: path.basename(file).replace(/\.(jsonl|json|log)$/i, '') }));
+}
+
+// AppData 下的 VS Code 工作区包含大量配置/缓存 JSON；它们即使扩展名正确也不是会话。
+// WorkBuddy 只认 conversations 目录，避免 daemon.log、sandbox 和 startup 日志进入列表。
+function isExtraCandidate(source, file) {
+  const lower = String(file || '').toLowerCase().replace(/\\/g, '/');
+  const base = path.basename(lower);
+  if (/^(workspace|storage|settings|config|state|state\.vscdb(?:\.options)?|package-lock)\.json$/.test(base)) return false;
+  if (source === 'workbuddy') return /\/conversations\//.test(lower);
+  if (source === 'deepseek-harness') return /\/sessions\//.test(lower) || /\/conversations\//.test(lower);
+  if (source === 'codebuddy' && /\/plans\//.test(lower)) return false;
+  return true;
+}
+
+function sourceRoots(source) {
+  const roots = (EXTRA_SOURCE_DIRS[source] || []).map((r) => path.join(HOME, r));
+  const app = process.env.APPDATA || '';
+  const local = process.env.LOCALAPPDATA || '';
+  const appRoots = {
+    cursor: ['Cursor/User/workspaceStorage', 'Cursor/User/globalStorage'],
+    trae: ['Trae/User/workspaceStorage', 'Trae CN/User/workspaceStorage'],
+    codebuddy: ['CodeBuddy/User/workspaceStorage', 'CodeBuddy/User/globalStorage', 'CodeBuddy CN/User/workspaceStorage'],
+    workbuddy: ['WorkBuddy/User/workspaceStorage', 'WorkBuddy AI/User/workspaceStorage'],
+    opencode: ['opencode/storage'],
+  };
+  for (const rel of (appRoots[source] || [])) {
+    if (app) roots.push(path.join(app, rel));
+    if (local) roots.push(path.join(local, rel));
+  }
+  return roots;
+}
+
+function codexFiles() {
+  const root = path.join(HOME, '.codex');
+  const names = new Map();
+  try {
+    for (const line of fs.readFileSync(path.join(root, 'session_index.jsonl'), 'utf8').split('\n')) {
+      try { const j = JSON.parse(line); if (j && j.id && j.thread_name) names.set(String(j.id), String(j.thread_name)); } catch (_) { }
+    }
+  } catch (_) { }
+  const roots = [path.join(root, 'sessions'), path.join(root, 'archived_sessions')];
+  return walkSessionFiles(roots, 8)
+    .filter((f) => /(?:^|[\\/])rollout-.*\.jsonl$/i.test(f))
+    .map((file) => {
+      const id = path.basename(file).replace(/\.jsonl$/i, '').replace(/^rollout-.*-([0-9a-f-]{36})$/, '$1');
+      return { file, source: 'codex', id, label: names.get(id) || path.basename(file).replace(/\.jsonl$/i, '') };
+    });
+}
+
 /* ---------- 行解析（与 daemon 完全同构，只取摘要不参与上传） ---------- */
 
 // ZCode：turn_started.payload.input = 用户输入；turn_complete.payload.response = 最终答复
@@ -365,7 +455,103 @@ function parseClaudeLine(j) {
   return { role, content: text };
 }
 
-const PARSERS = { zcode: parseZCodeLine, 'claude-code': parseClaudeLine };
+function textOfContent(content) {
+  if (typeof content === 'string') return content.trim();
+  if (Array.isArray(content)) return content.filter((x) => x && (x.type === 'text' || x.type === 'input_text' || x.type === 'output_text') && x.text)
+    .map((x) => x.text).join('\n').trim();
+  if (content && typeof content === 'object') return textOfContent(content.text || content.content || content.parts || '');
+  return '';
+}
+
+// Codex rollout 记录：response_item.payload.message.role/content。
+// 兼容历史/归档记录中的 message 顶层写法，并跳过 developer/system/tool。
+function parseCodexLine(j) {
+  if (!j || typeof j !== 'object') return null;
+  const p = j.payload && typeof j.payload === 'object' ? j.payload : j;
+  const item = p.type === 'message' ? p : (j.type === 'message' ? j : null);
+  const msg = item && item.message && typeof item.message === 'object' ? item.message : item;
+  const role = msg && (msg.role === 'user' || msg.role === 'assistant') ? msg.role : null;
+  const text = textOfContent(msg && (msg.content != null ? msg.content : msg.text));
+  if (!role || !text || text.startsWith('<system-reminder>') || text.startsWith('<task-notification>')) return null;
+  return { role, content: text };
+}
+
+// Cursor/Trae/CodeBuddy 等 VS Code 系客户端常见的 message 形态；
+// 也兼容 Pi/Hermes/OpenClaw 的 {role,content} 或 {message:{...}}。
+function parseGenericLine(j) {
+  if (typeof j === 'string') {
+    try { j = JSON.parse(j); } catch (_) {
+      const i = j.indexOf('{');
+      if (i < 0) return null;
+      try { j = JSON.parse(j.slice(i)); } catch (_) { return null; }
+    }
+  }
+  if (!j || typeof j !== 'object') return null;
+  const batch = Array.isArray(j) ? j : (Array.isArray(j.messages) ? j.messages : (Array.isArray(j.items) ? j.items : null));
+  if (batch) {
+    const out = [];
+    for (const item of batch) {
+      const parsed = parseGenericLine(item);
+      if (Array.isArray(parsed)) out.push(...parsed);
+      else if (parsed) out.push(parsed);
+    }
+    return out.length ? out : null;
+  }
+  const m = j.message && typeof j.message === 'object' ? j.message : j;
+  const role = m.role === 'assistant' || m.role === 'user' ? m.role : null;
+  const text = textOfContent(m.content != null ? m.content : (m.text != null ? m.text : m.parts));
+  if (!role || !text || text.startsWith('<system-reminder>') || text.startsWith('<task-notification>')) return null;
+  return { role, content: text };
+}
+
+// WorkBuddy SDK 日志：行首有时间和 method 前缀，末尾才是 JSON。
+// 真实对话位于 method:requests:result 的 state[].userContent/assistantContent。
+function parseWorkBuddyLine(j) {
+  if (typeof j === 'string') {
+    const i = j.indexOf('{');
+    if (i < 0) return null;
+    try { j = JSON.parse(j.slice(i)); } catch (_) { return null; }
+  }
+  if (!j || typeof j !== 'object' || !Array.isArray(j.state)) return null;
+  const out = [];
+  const text = (items) => Array.isArray(items)
+    ? items.filter((x) => x && x.text && (!x.type || x.type === 'text' || x.type === 'input_text' || x.type === 'output_text'))
+      .map((x) => String(x.text)).join('\n').trim() : '';
+  for (const state of j.state) {
+    const user = text(state && state.userContent);
+    const assistant = text(state && state.assistantContent);
+    if (user) out.push({ role: 'user', content: user });
+    if (assistant) out.push({ role: 'assistant', content: assistant });
+  }
+  return out.length ? out : null;
+}
+
+function parseDeepSeekLine(j) {
+  if (!j || typeof j !== 'object') return null;
+  const turns = j.record && j.record.rows && j.record.rows.turnOutline && j.record.rows.turnOutline.val && j.record.rows.turnOutline.val.turns;
+  if (!Array.isArray(turns)) return parseGenericLine(j);
+  const out = [];
+  for (const turn of turns) {
+    if (turn && turn.prompt) out.push({ role: 'user', content: String(turn.prompt) });
+    if (turn && turn.response) out.push({ role: 'assistant', content: String(turn.response) });
+  }
+  return out.length ? out : null;
+}
+
+const PARSERS = {
+  zcode: parseZCodeLine,
+  'claude-code': parseClaudeLine,
+  codex: parseCodexLine,
+  cursor: parseGenericLine,
+  trae: parseGenericLine,
+  'deepseek-harness': parseDeepSeekLine,
+  codebuddy: parseGenericLine,
+  workbuddy: parseWorkBuddyLine,
+  opencode: parseGenericLine,
+  hermes: parseGenericLine,
+  openclaw: parseGenericLine,
+  pi: parseGenericLine,
+};
 
 // 从一行 JSON 里取时间戳（两个来源字段不同）
 function tsOf(j) {
@@ -410,32 +596,51 @@ function scanOne(entry) {
   const hit = scanCache.get(entry.file);
   if (hit && hit.mtimeMs === st.mtimeMs && hit.size === st.size) return hit.result;
 
-  const { text, size } = readTail(entry.file, TAIL_BYTES);
+  const isSnapshot = /\.json$/i.test(entry.file);
+  const { text, size } = isSnapshot
+    ? (() => { try { return { text: fs.readFileSync(entry.file, 'utf8'), size: fs.statSync(entry.file).size }; } catch (_) { return { text: '', size: 0 }; } })()
+    : readTail(entry.file, TAIL_BYTES);
   const parse = PARSERS[entry.source] || parseZCodeLine;
 
   let turns = 0, lastTs = 0, sawTs = false, lastNote = '', lastRole = '';
-  for (const ln of text.split('\n')) {
-    if (!ln || ln[0] !== '{') continue;   // 首行可能是被截断的半截 JSON，跳过
-    let j; try { j = JSON.parse(ln); } catch (_) { continue; }
-    const t = tsOf(j);
+  const lines = isSnapshot
+    ? (() => { try { const j = JSON.parse(text); return (Array.isArray(j) ? j : [j]).map((x) => JSON.stringify(x)); } catch (_) { return []; } })()
+    : text.split('\n');
+  for (const ln of lines) {
+    if (!ln) continue;
+    let j;
+    if (entry.source === 'workbuddy' && ln[0] !== '{') {
+      // WorkBuddy 行首带时间戳和 method 前缀，交给专用解析器处理。
+      j = ln;
+    } else {
+      if (ln[0] !== '{') continue; // 首行可能是被截断的半截 JSON，跳过
+      try { j = JSON.parse(ln); } catch (_) { continue; }
+    }
+    const t = typeof j === 'string' && entry.source === 'workbuddy'
+      ? Date.parse(j.slice(0, 24)) : tsOf(j);
     // 取文件内最大时间戳；文件内一条都没有时回落到 mtime
     if (!isNaN(t)) { sawTs = true; if (t > lastTs) lastTs = t; }
-    const msg = parse(j);
-    if (!msg) continue;
-    turns++;
-    lastRole = msg.role;
-    lastNote = msg.content;
+    const parsed = parse(j);
+    const msgs = Array.isArray(parsed) ? parsed : (parsed ? [parsed] : []);
+    for (const msg of msgs) {
+      if (!msg) continue;
+      turns++;
+      lastRole = msg.role;
+      lastNote = msg.content;
+    }
   }
   if (!sawTs) lastTs = st.mtimeMs;
 
   // 回读被截断时看到的轮次只是尾部一小段，用文件大小粗估总量。
   // 只有在"确实读到了轮次但明显少于文件规模"时才抬升，避免虚高。
   const est = Math.max(1, Math.round(size / 3072));
-  const turnsFinal = turns === 0 ? est : (turns < est ? Math.round((turns + est) / 2) : turns);
+  // 非会话文件（配置、缓存、普通日志）不能按大小伪造一条会话。
+  if (turns === 0) return null;
+  const turnsFinal = turns < est ? Math.round((turns + est) / 2) : turns;
 
-  const label = entry.source === 'zcode'
+  const label = entry.label || (entry.source === 'zcode'
     ? (entry.session || '').replace(/^sess_/, '').slice(0, 8)
-    : (entry.id || '').slice(0, 8);
+    : (entry.id || path.basename(entry.file).replace(/\.(jsonl|json)$/i, '')).slice(0, 32));
 
   const result = {
     id: `${entry.source}:${entry.id}${entry.agent ? ':' + String(entry.agent).replace(/^agent_/, '').slice(0, 8) : ''}`,
@@ -471,9 +676,13 @@ function scanSessions(opts) {
     byKey.set(String(s.id).replace(/^zcode-db:/, ''), s);
   }
 
-  const all = zcodeFiles().concat(claudeFiles());
+  const entries = zcodeFiles().map((e) => e)
+    .concat(claudeFiles().map((e) => e))
+    .concat(codexFiles())
+    .concat(Object.keys(EXTRA_SOURCE_DIRS).flatMap((source) => extraFiles(source)));
+  const all = entries.map((e) => e.file);
   const alive = new Set();
-  for (const e of all) {
+  for (const e of entries) {
     alive.add(e.file);
     const r = scanOne(e);
     if (!r) continue;
@@ -512,7 +721,8 @@ function cursorStats() {
 }
 
 module.exports = {
-  scanSessions, cursorStats, zcodeFiles, claudeFiles, scanOne,
+  scanSessions, cursorStats, zcodeFiles, claudeFiles, codexFiles, extraFiles, sourceRoots, scanOne,
+  parseCodexLine, parseGenericLine, parseDeepSeekLine, parseWorkBuddyLine,
   sqliteSessions,       // sqlite 权威源（守护进程上传侧也要用它）
   sqliteStatus,         // 降级状态（UI 警告用）：kind/degraded/message/hint
   runtimeInfo,          // 运行时识别（Electron 内嵌 Node vs 系统 Node），文案据此分流

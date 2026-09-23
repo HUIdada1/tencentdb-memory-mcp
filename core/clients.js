@@ -30,6 +30,8 @@ const CLIENTS = [
   {
     key: 'zcode',
     name: 'ZCode CLI',
+    source: 'zcode',
+    injection: { kinds: ['mcp', 'hook', 'instructions'], label: 'MCP + 提问前 hook + 全局指令', requiresRestart: true, recall: true, capture: true },
     kind: 'json-nested',
     probe: (h) => path.join(h, '.zcode'),
     file: (h) => path.join(h, '.zcode', 'cli', 'config.json'),
@@ -43,6 +45,8 @@ const CLIENTS = [
   {
     key: 'claude-code',
     name: 'Claude Code',
+    source: 'claude-code',
+    injection: { kinds: ['mcp', 'hook', 'instructions'], label: 'MCP + UserPromptSubmit hook + 全局指令', requiresRestart: true, recall: true, capture: true },
     kind: 'json',
     probe: (h) => path.join(h, '.claude.json'),
     file: (h) => path.join(h, '.claude.json'),
@@ -53,6 +57,8 @@ const CLIENTS = [
   {
     key: 'cursor',
     name: 'Cursor',
+    source: 'cursor',
+    injection: { kinds: ['mcp'], label: 'MCP 配置', requiresRestart: true, recall: true, capture: true },
     kind: 'json',
     // Cursor 的 MCP 配置目录可能不存在（未装），用目录探测比探文件更准
     probe: (h) => path.join(h, '.cursor'),
@@ -62,6 +68,8 @@ const CLIENTS = [
   {
     key: 'codex',
     name: 'Codex',
+    source: 'codex',
+    injection: { kinds: ['mcp'], label: 'TOML MCP 服务器', requiresRestart: true, recall: true, capture: true },
     kind: 'toml',
     probe: (h) => path.join(h, '.codex', 'config.toml'),
     file: (h) => path.join(h, '.codex', 'config.toml'),
@@ -71,6 +79,8 @@ const CLIENTS = [
   {
     key: 'trae',
     name: 'Trae',
+    source: 'trae',
+    injection: { kinds: ['mcp'], label: 'MCP 配置', requiresRestart: true, recall: true, capture: true },
     kind: 'json',
     probe: (h) => path.join(h, '.trae'),
     file: (h) => path.join(h, '.trae', 'mcp.json'),
@@ -79,6 +89,8 @@ const CLIENTS = [
   {
     key: 'deepseek-harness',
     name: 'DeepSeek Harness',
+    source: 'deepseek-harness',
+    injection: { kinds: ['mcp-patch'], label: 'Cordis patch MCP 注入', requiresRestart: true, recall: true, capture: true },
     kind: 'dsh-patch',
     probe: (h) => path.join(h, '.dsh'),
     // patch 层是按 profile 目录放的，这里返回 profiles 根目录，实际文件由调用方枚举
@@ -93,6 +105,8 @@ const CLIENTS = [
   {
     key: 'codebuddy',
     name: 'CodeBuddy',
+    source: 'codebuddy',
+    injection: { kinds: ['mcp'], label: 'MCP 配置', requiresRestart: true, recall: true, capture: true },
     kind: 'json',
     probe: (h) => path.join(h, '.codebuddy'),
     file: (h) => path.join(h, '.codebuddy', '.mcp.json'),
@@ -102,6 +116,8 @@ const CLIENTS = [
   {
     key: 'workbuddy',
     name: 'WorkBuddy',
+    source: 'workbuddy',
+    injection: { kinds: ['mcp'], label: 'MCP 配置', requiresRestart: true, recall: true, capture: true },
     kind: 'json',
     probe: (h) => path.join(h, '.workbuddy-ai'),
     file: (h) => path.join(h, '.workbuddy-ai', 'mcp.json'),
@@ -112,6 +128,8 @@ const CLIENTS = [
   {
     key: 'opencode',
     name: 'OpenCode',
+    source: 'opencode',
+    injection: { kinds: ['mcp'], label: 'OpenCode local MCP 命令', requiresRestart: true, recall: true, capture: true },
     kind: 'opencode',
     probe: (h) => path.join(h, '.config', 'opencode'),
     file: (h) => path.join(h, '.config', 'opencode', 'opencode.json'),
@@ -123,6 +141,8 @@ const CLIENTS = [
   {
     key: 'hermes',
     name: 'Hermes',
+    source: 'hermes',
+    injection: { kinds: ['mcp-yaml'], label: 'YAML MCP 服务器', requiresRestart: true, recall: true, capture: true },
     kind: 'yaml',
     probe: (h) => path.join(h, '.hermes'),
     file: (h) => path.join(h, '.hermes', 'config.yaml'),
@@ -133,6 +153,8 @@ const CLIENTS = [
   {
     key: 'openclaw',
     name: 'OpenClaw',
+    source: 'openclaw',
+    injection: { kinds: ['mcp'], label: '嵌套 MCP 配置', requiresRestart: true, recall: true, capture: true },
     kind: 'json-nested',
     probe: (h) => path.join(h, '.openclaw'),
     file: (h) => path.join(h, '.openclaw', 'openclaw.json'),
@@ -142,6 +164,8 @@ const CLIENTS = [
   {
     key: 'pi',
     name: 'Pi',
+    source: 'pi',
+    injection: { kinds: ['mcp'], label: 'MCP 配置', requiresRestart: true, recall: true, capture: true },
     kind: 'json',
     probe: (h) => path.join(h, '.pi'),
     file: (h) => path.join(h, '.pi', 'agent', 'mcp.json'),

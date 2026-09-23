@@ -209,7 +209,7 @@ cd pet && npm start
 | `serviceId` | 否 | 默认 `default` |
 | `blockId` | 否 | 留空按 `chat_memory-<teamId>-<agentId>` 自动拼接 |
 | `recallAlways` | 否 | `true` = 每条消息都召回（默认只在命中回忆类表述时召回） |
-| `upload.enabledSources` | 否 | 采集源开关，默认 `{ "zcode": true, "zcode-db": true, "claude-code": true }` |
+| `upload.enabledSources` | 否 | 采集源开关，默认开启 `zcode`、`zcode-db`、`zcode-rollout`、`claude-code`、`codex`、`cursor`、`trae`、`deepseek-harness`、`codebuddy`、`workbuddy`、`opencode`、`hermes`、`openclaw`、`pi`；可按来源写 `false` 关闭 |
 | `upload.createAgentIfMissing` | 否 | 默认 `true` |
 
 **环境变量可覆盖同名配置**（优先级：代码传入 > env > 配置文件）：

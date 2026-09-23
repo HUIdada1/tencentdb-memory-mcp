@@ -12,6 +12,7 @@ contextBridge.exposeInMainWorld('tdai', {
   // 应用偏好（主题 / 自启 / 自动更新）
   prefsLoad: () => ipcRenderer.invoke('prefs-load'),
   prefsSave: (patch) => ipcRenderer.invoke('prefs-save', patch),
+  systemStatus: () => ipcRenderer.invoke('system-status'),
 
   // 后台守护
   guardStatus: () => ipcRenderer.invoke('guard-status'),

@@ -37,6 +37,9 @@ let core = null;
 let prefs = null;
 let healthTimer = null;
 let lastHealth = { running: false, health: null };
+let isQuitting = false;
+let shutdownDone = false;
+let allowWindowClose = false;
 
 /* ---------- 实时指标（总览页数据源） ---------- */
 // 计量链路：core 的 _onHttp/_onHttpStart 观察者（真实 socket 字节）→ metrics
@@ -55,12 +58,9 @@ const shortEndpoint = metricsMod.shortEndpoint;
 // daemon 的上传请求在独立实现里发出，不会经过 rebuildCore() 的 HTTP 观察器。
 // 由 guard 转发成功事件，确保实时日志明确告诉用户哪一批会话已上传。
 guard.setUploadHandler((info) => {
-  const sourceNames = {
-    zcode: 'ZCode CLI',
-    'zcode-db': 'ZCode 会话库',
-    'zcode-rollout': 'ZCode Rollout',
-    'claude-code': 'Claude Code',
-  };
+  const sourceNames = register.CLIENTS.reduce((m, c) => { m[c.source || c.key] = c.name; return m; }, {
+    'zcode-db': 'ZCode 会话库', 'zcode-rollout': 'ZCode Rollout',
+  });
   const source = sourceNames[info && info.source] || (info && info.source) || '会话';
   const count = Number(info && info.messageCount) || 0;
   const session = info && info.sessionId ? `\n会话     : ${info.sessionId}` : '';
@@ -71,7 +71,7 @@ guard.setUploadHandler((info) => {
 
 /* ---------- 应用偏好（主题 / 自启 / 自动更新 / 守护开关） ---------- */
 
-function defaultPrefs() { return { ui: { theme: 'dark' }, system: { autoStart: false, guardEnabled: true }, update: { autoCheck: true } }; }
+function defaultPrefs() { return { ui: { theme: 'dark' }, system: { autoStart: false, guardEnabled: true, closeAction: 'hide' }, update: { autoCheck: true } }; }
 
 function mergeDeep(a, b) {
   const out = Object.assign({}, a);
@@ -92,6 +92,7 @@ function loadPrefs() {
     } catch (_) { }
   }
   prefs = mergeDeep(defaultPrefs(), disk || {});
+  if (!['hide', 'quit'].includes(prefs.system.closeAction)) prefs.system.closeAction = 'hide';
   return prefs;
 }
 
@@ -110,10 +111,28 @@ function applyTheme() {
   broadcast('theme', resolveTheme());
 }
 function applyAutoStart() {
-  if (IS_DEV) return; // 开发模式不动注册表
+  if (IS_DEV) return getAutoStartStatus(); // 开发模式不动注册表，但仍返回系统真实状态
   try {
     app.setLoginItemSettings({ openAtLogin: !!prefs.system.autoStart, openAsHidden: true, path: process.execPath, args: ['--hidden'] });
   } catch (e) { console.error('开机自启设置失败:', e.message); }
+  return getAutoStartStatus();
+}
+
+function getAutoStartStatus() {
+  try {
+    const s = app.getLoginItemSettings();
+    return {
+      supported: !IS_DEV,
+      configured: !!prefs?.system?.autoStart,
+      openAtLogin: !!s.openAtLogin,
+      openAsHidden: !!s.openAsHidden,
+      wasOpenedAtLogin: !!s.wasOpenedAtLogin,
+      wasOpenedAsHidden: !!s.wasOpenedAsHidden,
+      path: s.executableWillLaunchAtLogin || process.execPath,
+    };
+  } catch (e) {
+    return { supported: !IS_DEV, configured: !!prefs?.system?.autoStart, openAtLogin: false, openAsHidden: false, error: e.message };
+  }
 }
 
 /* ---------- 记忆库连接（真源 ~/.zcode/tdai-mcp.json） ---------- */
@@ -496,6 +515,11 @@ function createConsole() {
   consoleWin.webContents.once('did-finish-load', () => {
     try { consoleWin.webContents.send('metrics', currentSnapshot()); } catch (_) { }
   });
+  consoleWin.on('close', (e) => {
+    if (isQuitting || allowWindowClose) return;
+    e.preventDefault();
+    handleWindowClose(consoleWin);
+  });
   consoleWin.on('closed', () => { consoleWin = null; });
   // 渲染进程崩溃：留痕并在 1s 后尝试重载，避免用户看到永久白屏
   consoleWin.webContents.on('render-process-gone', (_e, details) => {
@@ -504,6 +528,37 @@ function createConsole() {
       if (consoleWin && !consoleWin.isDestroyed()) { try { consoleWin.reload(); } catch (_) { } }
     }, 1000);
   });
+}
+
+/* ---------- 统一停机与关闭策略 ---------- */
+function shutdown(reason) {
+  if (shutdownDone) return { ok: true, repeated: true };
+  shutdownDone = true;
+  try { if (healthTimer) { clearInterval(healthTimer); healthTimer = null; } } catch (_) { }
+  try { stopPolling(); } catch (_) { }
+  try { stopTick(); } catch (_) { }
+  try { stopSessionScan(); } catch (_) { }
+  try {
+    if (typeof localBackfill !== 'undefined' && localBackfill.timer) {
+      clearInterval(localBackfill.timer); localBackfill.timer = null;
+    }
+  } catch (_) { }
+  try { guard.stop(); } catch (_) { }
+  try { metrics.pushLog('info', `应用服务已停止${reason ? `（${reason}）` : ''}`); } catch (_) { }
+  return { ok: true, repeated: false };
+}
+
+function handleWindowClose(win) {
+  const action = prefs && prefs.system && prefs.system.closeAction === 'quit' ? 'quit' : 'hide';
+  if (action === 'hide') {
+    try { win && win.hide(); } catch (_) { }
+    return { ok: true, action: 'hide' };
+  }
+  isQuitting = true;
+  allowWindowClose = true;
+  shutdown('关闭窗口');
+  try { app.quit(); } catch (_) { }
+  return { ok: true, action: 'quit' };
 }
 
 /* ---------- 托盘 ---------- */
@@ -550,6 +605,9 @@ ipcMain.handle('app-info', () => ({
   panelAuthFail,
   panelError,
   daemonOk,
+  closeAction: (prefs && prefs.system && prefs.system.closeAction) || 'hide',
+  autoStart: getAutoStartStatus(),
+  sources: register.CLIENTS.map((c) => ({ key: c.source || c.key, name: c.name, capture: !!(c.injection && c.injection.capture) })),
 }));
 
 ipcMain.handle('conn-load', () => publicConn());
@@ -572,13 +630,20 @@ ipcMain.handle('recall-set', (_e, v) => {
 ipcMain.handle('prefs-load', () => prefs);
 ipcMain.handle('prefs-save', (_e, patch) => {
   prefs = mergeDeep(prefs, patch || {});
+  if (!['hide', 'quit'].includes(prefs.system.closeAction)) prefs.system.closeAction = 'hide';
   savePrefs();
-  applyAutoStart();
+  const autoStart = applyAutoStart();
   applyTheme();
   updater.setAutoCheck(prefs.update.autoCheck);
   refreshTrayMenu();
-  return prefs;
+  return Object.assign({}, prefs, { system: Object.assign({}, prefs.system, { autoStartStatus: autoStart }) });
 });
+ipcMain.handle('system-status', () => ({
+  closeAction: (prefs && prefs.system && prefs.system.closeAction) || 'hide',
+  autoStart: getAutoStartStatus(),
+  hiddenBoot: HIDDEN_BOOT,
+  guardEnabled: !!(prefs && prefs.system && prefs.system.guardEnabled),
+}));
 
 ipcMain.handle('guard-status', async () => {
   const h = await guard.health();
@@ -861,9 +926,9 @@ ipcMain.handle('update-open-repo', () => updater.openRepo());
 
 // 窗口与外部链接
 ipcMain.handle('win-min', (e) => BrowserWindow.fromWebContents(e.sender)?.minimize());
-ipcMain.handle('win-close', (e) => BrowserWindow.fromWebContents(e.sender)?.close());
+ipcMain.handle('win-close', (e) => handleWindowClose(BrowserWindow.fromWebContents(e.sender)));
 ipcMain.handle('open-external', (_e, url) => shell.openExternal(String(url)));
-ipcMain.handle('quit', () => app.quit());
+ipcMain.handle('quit', () => { isQuitting = true; allowWindowClose = true; shutdown('托盘退出'); return app.quit(); });
 
 /* ---------- 全局异常兜底 ----------
  * 常驻托盘应用一旦有未捕获异常就可能整进程退出（而用户以为它还在后台跑）。
@@ -920,6 +985,7 @@ else {
     globalShortcut.register('CommandOrControl+Shift+M', () => createConsole());
   });
 
-  app.on('will-quit', () => { globalShortcut.unregisterAll(); stopPolling(); stopTick(); stopSessionScan(); guard.stop(); });
+  app.on('before-quit', () => { isQuitting = true; allowWindowClose = true; shutdown('应用退出'); });
+  app.on('will-quit', () => { globalShortcut.unregisterAll(); shutdown('应用退出'); });
   app.on('window-all-closed', () => { /* 关窗不退出：守护与托盘继续运行 */ });
 }

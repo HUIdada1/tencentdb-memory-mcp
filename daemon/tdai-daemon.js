@@ -23,7 +23,7 @@ const QUEUE_DIR = path.join(DATA_DIR, 'queue');
 const LOG_PATH = path.join(DATA_DIR, 'daemon.log');
 
 const RECALL_PORT = Number(process.env.TDAI_DAEMON_PORT) || 8100;
-const APP_VER = '0.5.16';         // 与 package.json 同步；SEA exe 的版本号
+const APP_VER = '0.5.17';         // 与 package.json 同步；SEA exe 的版本号
 const REPO_API = 'https://api.github.com/repos/HUIdada1/tencentdb-memory-mcp/releases/latest';
 const RECALL_TIMEOUT_MS = 800;   // hook 链路硬超时：超时返回空，绝不阻塞对话
 const SCAN_INTERVAL_MS = 2 * 60 * 1000;  // 采集循环 2 分钟
@@ -38,6 +38,12 @@ const INTENT_WORDS = [
   '之前', '上次', '我们怎么做的', '怎么做', '还记得', '历史', '曾经', '以前', '那个方案', '以前怎么',
   'earlier', 'last time', 'remember', 'previously', 'we discussed', 'how did we',
 ];
+
+const DEFAULT_UPLOAD_SOURCES = {
+  zcode: true, 'zcode-db': true, 'zcode-rollout': true, 'claude-code': true,
+  codex: true, cursor: true, trae: true, 'deepseek-harness': true,
+  codebuddy: true, workbuddy: true, opencode: true, hermes: true, openclaw: true, pi: true,
+};
 
 /* ---------- 配置 ---------- */
 
@@ -59,9 +65,10 @@ function loadConfig() {
   );
   cfg.panelUrl = String(cfg.panelUrl || '').replace(/\/+$/, '');
   cfg.upload = Object.assign(
-    { enabledSources: { zcode: true, 'zcode-db': true, 'claude-code': true }, createAgentIfMissing: true },
+    { enabledSources: { zcode: true, 'zcode-db': true, 'zcode-rollout': true, 'claude-code': true, codex: true, cursor: true, trae: true, 'deepseek-harness': true, codebuddy: true, workbuddy: true, opencode: true, hermes: true, openclaw: true, pi: true }, createAgentIfMissing: true },
     disk.upload || {}, process.env.TDAI_UPLOAD_SOURCES ? JSON.parse(process.env.TDAI_UPLOAD_SOURCES) : {}
   );
+  cfg.upload.enabledSources = Object.assign({}, DEFAULT_UPLOAD_SOURCES, cfg.upload.enabledSources || {});
   // 老配置文件里没有 zcode-db 这一项：缺省补上，否则升级后新来源静默不采。
   // 用户显式写 false 的尊重其选择。
   if (cfg.upload.enabledSources && cfg.upload.enabledSources['zcode-db'] === undefined) {
@@ -294,6 +301,195 @@ function claudeSources() {
   return files;
 }
 
+// Codex 与其它客户端的会话文件发现。只递归明确的会话目录，避免扫描配置和缓存。
+function walkSessionFiles(roots, maxDepth = 8) {
+  const out = [], seen = new Set();
+  const skip = /(?:\\|\/)(?:cache|caches|node_modules|extensions?|artifacts?)(?:\\|\/)/i;
+  const visit = (dir, depth) => {
+    if (depth > maxDepth || out.length >= 5000 || seen.has(dir) || skip.test(dir)) return;
+    seen.add(dir);
+    let names; try { names = fs.readdirSync(dir); } catch (_) { return; }
+    for (const name of names) {
+      if (out.length >= 5000) break;
+      const full = path.join(dir, name); let st;
+      try { st = fs.statSync(full); } catch (_) { continue; }
+      if (st.isDirectory()) visit(full, depth + 1);
+      else if (st.isFile() && /\.(jsonl|json|log)$/i.test(name) && !skip.test(full)) out.push(full);
+    }
+  };
+  roots.forEach((r) => visit(r, 0));
+  return out;
+}
+
+function codexSources() {
+  const root = path.join(os.homedir(), '.codex');
+  return walkSessionFiles([path.join(root, 'sessions'), path.join(root, 'archived_sessions')], 8)
+    .filter((f) => /(?:^|[\\/])rollout-.*\.jsonl$/i.test(f));
+}
+
+const EXTRA_SOURCE_DIRS = {
+  cursor: ['.cursor/projects', '.cursor/chats'],
+  trae: ['.trae/projects', '.trae/sessions', '.trae/conversations'],
+  'deepseek-harness': ['.dsh/sessions', '.dsh/conversations', '.dsh/storages/session_projcache/sessions'],
+  codebuddy: ['.codebuddy/sessions', '.codebuddy/conversations', '.codebuddy/history'],
+  workbuddy: ['.workbuddy-ai/sessions', '.workbuddy-ai/conversations', '.workbuddy-ai/history', '.workbuddy-ai/logs', '.workbuddy/sessions'],
+  opencode: ['.local/share/opencode/storage/message', '.local/share/opencode/storage/session', '.config/opencode/sessions', '.config/opencode/storage'],
+  hermes: ['.hermes/sessions', '.hermes/conversations', '.hermes/history'],
+  openclaw: ['.openclaw/sessions', '.openclaw/conversations', '.openclaw/history'],
+  pi: ['.pi/agent/sessions', '.pi/agent/conversations', '.pi/agent/history'],
+};
+function extraSources(source) {
+  return walkSessionFiles(sourceRoots(source), 5).filter((file) => isExtraCandidate(source, file));
+}
+
+// VS Code 工作区中的 workspace/storage/config JSON 不是对话；WorkBuddy 的普通日志
+// 也不是会话，只允许明确的 conversations 目录进入采集候选。
+function isExtraCandidate(source, file) {
+  const lower = String(file || '').toLowerCase().replace(/\\/g, '/');
+  const base = path.basename(lower);
+  if (/^(workspace|storage|settings|config|state|state\.vscdb(?:\.options)?|package-lock)\.json$/.test(base)) return false;
+  if (source === 'workbuddy') return /\/conversations\//.test(lower);
+  if (source === 'deepseek-harness') return /\/sessions\//.test(lower) || /\/conversations\//.test(lower);
+  if (source === 'codebuddy' && /\/plans\//.test(lower)) return false;
+  return true;
+}
+
+function sourceRoots(source) {
+  const home = os.homedir();
+  const roots = (EXTRA_SOURCE_DIRS[source] || []).map((r) => path.join(home, r));
+  const app = process.env.APPDATA || '';
+  const local = process.env.LOCALAPPDATA || '';
+  const appRoots = {
+    cursor: ['Cursor/User/workspaceStorage', 'Cursor/User/globalStorage'],
+    trae: ['Trae/User/workspaceStorage', 'Trae CN/User/workspaceStorage'],
+    codebuddy: ['CodeBuddy/User/workspaceStorage', 'CodeBuddy/User/globalStorage', 'CodeBuddy CN/User/workspaceStorage'],
+    workbuddy: ['WorkBuddy/User/workspaceStorage', 'WorkBuddy AI/User/workspaceStorage'],
+    opencode: ['opencode/storage'],
+  };
+  for (const rel of (appRoots[source] || [])) {
+    if (app) roots.push(path.join(app, rel));
+    if (local) roots.push(path.join(local, rel));
+  }
+  return roots;
+}
+
+function textOfContent(content) {
+  if (typeof content === 'string') return content.trim();
+  if (Array.isArray(content)) return content.filter((x) => x && (x.type === 'text' || x.type === 'input_text' || x.type === 'output_text') && x.text)
+    .map((x) => x.text).join('\n').trim();
+  if (content && typeof content === 'object') return textOfContent(content.text || content.content || content.parts || '');
+  return '';
+}
+
+function parseCodexLine(line) {
+  let j; try { j = JSON.parse(line); } catch (_) { return []; }
+  if (!j || typeof j !== 'object') return [];
+  const p = j.payload && typeof j.payload === 'object' ? j.payload : j;
+  const item = p.type === 'message' ? p : (j.type === 'message' ? j : null);
+  const msg = item && item.message && typeof item.message === 'object' ? item.message : item;
+  const role = msg && (msg.role === 'assistant' || msg.role === 'user') ? msg.role : null;
+  const text = textOfContent(msg && (msg.content != null ? msg.content : msg.text));
+  if (!role || !text || text.startsWith('<system-reminder>') || text.startsWith('<task-notification>')) return [];
+  return [{ role, content: text }];
+}
+
+function parseGenericLine(line) {
+  let j;
+  try { j = JSON.parse(line); } catch (_) {
+    const i = String(line || '').indexOf('{');
+    if (i < 0) return [];
+    try { j = JSON.parse(String(line).slice(i)); } catch (_) { return []; }
+  }
+  if (!j || typeof j !== 'object') return [];
+  const batch = Array.isArray(j) ? j : (Array.isArray(j.messages) ? j.messages : (Array.isArray(j.items) ? j.items : null));
+  if (batch) {
+    const out = [];
+    for (const item of batch) out.push(...parseGenericLine(item));
+    return out;
+  }
+  const m = j.message && typeof j.message === 'object' ? j.message : j;
+  const role = m.role === 'assistant' || m.role === 'user' ? m.role : null;
+  const text = textOfContent(m.content != null ? m.content : (m.text != null ? m.text : m.parts));
+  if (!role || !text || text.startsWith('<system-reminder>') || text.startsWith('<task-notification>')) return [];
+  return [{ role, content: text }];
+}
+
+// WorkBuddy SDK 日志行格式：时间戳 + method:requests:result + JSON。
+// 真实消息在 state[].userContent / assistantContent，daemon、sandbox 等日志没有 state。
+function parseWorkBuddyLine(line) {
+  if (typeof line !== 'string') return [];
+  const i = line.indexOf('{');
+  if (i < 0) return [];
+  let j; try { j = JSON.parse(line.slice(i)); } catch (_) { return []; }
+  if (!j || !Array.isArray(j.state)) return [];
+  const out = [];
+  const text = (items) => Array.isArray(items)
+    ? items.filter((x) => x && x.text && (!x.type || x.type === 'text' || x.type === 'input_text' || x.type === 'output_text'))
+      .map((x) => String(x.text)).join('\n').trim() : '';
+  for (const state of j.state) {
+    const user = text(state && state.userContent);
+    const assistant = text(state && state.assistantContent);
+    if (user) out.push({ role: 'user', content: user });
+    if (assistant) out.push({ role: 'assistant', content: assistant });
+  }
+  return out;
+}
+
+function parseDeepSeekLine(line) {
+  let j; try { j = JSON.parse(line); } catch (_) { return []; }
+  const turns = j && j.record && j.record.rows && j.record.rows.turnOutline && j.record.rows.turnOutline.val && j.record.rows.turnOutline.val.turns;
+  if (!Array.isArray(turns)) return parseGenericLine(line);
+  const out = [];
+  for (const turn of turns) {
+    if (turn && turn.prompt) out.push({ role: 'user', content: String(turn.prompt) });
+    if (turn && turn.response) out.push({ role: 'assistant', content: String(turn.response) });
+  }
+  return out;
+}
+
+function parseSnapshotFile(file, parse) {
+  let raw; try { raw = fs.readFileSync(file, 'utf8'); } catch (_) { return []; }
+  let j; try { j = JSON.parse(raw); } catch (_) { return []; }
+  const rows = Array.isArray(j) ? j : [j];
+  const out = [];
+  for (const row of rows) {
+    try { const msgs = parse(JSON.stringify(row)); if (msgs && msgs.length) out.push(...msgs); } catch (_) { }
+  }
+  return out;
+}
+
+// 清单统计使用的统一读取入口：只返回解析出的真实 user/assistant 消息。
+// 大日志只取首尾，避免打开清单弹窗时把整个 daemon 日志读进内存。
+function readFileMessages(file, parse) {
+  const ext = path.extname(file).toLowerCase();
+  if (ext === '.json') return parseSnapshotFile(file, parse);
+  let raw;
+  try {
+    const size = fs.statSync(file).size;
+    if (size <= 8 * 1024 * 1024) raw = fs.readFileSync(file, 'utf8');
+    else {
+      const fd = fs.openSync(file, 'r');
+      try {
+        const headLen = 2 * 1024 * 1024;
+        const tailLen = 6 * 1024 * 1024;
+        const head = Buffer.alloc(headLen);
+        const tail = Buffer.alloc(tailLen);
+        const hn = fs.readSync(fd, head, 0, headLen, 0);
+        const tn = fs.readSync(fd, tail, 0, tailLen, Math.max(0, size - tailLen));
+        raw = head.subarray(0, hn).toString('utf8') + '\n' + tail.subarray(0, tn).toString('utf8');
+      } finally { try { fs.closeSync(fd); } catch (_) { } }
+    }
+  } catch (_) { return []; }
+  const out = [];
+  for (const line of raw.split('\n')) {
+    try {
+      const msgs = parse === parseRolloutLine ? parse(line, { markSeen: false }) : parse(line);
+      if (msgs && msgs.length) out.push(...msgs);
+    } catch (_) { }
+  }
+  return out;
+}
+
 // ZCode 新版会话：~/.zcode/cli/rollout/model-io-<sess>.jsonl（每行一次模型调用；request.messages 只带历史尾巴，
 // 必须按内容哈希去重，否则同一轮对话会随每次调用重复上传）
 // 去重集合必须有上限：常驻守护进程里 Set 只增不减 → 长时间运行必然内存泄漏。
@@ -323,7 +519,8 @@ function rolloutText(content) {
   }
   return '';
 }
-function parseRolloutLine(line) {
+function parseRolloutLine(line, options) {
+  const markSeen = !options || options.markSeen !== false;
   let j; try { j = JSON.parse(line); } catch (_) { return []; }
   if (j.type !== 'model_io') return [];
   const out = [];
@@ -333,11 +530,11 @@ function parseRolloutLine(line) {
     if (!msgs[i] || msgs[i].role !== 'user') continue;
     const text = rolloutText(msgs[i].content);
     if (!text || text.startsWith('<system-reminder>') || text.startsWith('<task-notification>')) break;
-    if (rolloutSeenAdd(rolloutHash(text))) out.push({ role: 'user', content: text });
+    if (!markSeen || rolloutSeenAdd(rolloutHash(text))) out.push({ role: 'user', content: text });
     break;
   }
   const reply = j.response && typeof j.response.text === 'string' ? j.response.text.trim() : '';
-  if (reply && rolloutSeenAdd(rolloutHash(reply))) out.push({ role: 'assistant', content: reply });
+  if (reply && (!markSeen || rolloutSeenAdd(rolloutHash(reply)))) out.push({ role: 'assistant', content: reply });
   return out;
 }
 
@@ -481,6 +678,16 @@ const SOURCES = {
   'zcode': { list: zcodeSources, parse: parseZCodeLine },
   'zcode-rollout': { list: rolloutSources, parse: parseRolloutLine },
   'claude-code': { list: claudeSources, parse: parseClaudeLine },
+  codex: { list: codexSources, parse: parseCodexLine },
+  cursor: { list: () => extraSources('cursor'), parse: parseGenericLine },
+  trae: { list: () => extraSources('trae'), parse: parseGenericLine },
+  'deepseek-harness': { list: () => extraSources('deepseek-harness'), parse: parseDeepSeekLine },
+  codebuddy: { list: () => extraSources('codebuddy'), parse: parseGenericLine },
+  workbuddy: { list: () => extraSources('workbuddy'), parse: parseWorkBuddyLine },
+  opencode: { list: () => extraSources('opencode'), parse: parseGenericLine },
+  hermes: { list: () => extraSources('hermes'), parse: parseGenericLine },
+  openclaw: { list: () => extraSources('openclaw'), parse: parseGenericLine },
+  pi: { list: () => extraSources('pi'), parse: parseGenericLine },
   // 虚拟来源：不走"读文件行"通路，由 scanAndUpload / runBackfill 特判处理
   'zcode-db': { list: zcodeDbSources, parse: null, virtual: true },
 };
@@ -671,6 +878,28 @@ async function scanAndUpload(cfg, api, state) {
 
     for (const file of files) {
       const cur = cursors[file];
+      // JSON 快照类客户端会整体重写文件，不能按字节 offset 读取；以内容签名做水位。
+      if (/\.json$/i.test(file)) {
+        let raw; try { raw = fs.readFileSync(file, 'utf8'); } catch (_) { continue; }
+        const sig = rolloutHash(raw);
+        if (!cur) { cursors[file] = { hash: sig, source, seeded: true }; continue; }
+        if (cur.hash === sig) continue;
+        const msgs = parseSnapshotFile(file, def.parse);
+        cursors[file] = { hash: sig, source, seeded: true };
+        if (!msgs.length) continue;
+        const session = path.basename(file).replace(/\.(jsonl|json|log)$/i, '') + '-' + path.basename(path.dirname(file));
+        const payload = {
+          team_id: cfg.teamId,
+          agent_id: cfg.agentId,
+          session_id: `${source}-${session}`.slice(0, 120),
+          messages: sliceMessages(msgs.map((m) => ({ ...m, ts: new Date().toISOString() }))),
+          _source: source,
+        };
+        const r = await uploadBatch(cfg, api, payload, state);
+        if (r === true) { pushed++; state.lastPush = new Date().toISOString(); saveStatus({ lastPush: state.lastPush }); }
+        else if (r === false) enqueue(cfg, payload);
+        continue;
+      }
       let size;
       try { size = fs.statSync(file).size; } catch (_) { continue; }
 
@@ -687,7 +916,7 @@ async function scanAndUpload(cfg, api, state) {
       cursors[file] = { size: consumed != null ? consumed : cur.size, source, seeded: true };
       if (!msgs.length) continue;
 
-      const session = path.basename(file).replace(/\.jsonl$/, '') + '-' + path.basename(path.dirname(file));
+      const session = path.basename(file).replace(/\.(jsonl|json|log)$/i, '') + '-' + path.basename(path.dirname(file));
       const payload = {
         team_id: cfg.teamId,
         agent_id: cfg.agentId,
@@ -754,6 +983,10 @@ function agentInventory(cfg) {
     let files = [];
     try { files = def.list(); } catch (_) { continue; }
     for (const f of files) {
+      // 发现文件不等于发现会话：配置、缓存和普通日志必须先通过解析门槛。
+      let msgs = [];
+      try { msgs = readFileMessages(f, def.parse); } catch (_) { msgs = []; }
+      if (!msgs.length) continue;
       const dir = path.dirname(f);
       const key = src + ':' + dir;
       const g = groups.get(key) || {
@@ -762,10 +995,8 @@ function agentInventory(cfg) {
       };
       g.items++;
       let st = null; try { st = fs.statSync(f); } catch (_) { }
-      if (st) {
-        g.msgs += Math.max(1, Math.round(st.size / 3072));
-        g.lastTs = Math.max(g.lastTs, st.mtimeMs);
-      }
+      g.msgs += msgs.length;
+      if (st) g.lastTs = Math.max(g.lastTs, st.mtimeMs);
       if (backfilled[f]) g.backfilledItems++;
       if (cursors[f]) g.cursorItems++;
       groups.set(key, g);
@@ -939,26 +1170,26 @@ function agentStatus() {
   //    改一边必须改另一边 —— `test/clients-consistency.test.js` ⑨ 会拦漂移。
   //    路径分段用 CLIENT_PATHS 的同一种写法（'x/y/z' 正斜杠），方便逐字比对。
   const CLIENTS_MIN = [
-    { name: 'ZCode CLI', kind: 'json-nested', probe: path.join(home, '.zcode'), file: path.join(home, '.zcode', 'cli', 'config.json'), pointer: '/mcp/servers/tdai', hookFile: path.join(home, '.zcode', 'cli', 'config.json') },
-    { name: 'Claude Code', kind: 'json', probe: path.join(home, '.claude.json'), file: path.join(home, '.claude.json'), pointer: '/mcpServers/tdai', hookFile: path.join(home, '.claude', 'settings.json') },
-    { name: 'Cursor', kind: 'json', probe: path.join(home, '.cursor'), file: path.join(home, '.cursor', 'mcp.json'), pointer: '/mcpServers/tdai' },
-    { name: 'Codex', kind: 'toml', probe: path.join(home, '.codex', 'config.toml'), file: path.join(home, '.codex', 'config.toml'), tomlSection: 'mcp_servers.tdai' },
-    { name: 'Trae', kind: 'json', probe: path.join(home, '.trae'), file: path.join(home, '.trae', 'mcp.json'), pointer: '/mcpServers/tdai' },
-    { name: 'DeepSeek Harness', kind: 'dsh-patch', probe: path.join(home, '.dsh'), file: path.join(home, '.dsh', 'profiles'), patchMark: 'dsh-mcp-client' },
-    { name: 'CodeBuddy', kind: 'json', probe: path.join(home, '.codebuddy'), file: path.join(home, '.codebuddy', '.mcp.json'), pointer: '/mcpServers/tdai' },
-    { name: 'WorkBuddy', kind: 'json', probe: path.join(home, '.workbuddy-ai'), file: path.join(home, '.workbuddy-ai', 'mcp.json'), pointer: '/mcpServers/tdai' },
-    { name: 'OpenCode', kind: 'opencode', probe: path.join(home, '.config', 'opencode'), file: path.join(home, '.config', 'opencode', 'opencode.json'), pointer: '/mcp/tdai' },
-    { name: 'Hermes', kind: 'yaml', probe: path.join(home, '.hermes'), file: path.join(home, '.hermes', 'config.yaml'), yamlTop: 'mcp_servers', yamlLeaf: 'tdai' },
-    { name: 'OpenClaw', kind: 'json-nested', probe: path.join(home, '.openclaw'), file: path.join(home, '.openclaw', 'openclaw.json'), pointer: '/mcp/servers/tdai' },
-    { name: 'Pi', kind: 'json', probe: path.join(home, '.pi'), file: path.join(home, '.pi', 'agent', 'mcp.json'), pointer: '/mcpServers/tdai' },
+    { key: 'zcode', name: 'ZCode CLI', source: 'zcode', injection: { kinds: ['mcp', 'hook', 'instructions'], label: 'MCP + 提问前 hook + 全局指令', requiresRestart: true, recall: true, capture: true }, kind: 'json-nested', probe: path.join(home, '.zcode'), file: path.join(home, '.zcode', 'cli', 'config.json'), pointer: '/mcp/servers/tdai', hookFile: path.join(home, '.zcode', 'cli', 'config.json') },
+    { key: 'claude-code', name: 'Claude Code', source: 'claude-code', injection: { kinds: ['mcp', 'hook', 'instructions'], label: 'MCP + UserPromptSubmit hook + 全局指令', requiresRestart: true, recall: true, capture: true }, kind: 'json', probe: path.join(home, '.claude.json'), file: path.join(home, '.claude.json'), pointer: '/mcpServers/tdai', hookFile: path.join(home, '.claude', 'settings.json') },
+    { key: 'cursor', name: 'Cursor', source: 'cursor', injection: { kinds: ['mcp'], label: 'MCP 配置', requiresRestart: true, recall: true, capture: true }, kind: 'json', probe: path.join(home, '.cursor'), file: path.join(home, '.cursor', 'mcp.json'), pointer: '/mcpServers/tdai' },
+    { key: 'codex', name: 'Codex', source: 'codex', injection: { kinds: ['mcp'], label: 'TOML MCP 服务器', requiresRestart: true, recall: true, capture: true }, kind: 'toml', probe: path.join(home, '.codex', 'config.toml'), file: path.join(home, '.codex', 'config.toml'), tomlSection: 'mcp_servers.tdai' },
+    { key: 'trae', name: 'Trae', source: 'trae', injection: { kinds: ['mcp'], label: 'MCP 配置', requiresRestart: true, recall: true, capture: true }, kind: 'json', probe: path.join(home, '.trae'), file: path.join(home, '.trae', 'mcp.json'), pointer: '/mcpServers/tdai' },
+    { key: 'deepseek-harness', name: 'DeepSeek Harness', source: 'deepseek-harness', injection: { kinds: ['mcp-patch'], label: 'Cordis patch MCP 注入', requiresRestart: true, recall: true, capture: true }, kind: 'dsh-patch', probe: path.join(home, '.dsh'), file: path.join(home, '.dsh', 'profiles'), patchMark: 'dsh-mcp-client' },
+    { key: 'codebuddy', name: 'CodeBuddy', source: 'codebuddy', injection: { kinds: ['mcp'], label: 'MCP 配置', requiresRestart: true, recall: true, capture: true }, kind: 'json', probe: path.join(home, '.codebuddy'), file: path.join(home, '.codebuddy', '.mcp.json'), pointer: '/mcpServers/tdai' },
+    { key: 'workbuddy', name: 'WorkBuddy', source: 'workbuddy', injection: { kinds: ['mcp'], label: 'MCP 配置', requiresRestart: true, recall: true, capture: true }, kind: 'json', probe: path.join(home, '.workbuddy-ai'), file: path.join(home, '.workbuddy-ai', 'mcp.json'), pointer: '/mcpServers/tdai' },
+    { key: 'opencode', name: 'OpenCode', source: 'opencode', injection: { kinds: ['mcp'], label: 'OpenCode local MCP 命令', requiresRestart: true, recall: true, capture: true }, kind: 'opencode', probe: path.join(home, '.config', 'opencode'), file: path.join(home, '.config', 'opencode', 'opencode.json'), pointer: '/mcp/tdai' },
+    { key: 'hermes', name: 'Hermes', source: 'hermes', injection: { kinds: ['mcp-yaml'], label: 'YAML MCP 服务器', requiresRestart: true, recall: true, capture: true }, kind: 'yaml', probe: path.join(home, '.hermes'), file: path.join(home, '.hermes', 'config.yaml'), yamlTop: 'mcp_servers', yamlLeaf: 'tdai' },
+    { key: 'openclaw', name: 'OpenClaw', source: 'openclaw', injection: { kinds: ['mcp'], label: '嵌套 MCP 配置', requiresRestart: true, recall: true, capture: true }, kind: 'json-nested', probe: path.join(home, '.openclaw'), file: path.join(home, '.openclaw', 'openclaw.json'), pointer: '/mcp/servers/tdai' },
+    { key: 'pi', name: 'Pi', source: 'pi', injection: { kinds: ['mcp'], label: 'MCP 配置', requiresRestart: true, recall: true, capture: true }, kind: 'json', probe: path.join(home, '.pi'), file: path.join(home, '.pi', 'agent', 'mcp.json'), pointer: '/mcpServers/tdai' },
   ];
 
   const items = [];
   for (const cl of CLIENTS_MIN) {
     // 客户端目录/文件不存在 → absent（未装该客户端），与桌面端口径一致
-    if (!fs.existsSync(cl.probe)) { items.push({ name: cl.name, status: 'absent' }); continue; }
+    if (!fs.existsSync(cl.probe)) { items.push({ key: cl.key, name: cl.name, source: cl.source, status: 'absent', injection: cl.injection, config: { kind: cl.kind, file: cl.file, pointer: cl.pointer || cl.tomlSection || (cl.yamlTop && `${cl.yamlTop}.${cl.yamlLeaf || 'tdai'}`) || (cl.kind === 'dsh-patch' ? 'profiles/*/cordis.patch.yml :: insert' : '') }, effective: false }); continue; }
     const st = mcpInstalled(cl.kind, cl.file, cl);
-    const rec = { name: cl.name, status: st };
+    const rec = { key: cl.key, name: cl.name, source: cl.source, status: st, injection: cl.injection, config: { kind: cl.kind, file: cl.file, pointer: cl.pointer || cl.tomlSection || (cl.yamlTop && `${cl.yamlTop}.${cl.yamlLeaf || 'tdai'}`) || (cl.kind === 'dsh-patch' ? 'profiles/*/cordis.patch.yml :: insert' : '') }, checks: { mcp: st === 'installed', byApp: null, hook: null, instructions: null }, effective: st === 'installed' };
     // hook 状态只对有 hook 的客户端显示（ZCode CLI / Claude Code）
     // 注：「旧写法」= 直接 `node daemon.js hook`，对**源码/CLI 用户**其实是正确的形态
     // （他们的 register-all.cjs 就是这么写的）；提示"建议切换"是给 exe 用户看的
@@ -967,6 +1198,8 @@ function agentStatus() {
     if (cl.hookFile) {
       const hs = hookStateOf(cl.hookFile);
       if (hs.present) rec.detail = hs.legacy ? 'hook 已注入（脚本写法，exe 用户建议关→开切换）' : 'hook 已注入';
+      rec.checks.hook = hs.present;
+      if (!hs.present) rec.effective = false;
     }
     items.push(rec);
   }
@@ -974,7 +1207,15 @@ function agentStatus() {
   // 指令文件（档 B 兜底）：与 register.js 的 INSTR_TARGETS 同源（.zcode/AGENTS.md + .claude/CLAUDE.md）
   const inst1 = readText(path.join(home, '.zcode', 'AGENTS.md'));
   const inst2 = readText(path.join(home, '.claude', 'CLAUDE.md'));
-  items.push({ name: '全局指令文件', status: (inst1 && inst1.includes('tdai-memory:begin')) || (inst2 && inst2.includes('tdai-memory:begin')) ? 'installed' : 'missing' });
+  const instrReady = (inst1 && inst1.includes('tdai-memory:begin')) || (inst2 && inst2.includes('tdai-memory:begin'));
+  items.push({ key: 'instructions', name: '全局指令文件', source: 'instructions', status: instrReady ? 'installed' : 'missing', injection: { kinds: ['instructions'], label: '全局指令文件（兜底）', requiresRestart: false, recall: true, capture: false }, config: { kind: 'markdown', file: path.join(home, '.zcode', 'AGENTS.md') + '、' + path.join(home, '.claude', 'CLAUDE.md'), pointer: 'tdai-memory:begin' }, checks: { mcp: false, byApp: true, hook: null, instructions: instrReady }, effective: instrReady });
+  for (const item of items) {
+    if (item.key !== 'instructions' && item.injection && item.injection.kinds.includes('instructions')) {
+      const target = item.key === 'zcode' ? path.join(home, '.zcode', 'AGENTS.md') : path.join(home, '.claude', 'CLAUDE.md');
+      item.checks.instructions = !!(readText(target) || '').includes('tdai-memory:begin');
+      if (!item.checks.instructions) item.effective = false;
+    }
+  }
 
   return items;
 }
@@ -1408,6 +1649,29 @@ async function runBackfill(cfg, api, state, { source = '', filter = '', targets 
         if (targetList.length && !targetsMatchDir(targetList, src, path.dirname(file))) { bfJob.filesDone++; continue; }
         if (backfilled[file]) { bfJob.filesDone++; continue; } // 已回传过：跳过
         bfJob.current = path.basename(file);
+        if (/\.json$/i.test(file)) {
+          const msgs = parseSnapshotFile(file, def.parse);
+          const session = path.basename(file).replace(/\.(jsonl|json|log)$/i, '') + '-' + path.basename(path.dirname(file));
+          for (let i = 0; i < msgs.length; i += 50) {
+            const payload = {
+              team_id: cfg.teamId,
+              agent_id: cfg.agentId,
+              session_id: `backfill-${src}-${session}`.slice(0, 120),
+              messages: sliceMessages(msgs.slice(i, i + 50).map((m) => ({ ...m, ts: new Date().toISOString() }))),
+              _source: src,
+            };
+            const r = await uploadBatch(cfg, api, payload, state);
+            if (r === 'skip') { bfJob.error = `${path.basename(file)} 上传被拒绝（4xx），放弃该文件`; break; }
+            bfJob.msgs += payload.messages.length;
+          }
+          if (!bfJob.error) {
+            backfilled[file] = { msgs: msgs.length, at: new Date().toISOString() };
+            saveBackfilled(backfilled);
+            bfJob.filesDone++;
+          }
+          log(`backfill: ${path.basename(file)} → ${msgs.length} msgs`);
+          continue;
+        }
         let text = '';
         try { text = fs.readFileSync(file, 'utf8'); } catch (_) { continue; }
         const msgs = [];
@@ -1416,7 +1680,7 @@ async function runBackfill(cfg, api, state, { source = '', filter = '', targets 
           try { msgs.push(...def.parse(line)); } catch (_) { }
         }
         if (msgs.length) {
-          const session = path.basename(file).replace(/\.jsonl$/, '') + '-' + path.basename(path.dirname(file));
+          const session = path.basename(file).replace(/\.(jsonl|json|log)$/i, '') + '-' + path.basename(path.dirname(file));
           for (let i = 0; i < msgs.length; i += 50) {
             const payload = {
               team_id: cfg.teamId,
@@ -1515,7 +1779,8 @@ module.exports = {
   scanAndUpload, flushQueue, enqueue, buildRecall, hasIntent, uploadBatch,
   runBackfill, startBackfill, backfillStatus, ensureUserId,
   agentStatus, updateCheck, consolePage, readPublicConfig, writeConfig,
-  parseZCodeLine, parseClaudeLine, parseRolloutLine, sliceMessages, readNewLines,
+  parseZCodeLine, parseClaudeLine, parseRolloutLine, parseCodexLine, parseGenericLine,
+  parseSnapshotFile, parseDeepSeekLine, parseWorkBuddyLine, codexSources, extraSources, sourceRoots, sliceMessages, readNewLines,
   zcodeDbSources, zdbSessionMessages, zdbMsgCount, zdbAvailable, zdbStatus,
   agentInventory, targetsMatchDir,
   SOURCES, ZDB_CURSOR_PREFIX, ZCODE_DB, ZDB_MIN_NODE,

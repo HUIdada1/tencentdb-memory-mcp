@@ -134,6 +134,10 @@ node daemon/tdai-daemon.js push   # 手动触发一轮采集上传
 |---|---|
 | ZCode CLI | `~/.zcode/cli/agents/<sess>/<agent>/transcript.jsonl` |
 | Claude Code | `~/.claude/projects/<proj>/<sid>.jsonl` |
+| Codex | `~/.codex/sessions/**/rollout-*.jsonl` 与 `~/.codex/archived_sessions/*.jsonl` |
+| DeepSeek Harness | `~/.dsh/storages/session_projcache/sessions/*.json` |
+| WorkBuddy | `~/.workbuddy-ai/logs/<日期>/sdk/conversations/*.log`（只解析 `method:requests:result`） |
+| Cursor / Trae / CodeBuddy 等 | 各自 `sessions/`、`conversations/`、`history/` 下的 JSON/JSONL；配置、缓存和 VS Code `state.vscdb` 不作为会话 |
 
 - **字节偏移增量游标**（持久化 `~/.zcode/tdai-daemon/cursors.json`），首见按当前大小做种子，**不回传历史**
 - 只上传完整轮次；单条消息切片 ≤8192 字符（面板硬限制）
